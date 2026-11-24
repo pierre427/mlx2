@@ -205,6 +205,10 @@ def decline_reason(attn, x, key_input, value_input, cache, conv_mask):
         return "kv_q8"
     if type(kv).__name__ not in _CACHES or type(kv) not in attn._SPLITK_CACHES:
         return "cache_type"
+    if getattr(kv, "deferred_rows", 0):
+        # A ring with uncommitted deferred rows (inkling2_verify_deferred_commit)
+        # is read through the attention's deferred view, never in place.
+        return "deferred_pending"
     held = getattr(kv, "keys", None)
     if isinstance(held, mx.array) and held.dtype == mx.int8:
         return "cache_format"

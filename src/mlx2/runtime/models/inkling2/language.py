@@ -762,7 +762,33 @@ class Attention(nn.Module):
         if isinstance(held, mx.array) and held.dtype == mx.int8:
             raise ValueError(
                 "Inkling 2 attention got an int8 (kv_q8) plane with inkling2_kv_q8 off")
+        view = self._deferred_update(kv, k, v)
+        if view is not None:
+            return view
         return self._chronological(kv, kv.update_and_fetch(k, v))
+
+    def _deferred_update(self, kv, k, v):
+        """``inkling2_verify_deferred_commit``: a speculating ring visit
+        writes nothing; the chronological K/V the rollback path's
+        concatenation would hold (same values, same order) comes back and the
+        new rows stay pending until the commit (``RotatingKVCache.trim``)
+        writes the kept ones in place. None: the ordinary update applies
+        (switch off, not speculating, not a ring, or a counted decline)."""
+        if type(kv) is not RotatingKVCache:
+            return None
+        if kv.deferred_rows:
+            # This epoch is already deferred on this ring: stay on it (the
+            # cache refuses, rather than mixes, anything it cannot take).
+            return kv.update_and_fetch(k, v, deferred=True)
+        if not (self.__dict__.get("_deferred_commit") and kv.speculating):
+            return None
+        reason = kv.deferred_commit_reason(k, v)
+        counts = self.__dict__.setdefault("deferred_commit_counts", {})
+        key = "calls" if reason is None else "declined:" + reason
+        counts[key] = counts.get(key, 0) + 1
+        if reason is not None:
+            return None
+        return kv.update_and_fetch(k, v, deferred=True)
 
     @staticmethod
     def _chronological(kv, fetched):
@@ -846,6 +872,9 @@ class Attention(nn.Module):
         )
         q, k, v = (a.transpose(0, 2, 1, 3) for a in (q, k, v))
         ring, ring_start, ring_phys = None, 0, None
+        # Deferred-commit visits read this chronological view where the
+        # other paths read the ring's own buffers (``_deferred_update``).
+        dview = None
         # inkling2_kv_q8 (global visits only; the attribute is never set on
         # sliding ones): K/V are stored as packed int8 rows. Ring paths below
         # only apply to sliding (rotating) caches.
@@ -865,18 +894,29 @@ class Attention(nn.Module):
         ):
             # The chronological read and the zero sink row become one
             # concatenation below (the reference makes two full copies).
-            kv.update_and_fetch(k, v)
-            ring, width = kv, kv.keys.shape[2]
-            size = width if (kv._idx == width or kv._idx < kv.offset) else kv._idx
+            dview = self._deferred_update(kv, k, v)
+            if dview is None:
+                kv.update_and_fetch(k, v)
+                width = kv.keys.shape[2]
+                size = width if (kv._idx == width or kv._idx < kv.offset) else kv._idx
+            else:
+                size = dview[0].shape[2]
+            ring = kv
             k = v = None
         elif kv is not None and self._ring_direct(kv, length):
-            kv.update_and_fetch(k, v)
-            ring_phys = self._ring_layout(kv)
-            if ring_phys is None:
-                _count_ring(self, "unmapped")
-                k, v = self._chronological(kv, None)
-            else:
+            dview = self._deferred_update(kv, k, v)
+            if dview is not None:
+                # The view is chronological: physical row j is key j.
+                ring_phys = (0, dview[0].shape[2])
                 k = v = None
+            else:
+                kv.update_and_fetch(k, v)
+                ring_phys = self._ring_layout(kv)
+                if ring_phys is None:
+                    _count_ring(self, "unmapped")
+                    k, v = self._chronological(kv, None)
+                else:
+                    k = v = None
         elif kv is not None:
             k, v = self._fetch(kv, k, v)
         if ring is None:
@@ -931,7 +971,7 @@ class Attention(nn.Module):
             return self._finish(out, gate, b, length, x.dtype)
         if self.__dict__.get("_verify_splitk"):
             if ring_phys is not None:
-                reason = self._splitk_decline(kv, q, kv.keys, kv.values)
+                reason = self._splitk_decline(kv, q, *(dview or (kv.keys, kv.values)))
             else:
                 reason = self._splitk_decline(kv, q, k, v)
             counts = self.__dict__.setdefault("verify_splitk_counts", {})
@@ -944,7 +984,7 @@ class Attention(nn.Module):
                     # start (after the window crop): the kernel walks the
                     # same logical keys as on the reordered copy.
                     _count_ring(self, "calls")
-                    k, v = kv.keys, kv.values
+                    k, v = dview or (kv.keys, kv.values)
                     ring_arg = ((ring_phys[0] + ring_start) % k.shape[2], size)
                 # Reads the fetched K/V in place: no sink column, no mask.
                 out = splitk.gqa_splitk_attention(
@@ -955,7 +995,7 @@ class Attention(nn.Module):
         if ring_phys is not None:
             # The kernel declined: the chronological copy the reference reads.
             _count_ring(self, "copies")
-            k, v = self._chronological(kv, None)
+            k, v = dview or self._chronological(kv, None)
             if ring_start:
                 k, v = k[:, :, ring_start:], v[:, :, ring_start:]
             ring_phys = None
@@ -1018,7 +1058,12 @@ class Attention(nn.Module):
         sinks = sink.transpose(0, 2, 1)[..., None]
         slot = (self._sink_slot(kv, b, size)
                 if ring is None and not q8 and self.__dict__.get("_sink_slot_on") else None)
-        if ring is not None:
+        if ring is not None and dview is not None:
+            # ``ring_with_sink`` of the deferred view (already chronological).
+            _fuse.count(self, "ring_sink_concat")
+            zero = _fuse.zeros(self, (b, self.n_kv, 1, self.head_dim), dview[0].dtype)
+            k, v = (mx.concatenate([x[..., ring_start:, :], zero], axis=2) for x in dview)
+        elif ring is not None:
             _fuse.count(self, "ring_sink_concat")
             zero = _fuse.zeros(self, (b, self.n_kv, 1, self.head_dim), ring.keys.dtype)
             k, v = _fuse.ring_with_sink(ring, ring_start, zero)
@@ -1082,6 +1127,33 @@ class Attention(nn.Module):
             return self.o_proj(_fuse.gate_finish(out, gate, _fuse.dtype_ref(dtype)))
         out = (out.astype(mx.float32) * mx.sigmoid(gate.astype(mx.float32))).astype(dtype)
         return self.o_proj(out)
+
+
+def visit_length_check(model, cache):
+    """``inkling2_visit_length_check``: every visit's KV plane must hold the
+    same committed length before a forward reads them (an APCv2 restore that
+    landed visits at different positions fails closed here; MTPLX #710,
+    ``models/inkling/fast/state.py`` ``DecodeState._length``, Apache-2.0).
+
+    Only host-integer B1 planes (``KVCache``, ``RotatingKVCache``) are
+    compared; batch planes keep per-row device offsets and are counted as
+    skipped, never read back. Returns the agreed length (None if none was
+    comparable). Changes no output."""
+    counts = model.__dict__.setdefault("visit_length_counts", {})
+    lengths, skipped = set(), 0
+    for plane in cache[0::2]:
+        if type(plane) in (KVCache, RotatingKVCache) and isinstance(plane.offset, int):
+            lengths.add(plane.offset)
+        else:
+            skipped += 1
+    counts["checks"] = counts.get("checks", 0) + 1
+    if skipped:
+        counts["skipped_planes"] = counts.get("skipped_planes", 0) + skipped
+    if len(lengths) > 1:
+        counts["mismatches"] = counts.get("mismatches", 0) + 1
+        raise ValueError(
+            f"Inkling 2 visits disagree on the committed length: {sorted(lengths)}")
+    return next(iter(lengths)) if lengths else None
 
 
 def _count_ring(attn, key):
@@ -1331,9 +1403,36 @@ class MessageController(nn.Module):
         return (1 - forget) * x + gain * message
 
 
-def _record_conv_rollback(conv, records, length, conv_mask, batch):
-    """Inkling v1's exact recurrent rollback record over the four histories."""
+def _record_conv_rollback(conv, records, length, conv_mask, batch, prefix=None):
+    """Inkling v1's exact recurrent rollback record over the four histories.
+
+    ``prefix`` (``inkling2_verify_deferred_commit``, unpadded forwards only;
+    the counter dict of the owning layer): a trim to ``count`` kept rows
+    rebuilds each history as the last rows of ``[state, inputs[:count]]`` by
+    slicing, the bytes the masked gather of ``_next_conv_state`` selects,
+    without its mask, cumsum and gather. (Counters live on the layer: the
+    cache's committed descriptor admits no foreign fields.)"""
     previous = [record[0] for record in records]
+    if prefix is not None and conv_mask is None:
+        counts = prefix
+
+        def restore(count):
+            counts["prefix_restores"] = counts.get("prefix_restores", 0) + 1
+            states = []
+            for old, inputs, _mask in records:
+                state = (
+                    old
+                    if old is not None
+                    else mx.zeros((inputs.shape[0], 3, inputs.shape[-1]), mx.float32)
+                )
+                states.append(mx.contiguous(_next_conv_state(state, inputs[:, :count], None)))
+            return states
+
+        spans = conv.rollback_spans(length, conv_mask)
+        if spans is not None:
+            counts["prefix_records"] = counts.get("prefix_records", 0) + 1
+            conv.record_rollback(length, restore, previous, depths=spans or None)
+        return
 
     def restore_rows(counts):
         states = []
@@ -1475,7 +1574,9 @@ class DecoderLayer(nn.Module):
         if conv is not None:
             if speculating:
                 _record_conv_rollback(
-                    conv, conv.__dict__.pop("_inkling_inputs"), x.shape[1], mask, x.shape[0]
+                    conv, conv.__dict__.pop("_inkling_inputs"), x.shape[1], mask, x.shape[0],
+                    prefix=(self.__dict__.setdefault("deferred_commit_counts", {})
+                            if self.__dict__.get("_deferred_commit") else None),
                 )
             conv.advance(x.shape[1])
         return out
@@ -1555,6 +1656,8 @@ class TextModel(nn.Module):
                 raise ValueError(
                     "Inkling 2 requires flat alternating KV/four-shortconv planes per layer visit"
                 )
+            if self.__dict__.get("_visit_length_check"):
+                visit_length_check(self, cache)
             caches = [CacheList(cache[2 * i], cache[2 * i + 1]) for i in range(visits)]
         blocks = []
         bank = None
@@ -1715,7 +1818,8 @@ class Model(nn.Module):
                           kv_q8=False, moe_decode_kernel=False,
                           prefill_mask_bf16_budget=False, prefill_mask_with_sink=False,
                           head_kernel_wide=False, prefill_tiled_attention=False,
-                          attn_decode_kernel=False):
+                          attn_decode_kernel=False, verify_deferred_commit=False,
+                          visit_length_check=False):
         """Adapter-owned opt-in execution switches (all default off).
 
         ``loop_passes`` None keeps the trained count.  ``moe_weighted_sum``
@@ -1797,6 +1901,10 @@ class Model(nn.Module):
             object.__setattr__(layer.self_attn, "_mask_with_sink", bool(prefill_mask_with_sink))
             object.__setattr__(layer.self_attn, "_prefill_tiled", bool(prefill_tiled_attention))
             object.__setattr__(layer.self_attn, "_attn_decode", bool(attn_decode_kernel))
+            # inkling2_verify_deferred_commit: ring visits (attention) and the
+            # four conv histories (decoder layer) commit only kept rows.
+            object.__setattr__(layer.self_attn, "_deferred_commit", bool(verify_deferred_commit))
+            object.__setattr__(layer, "_deferred_commit", bool(verify_deferred_commit))
             if fused_projections:
                 layer.self_attn.fuse_projections()
             elif getattr(layer.self_attn, "_fused_bounds", None) is not None:
@@ -1815,6 +1923,10 @@ class Model(nn.Module):
             object.__setattr__(layer.mlp, "_compile_decode_blocks", bool(compile_decode_blocks))
             object.__setattr__(layer.mlp, "_moe_decode_kernel", bool(moe_decode_kernel))
         object.__setattr__(self, "_head_softcap_compiled", bool(head_softcap_compiled))
+        object.__setattr__(self.model, "_visit_length_check", bool(visit_length_check))
+        # The verify-transaction owner arms deferred ring commits only for a
+        # target that asks (external_speculative._target_owner).
+        object.__setattr__(self, "supports_deferred_verify_commit", bool(verify_deferred_commit))
         if built:
             # The replaced gate/up buffers would otherwise stay in MLX's
             # buffer cache (about 10 GB on the Mini), too large for reuse.
@@ -1836,7 +1948,9 @@ class Model(nn.Module):
              "prefill_mask_with_sink": bool(prefill_mask_with_sink),
              "head_kernel_wide": bool(head_kernel_wide),
              "prefill_tiled_attention": bool(prefill_tiled_attention),
-             "attn_decode_kernel": bool(attn_decode_kernel)},
+             "attn_decode_kernel": bool(attn_decode_kernel),
+             "verify_deferred_commit": bool(verify_deferred_commit),
+             "visit_length_check": bool(visit_length_check)},
         )
         if head_kernel:
             # The FP32 head copy is only needed by the reference path.
@@ -1916,6 +2030,28 @@ class Model(nn.Module):
         # front end (calls) and the composed-path declines by reason.
         out["attn_decode"] = {"calls": decode.pop("calls", 0),
                               "declines": dict(sorted(decode.items()))}
+        deferred, conv_prefix = {}, {}
+        for layer in self.model.layers:
+            for key, value in layer.self_attn.__dict__.get("deferred_commit_counts", {}).items():
+                deferred[key] = deferred.get(key, 0) + value
+            for key, value in layer.__dict__.get("deferred_commit_counts", {}).items():
+                conv_prefix[key] = conv_prefix.get(key, 0) + value
+        # inkling2_verify_deferred_commit: ring visits that deferred their
+        # rows (calls) or declined by reason; the cache-side commit counters
+        # are process-wide (forwards, rows_kept/rows_dropped, commit_*).
+        from ..cache import deferred_commit_counts
+
+        out["verify_deferred_commit"] = {
+            "selected": bool(getattr(self, "kernel_policy", {}).get("verify_deferred_commit")),
+            "ring_calls": deferred.pop("calls", 0),
+            "ring_declines": {k.split(":", 1)[1]: v for k, v in sorted(deferred.items())},
+            "conv": dict(sorted(conv_prefix.items())),
+            "cache": deferred_commit_counts(),
+        }
+        out["visit_length_check"] = {
+            "selected": bool(getattr(self, "kernel_policy", {}).get("visit_length_check")),
+            **dict(sorted(self.model.__dict__.get("visit_length_counts", {}).items())),
+        }
         act = {}
         for layer in self.model.layers:
             for key, value in layer.mlp.__dict__.get("act_quant_counts", {}).items():

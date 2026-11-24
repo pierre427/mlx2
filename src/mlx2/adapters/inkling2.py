@@ -479,6 +479,25 @@ KERNEL_OPTIONS = {
     # split-K kernel, the cache appends, the ring copy). Not a default unless
     # Pierre decides otherwise.
     "inkling2_attn_decode_kernel": "attn_decode_kernel",
+    # Deferred commit (MTPLX fast/state.py mechanism, 2026-11-23; default
+    # off, unqualified, CPU tests only, GPU pending): while a verify
+    # transaction speculates, the 40 sliding-window ring visits write nothing
+    # (RotatingKVCache ``update_and_fetch(deferred=True)`` returns the
+    # chronological K/V the rollback path's concatenation holds, the same
+    # values in the same order) and the commit writes only the kept rows in
+    # place; rejected rows cost nothing. Replaces the per-forward window
+    # snapshot copy, the concatenation into the cache and the restore +
+    # replay on reject. The four conv histories commit the kept prefix by
+    # slicing instead of the masked gather. Bitwise against the rollback path
+    # (tokens and committed state; tests/test_inkling2_deferred_commit_cpu.py).
+    # Counters: kernel_counters["verify_deferred_commit"].
+    "inkling2_verify_deferred_commit": "verify_deferred_commit",
+    # Visit length check (MTPLX #710, 2026-11-23; default off): before every
+    # forward, every visit's B1 KV plane must hold the same committed length,
+    # so an APCv2 restore that landed visits at different positions fails
+    # closed instead of decoding from mixed state. Host integers only; no
+    # output change. Counters: kernel_counters["visit_length_check"].
+    "inkling2_visit_length_check": "visit_length_check",
 }
 # Defaults for KERNEL_OPTIONS keys a policy leaves unset (everything else is
 # False). None for the NAX gather means "auto", resolved at load.

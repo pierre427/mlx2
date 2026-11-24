@@ -1481,3 +1481,38 @@ and native MTP. The mlx2 code is an independent MLX implementation; it does
 not copy the reference's eager kernels and imports no reference code at
 runtime. See provenance/maxwell-moe.NOTICE. The full Apache-2.0 text is this
 repository's LICENSE.
+
+------------------------------------------------------------------------------
+MTPLX by Youssof Altoukhi (https://github.com/youssofal/mtplx, revision
+3890be556160af48887d5bfbf5304c4ad5b9417f) — Apache License 2.0, Copyright
+2026 Youssof Altoukhi.
+
+The following Inkling 2 decode, verify and prefill mechanisms follow ideas
+from MTPLX. All are original mlx2 code; no MTPLX source file was copied.
+- Implemented clean-room, from a functional specification by an implementer
+  with no access to MTPLX source: the MLX library-kernel launches with
+  per-shape first-use bitwise proofs
+  (src/mlx2/runtime/models/inkling2/library_kernels.py), the recorded-step
+  replay of the one-row decode step
+  (src/mlx2/runtime/models/inkling2/capacity_state.py,
+  src/mlx2/runtime/replay/engine.py, loader.py and near_tie.py) and the
+  one-launch prompt attention
+  (src/mlx2/runtime/models/inkling2/prefill_onelaunch.py).
+- Reimplemented from the mechanism: the decode launch-count set
+  (src/mlx2/runtime/models/inkling2/pass_messages.py, stage_a.py,
+  attn_output.py, frame_kernels.py and the gated split-K merge in
+  splitk.py), the prefill hand-over, transient pricing and position-fixed
+  2,048-row chunks (src/mlx2/runtime/models/inkling2/prefill_route.py,
+  src/mlx2/adapters/inkling2_prefill_plan.py, inkling2_memory.py), the
+  expert-grouped MoE verify panels and MXFP8 NAX gather
+  (src/mlx2/runtime/models/inkling2/moe_panel_kernel.py,
+  src/mlx2/runtime/models/moe_nax_gather.py), the deferred verify commit for
+  rotating caches (src/mlx2/runtime/models/cache.py,
+  src/mlx2/runtime/hybrid_verify_rows.py), and the device-decided speculative
+  round and prompt-copy rounds (src/mlx2/runtime/speculative_device_round.py,
+  src/mlx2/runtime/prompt_copy_round.py,
+  src/mlx2/runtime/drafters/inkling2_dspark_external.py). prompt_copy_round.py
+  restates MTPLX's n-gram copy matcher, its confidence ladder and the
+  probation/backoff rule over mlx2's own engine.
+The Apache-2.0 text is this repository's LICENSE. No Apple copyright header
+is added to mlx2 source files.

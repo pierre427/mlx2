@@ -844,6 +844,23 @@ def _note_recovery_rewind(cache) -> None:
             guard.violated = True
 
 
+# RotatingKVCache deferred-commit counters (process-wide; default-off mode).
+_DEFERRED_COMMIT_COUNTS: Dict[str, int] = {}
+
+
+def _deferred_count(key: str, amount: int = 1) -> None:
+    _DEFERRED_COMMIT_COUNTS[key] = _DEFERRED_COMMIT_COUNTS.get(key, 0) + int(amount)
+
+
+def deferred_commit_counts(reset: bool = False) -> Dict[str, int]:
+    """Deferred-commit engagement counters (forwards, rows, rows_kept,
+    rows_dropped, commit_in_place/normalize/grow/replay)."""
+    out = dict(sorted(_DEFERRED_COMMIT_COUNTS.items()))
+    if reset:
+        _DEFERRED_COMMIT_COUNTS.clear()
+    return out
+
+
 def _state_checkpoint_max() -> int:
     """Max recorded state checkpoints per ArraysCache (0 disables)."""
     try:
@@ -1728,6 +1745,9 @@ class SinkWindowKVCache(_BaseCache):
 class RotatingKVCache(_BaseCache):
     step = 256
     _ROLLBACK_WINDOW = 64
+    # Offers ``start_speculation(deferred_commit=True)`` (exact type only;
+    # see ``deferred_commit_reason``).
+    supports_deferred_commit = True
 
     def __new__(cls, *args, **kwargs):
         instance = super().__new__(cls)
@@ -1791,6 +1811,7 @@ class RotatingKVCache(_BaseCache):
         max_checkpoints = _state_checkpoint_max()
         if max_checkpoints <= 0 or self.keys is None or len(positions) != 1:
             return
+        self._no_deferred_pending("state_checkpoint")
         position = positions[0]
         # ``force`` is deliberately not honoured here: window snapshots are
         # budgeted a stride apart (see _window_checkpoint_due); an end-of-prompt
@@ -1824,6 +1845,7 @@ class RotatingKVCache(_BaseCache):
         return best
 
     def trim_to_position(self, position: int, num_tokens: int) -> int:
+        self._no_deferred_pending("trim_to_position")
         if self.offset < self.max_size:
             return self.trim(num_tokens)
         if position > 0:
@@ -1850,7 +1872,18 @@ class RotatingKVCache(_BaseCache):
         self._rollbacks.clear()
         return num_tokens
 
-    def start_speculation(self, rollback_window: Optional[int] = None):
+    def start_speculation(
+        self, rollback_window: Optional[int] = None, *, deferred_commit: bool = False
+    ):
+        """``deferred_commit``: the epoch's owner rewinds this cache only
+        through ``trim``/``stop_speculation`` (never by restoring fields), so
+        a caller may defer its forwards (``update_and_fetch(deferred=True)``).
+        Arming alone changes nothing."""
+        self._settle_deferred()
+        if deferred_commit:
+            self.__dict__["_deferred_armed"] = True
+        else:
+            self.__dict__.pop("_deferred_armed", None)
         self.speculating = True
         self._rollback_window = max(
             1,
@@ -1859,8 +1892,229 @@ class RotatingKVCache(_BaseCache):
         self._rollbacks.clear()
 
     def stop_speculation(self):
+        # A deferred forward nobody trimmed was accepted whole.
+        self._settle_deferred()
+        self.__dict__.pop("_deferred_armed", None)
         self.speculating = False
         self._rollbacks.clear()
+
+    # ----- deferred commit (opt-in per forward; default off) -----
+    #
+    # The rollback path above copies the whole pre-forward window plus the new
+    # K/V on every speculating forward and rebuilds the ring on a reject. In
+    # deferred mode a forward writes nothing: ``update_and_fetch(...,
+    # deferred=True)`` returns the chronological K/V that ``_update_concat``
+    # would have built (the same values in the same order) and keeps the new
+    # rows pending. ``trim`` then writes only the kept rows into the ring in
+    # place and drops the rest; ``stop_speculation`` keeps them all. The
+    # logical window after a commit is the rollback path's, byte for byte; the
+    # physical layout may differ (a ring rather than a concatenation), which
+    # every reader maps through ``_temporal_order``. The epoch's owner arms it
+    # (``start_speculation(deferred_commit=True)``: it rewinds only through
+    # ``trim``) and the model opts in per forward; the cache never decides it. Mechanism after MTPLX fast/state.py
+    # ``DecodeState.commit`` (Apache-2.0, youssofal/MTPLX@3890be55); see
+    # provenance/mtplx-inkling2-deferred-commit.json.
+
+    def deferred_commit_reason(self, keys, values):
+        """None when a deferred forward can take these rows, else why not.
+
+        Declines leave the caller on the exact record-and-replay path."""
+        if type(self) is not RotatingKVCache:
+            return "cache_type"
+        if not self.speculating:
+            return "not_speculating"
+        if not self.__dict__.get("_deferred_armed"):
+            # The epoch owner may rewind by restoring fields (PLD, replay
+            # owners): only an owner that rewinds through trim arms it.
+            return "not_armed"
+        if self.keep:
+            return "keep"
+        if self._rollbacks:
+            # Records and pending rows would rewind in the wrong order.
+            return "rollback_records"
+        if keys.ndim != 4 or values.ndim != 4:
+            return "rows"
+        if keys.shape[2] < 1 or values.shape[2] != keys.shape[2]:
+            return "rows"
+        pending = self.__dict__.get("_deferred")
+        ref_k, ref_v = (
+            (self.keys, self.values) if pending is None else (pending["keys"], pending["values"])
+        )
+        if ref_k is not None and (
+            ref_k.dtype != keys.dtype
+            or ref_v.dtype != values.dtype
+            or ref_k.shape[:2] != keys.shape[:2]
+            or ref_k.shape[3] != keys.shape[3]
+            or ref_v.shape[:2] != values.shape[:2]
+            or ref_v.shape[3] != values.shape[3]
+        ):
+            return "layout"
+        return None
+
+    @property
+    def deferred_rows(self) -> int:
+        """Rows of uncommitted deferred forwards (0 outside deferred mode)."""
+        pending = self.__dict__.get("_deferred")
+        return 0 if pending is None else int(pending["keys"].shape[2])
+
+    def _no_deferred_pending(self, operation):
+        if self.__dict__.get("_deferred") is not None:
+            raise RuntimeError(
+                f"RotatingKVCache.{operation} with {self.deferred_rows} uncommitted "
+                "deferred rows; commit (trim/stop_speculation) first"
+            )
+
+    def _update_deferred(self, keys, values):
+        reason = self.deferred_commit_reason(keys, values)
+        if reason is not None:
+            raise RuntimeError(f"RotatingKVCache deferred update declined: {reason}")
+        pending = self.__dict__.get("_deferred")
+        committed = self.offset if pending is None else pending["offset"]
+        # The committed window in time order (``_temporal_order`` at the
+        # committed offset), then any earlier pending rows of this epoch.
+        history_k = history_v = None
+        if self.keys is not None:
+            history_k = self._temporal_order(self.keys, committed)
+            history_v = self._temporal_order(self.values, committed)
+        if pending is not None:
+            if history_k is None:
+                history_k, history_v = pending["keys"], pending["values"]
+            else:
+                history_k = mx.concatenate([history_k, pending["keys"]], axis=2)
+                history_v = mx.concatenate([history_v, pending["values"]], axis=2)
+        if history_k is None:
+            view = (keys, values)
+        else:
+            # Exactly ``_update_concat``: keep max_size - 1 rows, append.
+            trim_size = history_k.shape[2] - self.max_size + 1
+            view = (
+                self._trim(trim_size, history_k, keys),
+                self._trim(trim_size, history_v, values),
+            )
+        if pending is None:
+            rows_k, rows_v, spans = keys, values, (keys.shape[2],)
+        else:
+            rows_k = mx.concatenate([pending["keys"], keys], axis=2)
+            rows_v = mx.concatenate([pending["values"], values], axis=2)
+            spans = (*pending["spans"], keys.shape[2])
+        self.__dict__["_deferred"] = {
+            "offset": committed, "keys": rows_k, "values": rows_v, "spans": spans,
+        }
+        self.offset += keys.shape[2]
+        _deferred_count("forwards")
+        _deferred_count("rows", keys.shape[2])
+        # The record window's rule: older forwards leave once the newer ones
+        # cover the window (never the newest), so exactly the rows the
+        # rollback path could rewind stay pending; the rest commit now.
+        total = sum(spans)
+        retire = 0
+        while len(spans) > 1 and total - spans[0] >= self._rollback_window:
+            total -= spans[0]
+            retire += spans[0]
+            spans = spans[1:]
+        if retire:
+            self._commit_deferred(retire, keep_rest=True)
+        return view
+
+    def _commit_deferred(self, kept, *, keep_rest=False):
+        """Write the first ``kept`` pending rows into the committed window."""
+        pending = self.__dict__.pop("_deferred")
+        rows_k, rows_v = pending["keys"], pending["values"]
+        total = rows_k.shape[2]
+        logical = self.offset
+        self.offset = pending["offset"]
+        if kept:
+            self._write_committed(rows_k[..., :kept, :], rows_v[..., :kept, :])
+        _deferred_count("rows_kept", kept)
+        if keep_rest and kept < total:
+            spans, done = list(pending["spans"]), kept
+            while done:
+                done -= spans.pop(0)
+            if done:
+                raise RuntimeError("deferred commit split a forward")
+            self.__dict__["_deferred"] = {
+                "offset": self.offset, "keys": rows_k[..., kept:, :],
+                "values": rows_v[..., kept:, :], "spans": tuple(spans),
+            }
+            self.offset = logical
+        else:
+            _deferred_count("rows_dropped", total - kept)
+
+    def _settle_deferred(self):
+        if self.__dict__.get("_deferred") is not None:
+            self._commit_deferred(self.deferred_rows)
+            self._drop_checkpoints_past_offset()
+
+    def _write_committed(self, keys, values):
+        """Append ``keys``/``values`` (m rows) to the committed window in place.
+
+        The same logical window as the rollback path's replay
+        (``_update_in_place``/``_update_concat`` from the pre-forward state);
+        layouts it cannot write in place are replayed that way (counted)."""
+        rows, size = keys.shape[2], self.max_size
+        buf = self.keys
+        if buf is None or rows >= size:
+            _deferred_count("commit_replay")
+            if rows == 1:
+                self._update_in_place(keys, values)
+            else:
+                self._update_concat(keys, values)
+            return
+        offset, width = self.offset, buf.shape[2]
+        if width > size:
+            if self._idx != width:
+                return self._replay_committed(keys, values)
+            # A chronological concatenation (prefill chunk, rollback replay):
+            # keep its newest ``max_size`` rows as a ring, once.
+            self.keys = mx.contiguous(self._trim(width - size, buf))
+            self.values = mx.contiguous(self._trim(width - size, self.values))
+            self._idx = width = size
+            _deferred_count("commit_normalize")
+        elif offset < size and self._idx == offset and offset + rows > width:
+            # Not yet full and out of room: grow to the whole window, once.
+            pad = size - offset
+            self.keys = mx.concatenate(
+                [buf[..., :offset, :], mx.zeros((*buf.shape[:2], pad, buf.shape[3]), buf.dtype)],
+                axis=2,
+            )
+            vbuf = self.values
+            self.values = mx.concatenate(
+                [vbuf[..., :offset, :],
+                 mx.zeros((*vbuf.shape[:2], pad, vbuf.shape[3]), vbuf.dtype)],
+                axis=2,
+            )
+            width = size
+            _deferred_count("commit_grow")
+        if offset < size:
+            if self._idx != offset:
+                return self._replay_committed(keys, values)
+            first = offset
+        else:
+            if width != size:
+                return self._replay_committed(keys, values)
+            first = self._idx if self._idx < size else 0
+        head = min(rows, width - first)
+        if head < rows and width != size:
+            return self._replay_committed(keys, values)
+        # At most two runs of slots, written in place: the rows a reject
+        # dropped never touch the window.
+        self.keys[..., first : first + head, :] = keys[..., :head, :]
+        self.values[..., first : first + head, :] = values[..., :head, :]
+        if head < rows:
+            self.keys[..., : rows - head, :] = keys[..., head:, :]
+            self.values[..., : rows - head, :] = values[..., head:, :]
+            self._idx = rows - head
+        else:
+            self._idx = first + head
+        self.offset = offset + rows
+        _deferred_count("commit_in_place")
+
+    def _replay_committed(self, keys, values):
+        _deferred_count("commit_replay")
+        if keys.shape[2] == 1:
+            self._update_in_place(keys, values)
+        else:
+            self._update_concat(keys, values)
 
     def record_rollback(self, num_tokens, snapshot, keys, values):
         """Recorded by ``update_and_fetch`` during a forward while
@@ -1902,13 +2156,18 @@ class RotatingKVCache(_BaseCache):
             to_cat.append(append)
         return mx.concatenate(to_cat, axis=2)
 
-    def _temporal_order(self, v):
+    def _temporal_order(self, v, offset=None):
         """
         Rearrange the cache into temporal order, slicing off the end if unused.
+
+        ``offset`` (default ``self.offset``) is the committed position the
+        buffer describes; a deferred forward passes it explicitly.
         """
+        if offset is None:
+            offset = self.offset
         if self._idx == v.shape[2]:
             return v
-        elif self._idx < self.offset:
+        elif self._idx < offset:
             return mx.concatenate(
                 [
                     v[..., : self.keep, :],
@@ -1971,7 +2230,12 @@ class RotatingKVCache(_BaseCache):
             )
         return (self.keys, self.values)
 
-    def update_and_fetch(self, keys, values):
+    def update_and_fetch(self, keys, values, *, deferred=False):
+        # ``deferred`` (opt-in, see ``deferred_commit_reason``): write nothing
+        # now, return the K/V the concatenation would hold, commit at trim.
+        # Pending rows also take every later forward of the epoch.
+        if deferred or self.__dict__.get("_deferred") is not None:
+            return self._update_deferred(keys, values)
         if self.speculating:
             self.record_rollback(
                 keys.shape[2],
@@ -1984,6 +2248,7 @@ class RotatingKVCache(_BaseCache):
         return self._update_concat(keys, values)
 
     def keys_and_values(self):
+        self._no_deferred_pending("keys_and_values")
         if self.offset < self.keys.shape[2]:
             return (
                 self.keys[..., : self.offset, :],
@@ -1996,6 +2261,7 @@ class RotatingKVCache(_BaseCache):
 
     @property
     def state(self):
+        self._no_deferred_pending("state")
         # An empty cache (a one-token prompt prefills nothing) has no state
         # yet; report it the way KVCache does rather than raise.
         if self.keys is None:
@@ -2024,6 +2290,7 @@ class RotatingKVCache(_BaseCache):
 
     @property
     def meta_state(self):
+        self._no_deferred_pending("meta_state")
         base = tuple(map(str, (self.keep, self.max_size, self.offset, self._idx)))
         if self._checkpoints:
             return base + tuple(
@@ -2058,6 +2325,15 @@ class RotatingKVCache(_BaseCache):
             self._checkpoints.pop()
 
     def trim(self, n):
+        if self.__dict__.get("_deferred") is not None:
+            pending = self.deferred_rows
+            if not 0 <= n <= pending:
+                raise RuntimeError(
+                    f"Cannot trim {n} tokens from RotatingKVCache: only its {pending} uncommitted deferred rows can be rewound."
+                )
+            self._commit_deferred(pending - n)
+            self._drop_checkpoints_past_offset()
+            return n
         if not self.speculating:
             if self.offset >= self.max_size:
                 raise RuntimeError(
@@ -2099,6 +2375,7 @@ class RotatingKVCache(_BaseCache):
     def to_quantized(
         self, group_size: int = 64, bits: int = 4
     ) -> "RotatingQuantizedKVCache":
+        self._no_deferred_pending("to_quantized")
         if self.keep > 0:
             raise NotImplementedError(
                 "Quantizing a RotatingKVCache with keep tokens is not supported."
@@ -2156,15 +2433,19 @@ class RotatingKVCache(_BaseCache):
 
     @classmethod
     def merge(_, caches):
+        for cache in caches:
+            if isinstance(cache, RotatingKVCache):
+                cache._no_deferred_pending("merge")
         return BatchRotatingKVCache.merge(caches)
 
     def empty(self):
-        return self.keys is None
+        return self.keys is None and self.__dict__.get("_deferred") is None
 
     @property
     def nbytes(self):
         if self.keys is None:
-            return 0
+            pending = self.__dict__.get("_deferred")
+            return 0 if pending is None else pending["keys"].nbytes + pending["values"].nbytes
         total = self.keys.nbytes + self.values.nbytes
         for _, keys, values in self._checkpoints:
             total += keys.nbytes + values.nbytes
@@ -2174,6 +2455,9 @@ class RotatingKVCache(_BaseCache):
             total += keys.nbytes + values.nbytes
             if snapshot[0] is not None:
                 total += snapshot[0].nbytes + snapshot[1].nbytes
+        pending = self.__dict__.get("_deferred")
+        if pending is not None:
+            total += pending["keys"].nbytes + pending["values"].nbytes
         return total
 
 

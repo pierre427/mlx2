@@ -2674,7 +2674,10 @@ class ExternalDraftBatchGenerator:
             if not getattr(self.model, "supports_speculative_rollback", False):
                 raise ValueError("target has recurrent state but declares no speculative rollback")
             _bump(self.scheduler_stats, "external_hybrid_transactions")
-            return HybridVerifyRows(rows)
+            # A target that asks for it (default off) has its rings arm
+            # deferred verify commits; see RotatingKVCache.deferred_commit_reason.
+            return HybridVerifyRows(rows, deferred_commit=bool(
+                getattr(self.model, "supports_deferred_verify_commit", False)))
         return SegmentedKVRows(rows)
 
     @staticmethod

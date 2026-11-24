@@ -140,7 +140,11 @@ class HybridVerifyRows:
             "rollback_law": "kv_trim_and_recurrent_record_restore",
         }
 
-    def __init__(self, rows, note=None):
+    def __init__(self, rows, note=None, *, deferred_commit=False):
+        """``deferred_commit``: arm each ring that offers it
+        (``supports_deferred_commit``) for deferred forwards every round; this
+        owner rewinds rings only through ``trim``. Default off; the target
+        model asks for it (``supports_deferred_verify_commit``)."""
         rows = [list(row) for row in rows]
         if not rows or not rows[0] or len({len(row) for row in rows}) != 1:
             raise ValueError("hybrid lanes need the same nonzero layer count")
@@ -202,6 +206,7 @@ class HybridVerifyRows:
         # one transaction per round, so classify once.
         self._recurrent_rows = [[_recurrent(cache) for cache in row] for row in rows]
         self._rotating = [cache for row in rows for cache in row if _rotating(cache)]
+        self._deferred_commit = bool(deferred_commit)
         self._note = note
         self._active = None
         # Per-layer batched views, kept across this owner's rounds while
@@ -306,8 +311,12 @@ class HybridVerifyTransaction:
             rotating = getattr(owner, "_rotating", None)
             if rotating is None:
                 rotating = [c for row in rows for c in row if _rotating(c)]
+            deferred = getattr(owner, "_deferred_commit", False)
             for cache in rotating:
-                cache.start_speculation()
+                if deferred and getattr(type(cache), "supports_deferred_commit", False):
+                    cache.start_speculation(deferred_commit=True)
+                else:
+                    cache.start_speculation()
                 self._started.append(cache)
             if not self.plain:
                 for cache, *_state in self._recurrent_base:
