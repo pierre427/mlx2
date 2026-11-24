@@ -373,6 +373,29 @@ KERNEL_OPTIONS = {
     # the default from 09260f5d9; full run at 6b0946589: bitwise, decode
     # -3.4%/-3.1% at 1K/16K), small gain: default candidate, off pending Pierre.
     "inkling2_moe_decode_kernel": "moe_decode_kernel",
+    # Expert-grouped verify panels (runtime/models/inkling2/moe_panel_kernel.py;
+    # implemented 2026-11-23 from the MTPLX sweep candidate 1, mechanism of
+    # MTPLX fast/experts.py, Apache-2.0; default off, needs
+    # inkling2_moe_fused, GPU pending). 2-32 row MoE calls (DSpark verify,
+    # short prefill tails) after the shipped router ops: a plan launch lists
+    # the panel's distinct experts and their member pairs, then gate/up and
+    # down products read each distinct expert once for all of its rows
+    # (a 4-row top-8 panel names ~19 experts for 32 pairs), and a combine
+    # launch. NVFP4 (layers 0-19) and MXFP8 (20-23). Intended bitwise to the
+    # shipped W4A16 route: each pair keeps MLX's gather_qmv lane order (the
+    # Metal test sweeps the two dispatch details, QDOT_CONTRACT and
+    # FAST_K_RULE). Calls where the shipped route would stream
+    # (gather_qmm_rhs), one-token calls and act-quant decline, counted
+    # (moe_fast_counts panel_kernel / panel_kernel_declined:*).
+    "inkling2_moe_panel_kernel": "moe_panel_kernel",
+    # MXFP8 expert tables (layers 20-23) on the NAX sorted gather (M5 tensor
+    # units, prefill only; implemented 2026-11-23, MTPLX sweep candidate 10,
+    # default off, needs inkling2_moe_nax_gather, GPU pending). A MXFP8
+    # loader (E4M3 codes x E8M0 group scales, decoded to BF16 as MLX's
+    # QuantizedBlockLoader does) in moe_nax_gather; each instantiation is
+    # canary-proven bitwise against the stock sorted gather_qmm before use,
+    # else the stock kernel runs (fallback counted).
+    "inkling2_moe_nax_mxfp8": "moe_nax_mxfp8",
     # W4A4 accuracy experiment (implemented 2026-11-21, default off, GPU A/B
     # pending; scripts/research/inkling2_w4a4_ab.py). Fake-quantizes the
     # routed experts' inputs as hf_quant_config.json's
@@ -676,6 +699,12 @@ def validate_policy(value):
         raise ValueError("Inkling 2 inkling2_compile_decode_blocks requires inkling2_moe_fused")
     if kernels["moe_decode_kernel"] and not kernels["moe_fused"]:
         raise ValueError("Inkling 2 inkling2_moe_decode_kernel requires inkling2_moe_fused")
+    if kernels["moe_panel_kernel"] and not kernels["moe_fused"]:
+        raise ValueError("Inkling 2 inkling2_moe_panel_kernel requires inkling2_moe_fused")
+    if kernels["moe_nax_mxfp8"] and kernels["moe_nax_gather"] is False:
+        # Unset moe_nax_gather is resolved at load (configure_kernels
+        # refuses moe_nax_mxfp8 when it resolves off).
+        raise ValueError("Inkling 2 inkling2_moe_nax_mxfp8 requires inkling2_moe_nax_gather")
     if kernels["moe_weighted_sum"] and not kernels["moe_fused"]:
         raise ValueError("Inkling 2 inkling2_moe_weighted_sum requires inkling2_moe_fused")
     return kernels, value
@@ -998,6 +1027,9 @@ class Inkling2Adapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             names += ("inkling2/moe_fast.py",)
         if policy.get("moe_decode_kernel"):
             names += ("inkling2/moe_decode_kernel.py",)
+        if policy.get("moe_panel_kernel"):
+            # It reuses moe_decode_kernel's router and contract switches.
+            names += ("inkling2/moe_panel_kernel.py", "inkling2/moe_decode_kernel.py")
         if policy.get("moe_weighted_sum"):
             names += ("qwen4_moe_weighted_sum.py",)
         if policy.get("moe_nax_gather"):

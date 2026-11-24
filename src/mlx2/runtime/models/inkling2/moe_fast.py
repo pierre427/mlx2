@@ -264,6 +264,15 @@ def fused_call(moe, experts, x, weighted_sum=False, *, compiled_decode=False,
     def note(key):
         counts[key] = counts.get(key, 0) + 1
 
+    if moe.__dict__.get("_moe_panel_kernel") and not compiled_decode:
+        # inkling2_moe_panel_kernel (default off): 2-32 row calls with each
+        # distinct expert read once; None = declined (counted), run below.
+        from . import moe_panel_kernel
+
+        out = moe_panel_kernel.call(moe, experts, x, router_weight, weighted_sum)
+        if out is not None:
+            return out
+
     from .language import _fp32
 
     if router_weight is None:

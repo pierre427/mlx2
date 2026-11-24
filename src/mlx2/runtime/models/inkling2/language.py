@@ -1284,6 +1284,9 @@ class SparseMoE(nn.Module):
             object.__setattr__(self, "_fast_built", held)
             # The build rewrote the gate/up arrays (row views); key on those.
             object.__setattr__(self, "_fast_key", moe_fast.source_key(self.switch_mlp))
+            if self.__dict__.get("_moe_nax_mxfp8"):
+                # inkling2_moe_nax_mxfp8: the rebuilt stacked table is new.
+                _own_mxfp8_tables(self)
         return held
 
     def __call__(self, x):
@@ -1380,6 +1383,34 @@ def _expert_switches(moe):
     if held is not None and held[0] is not None:
         found += [held[0].gate_up, held[0].down]
     return found
+
+
+def _live_expert_tables(moe):
+    """The routed-expert gather modules the layer's current route reads, each
+    once: the stacked gate/up table and the down table on the fused route,
+    else the reference projections."""
+    held = moe.__dict__.get("_fast_built")
+    if moe.__dict__.get("_fast_fused") and held is not None and held[0] is not None:
+        found = [held[0].gate_up, held[0].down]
+    else:
+        switch = getattr(moe, "switch_mlp", None)
+        found = [switch[n] for n in ("gate_proj", "up_proj", "down_proj")
+                 if switch is not None and n in switch]
+    out, seen = [], set()
+    for module in found:
+        if id(module) not in seen:
+            seen.add(id(module))
+            out.append(module)
+    return out
+
+
+def _own_mxfp8_tables(moe):
+    """Flag (or unflag) every MXFP8 expert table of ``moe`` for the NAX
+    MXFP8 loader per ``moe._moe_nax_mxfp8``."""
+    on = bool(moe.__dict__.get("_moe_nax_mxfp8"))
+    for module in _expert_switches(moe):
+        if getattr(module, "mode", None) == "mxfp8":
+            object.__setattr__(module, "nax_mxfp8_owned", on)
 
 
 class MessageController(nn.Module):
@@ -1819,7 +1850,8 @@ class Model(nn.Module):
                           prefill_mask_bf16_budget=False, prefill_mask_with_sink=False,
                           head_kernel_wide=False, prefill_tiled_attention=False,
                           attn_decode_kernel=False, verify_deferred_commit=False,
-                          visit_length_check=False):
+                          visit_length_check=False, moe_panel_kernel=False,
+                          moe_nax_mxfp8=False):
         """Adapter-owned opt-in execution switches (all default off).
 
         ``loop_passes`` None keeps the trained count.  ``moe_weighted_sum``
@@ -1838,6 +1870,17 @@ class Model(nn.Module):
             raise ValueError("Inkling 2 compile_decode_blocks requires moe_fused")
         if moe_decode_kernel and not moe_fused:
             raise ValueError("Inkling 2 moe_decode_kernel requires moe_fused")
+        if moe_panel_kernel and not moe_fused:
+            raise ValueError("Inkling 2 moe_panel_kernel requires moe_fused")
+        nax_mxfp8_decline = None
+        if moe_nax_mxfp8 and not moe_nax_gather:
+            # Fail closed, counted (no load failure): an unset
+            # inkling2_moe_nax_gather resolves off on a non-M5 host.
+            from .. import moe_nax_gather as _nax
+
+            nax_mxfp8_decline = "no_nax_host" if not _nax.nax_host() else "nax_gather_off"
+            declines = self.__dict__.setdefault("_nax_mxfp8_declines", {})
+            declines[nax_mxfp8_decline] = declines.get(nax_mxfp8_decline, 0) + 1
         if head_kernel_wide and not head_kernel:
             raise ValueError("Inkling 2 head_kernel_wide requires head_kernel")
         if prefill_tiled_attention and flash_prefill:
@@ -1922,6 +1965,15 @@ class Model(nn.Module):
             # its implicit inputs.
             object.__setattr__(layer.mlp, "_compile_decode_blocks", bool(compile_decode_blocks))
             object.__setattr__(layer.mlp, "_moe_decode_kernel", bool(moe_decode_kernel))
+            # inkling2_moe_panel_kernel (moe_panel_kernel.py; hook in moe_fast).
+            object.__setattr__(layer.mlp, "_moe_panel_kernel", bool(moe_panel_kernel))
+            # inkling2_moe_nax_mxfp8: the MXFP8 expert tables (layers 20-23)
+            # admit the NAX sorted gather's MXFP8 loader (moe_nax_gather,
+            # canary-proven bitwise against the stock sorted kernel); a
+            # rebuilt stacked table is re-owned in ``_fast_experts``.
+            object.__setattr__(layer.mlp, "_moe_nax_mxfp8",
+                               bool(moe_nax_mxfp8) and nax_mxfp8_decline is None)
+            _own_mxfp8_tables(layer.mlp)
         object.__setattr__(self, "_head_softcap_compiled", bool(head_softcap_compiled))
         object.__setattr__(self.model, "_visit_length_check", bool(visit_length_check))
         # The verify-transaction owner arms deferred ring commits only for a
@@ -1943,6 +1995,8 @@ class Model(nn.Module):
              "verify_splitk": bool(verify_splitk), "moe_act_quant": bool(moe_act_quant),
              "compile_decode_blocks": bool(compile_decode_blocks),
              "moe_decode_kernel": bool(moe_decode_kernel),
+             "moe_panel_kernel": bool(moe_panel_kernel),
+             "moe_nax_mxfp8": bool(moe_nax_mxfp8) and nax_mxfp8_decline is None,
              "head_softcap_compiled": bool(head_softcap_compiled), "kv_q8": bool(kv_q8),
              "prefill_mask_bf16_budget": bool(prefill_mask_bf16_budget),
              "prefill_mask_with_sink": bool(prefill_mask_with_sink),
@@ -2014,6 +2068,15 @@ class Model(nn.Module):
                "moe_decode_kernel_declines": {
                    key.split(":", 1)[1]: moe.pop(key) for key in sorted(moe)
                    if key.startswith("decode_kernel_declined:")},
+               # inkling2_moe_panel_kernel calls (also in moe_fused_calls),
+               # by expert format, and the declines by reason.
+               "moe_panel_kernel_calls": moe.pop("panel_kernel", 0),
+               "moe_panel_kernel_formats": {
+                   key.split(":", 1)[1]: moe.pop(key) for key in sorted(moe)
+                   if key.startswith("panel_kernel:")},
+               "moe_panel_kernel_declines": {
+                   key.split(":", 1)[1]: moe.pop(key) for key in sorted(moe)
+                   if key.startswith("panel_kernel_declined:")},
                "moe_fast_declines": moe,
                "moe_fused_layers": sum(1 for b in built if b is not None and b[0] is not None),
                "moe_fused_refusals": sorted({b[1] for b in built if b is not None and b[1]})}
@@ -2085,6 +2148,17 @@ class Model(nn.Module):
             out["moe_nax_gather"] = {key: status[key] for key in (
                 "mode", "nax_host", "device_name", "calls", "calls_by_format", "fallbacks",
                 "not_candidates", "not_prefill")}
+        # inkling2_moe_nax_mxfp8: flagged MXFP8 tables on each layer's live
+        # route (deduplicated; engaged calls are the NAX receipt's
+        # calls_by_format["gather/mxfp8-8"]) and the counted declines.
+        owned = sum(1 for layer in self.model.layers for module in _live_expert_tables(layer.mlp)
+                    if getattr(module, "nax_mxfp8_owned", False))
+        out["moe_nax_mxfp8"] = {
+            "selected": bool(getattr(self, "kernel_policy", {}).get("moe_nax_mxfp8")),
+            "owned_live_tables": owned,
+            "declines": dict(sorted(self.__dict__.get("_nax_mxfp8_declines", {}).items()))}
+        if "moe_nax_gather" in out:
+            out["moe_nax_gather"]["mxfp8_owned_tables"] = owned
         return out
 
     # ----- external-draft feature taps (DSpark) -----

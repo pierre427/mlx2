@@ -363,6 +363,35 @@ struct Nvfp4Q {
   }
 };
 
+// MXFP8 (mlx2, 2026-11-23; MTPLX sweep candidate 10): e4m3 values times the
+// e8m0 group-32 scale, dequantized to bfloat like mlx's fp
+// QuantizedBlockLoader (dequantize_scale<bfloat, 32> is bfloat(fp8_e8m0),
+// then static_cast<bfloat>(scale * float(fp8_e4m3))).  Every decoded weight
+// is exact in bfloat16 (4 significant bits times a power of two).
+template <int GS>
+struct Mxfp8Q {
+  using WT = bfloat;
+  STEEL_CONST int kBits = 8;
+  STEEL_CONST int kGroup = GS;
+  const device uint8_t* scales;
+
+  struct P {
+    float s;
+  };
+
+  METAL_FUNC void advance(const size_t n) thread {
+    scales += n;
+  }
+  METAL_FUNC P params(const int g) const thread {
+    uint8_t sb = scales[g];
+    return P{float(static_cast<bfloat>(*(thread fp8_e8m0*)(&sb)))};
+  }
+  METAL_FUNC static WT dq(thread const P& p, const uint32_t q) {
+    uint8_t qb = uint8_t(q);
+    return static_cast<WT>(p.s * float(*(thread fp8_e4m3*)(&qb)));
+  }
+};
+
 // Gate/up pairing (activation epilogue): weight rows [gate; up] of one
 // expert, half_n rows each. Row r of a paired kBN x BK weight tile loads
 // weight row pair_row(r) past the tile's first gate row: 16-row blocks
@@ -1111,6 +1140,11 @@ _NVFP4_SOURCE = _MM_SOURCE_TMPL.format(
     q_init="Q q{scales};",
 )
 
+_MXFP8_SOURCE = _MM_SOURCE_TMPL.format(
+    q_type="using Q = omlx_gqmm::Mxfp8Q<GS>;",
+    q_init="Q q{scales};",
+)
+
 # ---------------------------------------------------------------------------
 # Gate/up activation epilogue
 # ---------------------------------------------------------------------------
@@ -1434,6 +1468,14 @@ def _get_kernel(kind: str):
                     header=mlx_src + _MM_HEADER,
                     source=_NVFP4_SOURCE,
                 )
+            elif kind == "mxfp8":
+                kernel = mx.fast.metal_kernel(
+                    name="mlx2_gqmm_mxfp8_v1",
+                    input_names=["x", "w", "scales", "tiles", "tile_count", "params"],
+                    output_names=["y"],
+                    header=mlx_src + _MM_HEADER,
+                    source=_MXFP8_SOURCE,
+                )
             else:
                 kernel = mx.fast.metal_kernel(
                     name="omlx_gqmm_mxfp4_v2",
@@ -1583,8 +1625,14 @@ def supports(
     bits: int,
     mode: str,
     row_map: Optional[mx.array] = None,
+    allow_mxfp8: bool = False,
 ) -> bool:
     """True when ``sorted_gather_qmm`` handles this call (layout/dtypes).
+
+    MXFP8 (group 32, E8M0 scales) is supported for the plain gather only,
+    and only when the caller admits it (``allow_mxfp8``: an owned MXFP8
+    table, see ``try_gather``); every other caller sees it refused as
+    before.
 
     With ``row_map`` (uint32 ``[M]``, sorted row -> row of ``x``) the rows
     are read through the map and ``x`` may have any row count (32-bit
@@ -1632,6 +1680,11 @@ def supports(
             return False
         if scales.dtype != mx.uint8:
             return False
+    elif mode == "mxfp8" and allow_mxfp8:
+        if bits != 8 or group_size != 32 or biases is not None or row_map is not None:
+            return False
+        if scales.dtype != mx.uint8:
+            return False
     else:
         return False
     if w.shape[2] * 32 != K * bits:
@@ -1661,10 +1714,10 @@ def _launch(
     ``x[row_map]`` in place.  ``up = (w2, scales2, biases2)`` (mlx2, with
     ``epi``): ``w`` holds only the gate rows and ``w2`` the up rows."""
     scan = _get_kernel("scan")
-    kind = "affine" if mode == "affine" else ("nvfp4" if mode == "nvfp4" else "fp")
+    kind = {"affine": "affine", "nvfp4": "nvfp4", "mxfp8": "mxfp8"}.get(mode, "fp")
     if (row_map is not None or up is not None) and not epi:
         return None
-    if epi and kind == "nvfp4":
+    if epi and kind in ("nvfp4", "mxfp8"):
         # The activation epilogues carry only the affine and MXFP4 loaders.
         return None
     mm = _get_kernel(
@@ -2093,6 +2146,7 @@ def sorted_gather_qmm(
     stream=None,
     plan: Optional[Plan] = None,
     verify: bool = True,
+    allow_mxfp8: bool = False,
 ) -> Optional[mx.array]:
     """``x @ w[indices].T`` for sorted rows on the tensor units.
 
@@ -2104,7 +2158,7 @@ def sorted_gather_qmm(
     then keeps the stock path.
     """
     if not enabled() or not supports(
-        x, w, scales, biases, indices, group_size, bits, mode
+        x, w, scales, biases, indices, group_size, bits, mode, allow_mxfp8=allow_mxfp8
     ):
         return None
     M, K = int(x.shape[0]), int(x.shape[2])
@@ -2495,16 +2549,21 @@ def try_gather(x, layer, indices) -> Optional[mx.array]:
         # ScaledNVFP4SwitchLinear only; other nvfp4 layers keep stock.
         _fallback("nvfp4_not_owned")
         return None
+    # mlx2 scope (2026-11-23): MXFP8 tables are admitted only where their
+    # owner opted in (``nax_mxfp8_owned``, e.g. inkling2_moe_nax_mxfp8);
+    # any other MXFP8 layer is refused as an unsupported layout, as before.
+    mxfp8 = layer.mode == "mxfp8" and bool(getattr(layer, "nax_mxfp8_owned", False))
     idx = _as_u32(indices)
     if not supports(
         x, w, layer["scales"], layer.get("biases"), idx,
-        layer.group_size, layer.bits, layer.mode,
+        layer.group_size, layer.bits, layer.mode, allow_mxfp8=mxfp8,
     ):
         _fallback("unsupported_layout")
         return None
     out = sorted_gather_qmm(
         x, w, layer["scales"], layer.get("biases"), idx,
         group_size=layer.group_size, bits=layer.bits, mode=layer.mode,
+        allow_mxfp8=mxfp8,
     )
     if out is None:
         _fallback("kernel_unverified")
