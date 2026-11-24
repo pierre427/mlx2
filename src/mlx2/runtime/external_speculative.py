@@ -1411,6 +1411,8 @@ class ExternalDraftBatchGenerator:
                  ast_tree_calibration=None,
                  ast_batch_row_sharing=False,
                  predraft=False,
+                 device_round=None,
+                 prompt_copy_round=None,
                  **kwargs):
         import mlx.core as mx
         self.mx = mx; self.model = model; self.draft = draft_model
@@ -2473,6 +2475,11 @@ class ExternalDraftBatchGenerator:
         self._predrafts = {}
         if predraft:
             self.scheduler_stats.update(dict.fromkeys(_PREDRAFT_COUNTERS, 0))
+        # Default-off, unqualified MTPLX-ingest round options
+        # (speculative_device_round.py, prompt_copy_round.py): None unless set.
+        from . import speculative_device_round
+
+        speculative_device_round.install(self, device_round, prompt_copy_round)
         from .adaptive_policy import DecodeTimeFairness
 
         # The serving route's decode-time fairness (the stall bound on a
@@ -10169,6 +10176,10 @@ class ExternalDraftBatchGenerator:
                 **self._draft_settings_receipt(),
                 **self._proposal_composition_receipt(lane),
                 **self._continuation_receipt(lane),
+                **(
+                    {} if getattr(self, "device_round", None) is None
+                    else self.device_round.lane_receipt(lane)
+                ),
             }
             for j,token in enumerate(emitted):
                 lane.generated += 1
@@ -13098,6 +13109,9 @@ class ExternalDraftBatchGenerator:
                 and self.adaptive_policy.costs(1) is not None
                 and self.adaptive_policy.costs(len(cohort)) is not None):
             return self._request_adaptive_round(cohort)
+        device_round = getattr(self, "device_round", None)
+        if device_round is not None and device_round.run(self, cohort, forced_depth):
+            return
         clock = self._phase_time() if self.round_timing else None
         recovery = self._snapshot_round(cohort)
         self.scheduler_stats["recovery_checkpoint_captures"] += len(recovery)
@@ -14120,6 +14134,8 @@ class ExternalDraftBatchGenerator:
                 [self._verify_trusted_pld(cohort[0], blocks[0], logits)]
                 if trusted_round
                 else self._verify(cohort, blocks, logits)
+                if getattr(self, "device_round", None) is None
+                else self.device_round.verify(self, cohort, blocks, logits)
             )
             if clock is not None:
                 self._mark("verify_laws", clock)

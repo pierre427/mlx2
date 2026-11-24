@@ -96,12 +96,20 @@ class Inkling2DSparkExternal:
     proposal_distribution = "deterministic_point_mass"
     supports_empty_target_context = True
 
-    def __init__(self, drafter, *, num_draft: int):
+    def __init__(self, drafter, *, num_draft: int, engine_depth: int | None = None):
         block = drafter.config.block_size
         if type(num_draft) is not int or not 1 <= num_draft < block:
             raise ValueError(f"Inkling 2 DSpark num_draft must be 1..{block - 1}")
         self.drafter = drafter
         self.num_draft = num_draft
+        # Opt-in (prompt_copy_round above the trained block): the engine's
+        # depth is the copy span, so a drafter round asked for up to
+        # ``engine_depth`` drafts ``num_draft`` instead of failing.
+        self.clamp_requests = engine_depth is not None
+        if self.clamp_requests:
+            if type(engine_depth) is not int or engine_depth < num_draft:
+                raise ValueError("Inkling 2 DSpark engine_depth must be an integer >= num_draft")
+            self.maximum_proposal_length = engine_depth
         c = drafter.config
         self.config = SimpleNamespace(
             block_size=num_draft + 1,
@@ -122,9 +130,12 @@ class Inkling2DSparkExternal:
 
     @property
     def receipt_settings(self):
-        return {**self.drafter.receipt_settings, "kind": self.receipt_kind,
-                "engine_backend": VERSION, "num_draft": self.num_draft,
-                "proposal_distribution": self.proposal_distribution, "qualified": False}
+        settings = {**self.drafter.receipt_settings, "kind": self.receipt_kind,
+                    "engine_backend": VERSION, "num_draft": self.num_draft,
+                    "proposal_distribution": self.proposal_distribution, "qualified": False}
+        if self.clamp_requests:
+            settings["engine_depth"] = self.maximum_proposal_length
+        return settings
 
     # -- cache contract -------------------------------------------------------
     def make_cache(self):
@@ -165,6 +176,8 @@ class Inkling2DSparkExternal:
         from ..proposal_providers import PointMassLaw
 
         count = int(proposal_length)
+        if self.clamp_requests:
+            count = min(count, self.num_draft)
         if not 1 <= count <= self.num_draft:
             raise ValueError("Inkling 2 DSpark proposal length exceeds num_draft")
         lanes = self._lanes(cache)
@@ -183,6 +196,35 @@ class Inkling2DSparkExternal:
             tokens.append([int(t) for t in drafted[0].tolist()])
         self.stats["block_drafts"] += len(anchors)
         return tokens, [[PointMassLaw(t) for t in row] for row in tokens]
+
+    # -- lazy drafts (speculative_device_round ``lazy_draft``) -----------------
+    def draft_lazy(self, anchor, hidden, cache, proposal_length, sampler=None):
+        """One lane's drafts as a lazy int32 ``[n]`` array, no host read.
+
+        The ops are ``draft_distributions``' own for that lane (commit the
+        pending ``hidden`` rows, then ``draft_cached``), so with the default
+        argmax ``sampler`` the tokens are bitwise those it returns.  A
+        ``sampler(logits [1, V]) -> [1]`` draws the drafts instead (the
+        device round's sampled drafts record q there).
+        """
+        count = int(proposal_length)
+        if not 1 <= count <= self.num_draft:
+            raise ValueError("Inkling 2 DSpark proposal length exceeds num_draft")
+        lanes = self._lanes(cache)
+        if len(lanes) != 1 or hidden.shape[0] != 1:
+            raise ValueError("Inkling 2 DSpark lazy drafts run one lane at a time")
+        lane = lanes[0]
+        self._commit(lane, hidden)
+        feature = lane[-1].feature
+        if feature is None:
+            self.stats["unavailable"] += 1
+            raise _unavailable("Inkling 2 DSpark has no committed target feature for this lane")
+        drafted = self.drafter.draft_cached(
+            int(anchor), feature, lane[:-1], count + 1,
+            sampler if sampler is not None else (lambda logits: mx.argmax(logits, -1)),
+        )
+        self.stats["block_drafts"] += 1
+        return drafted[0]
 
     # -- pre-drafting (ExternalDraftBatchGenerator ``predraft``) ---------------
     def predraft(self, anchor, hidden, cache, proposal_length):
@@ -225,7 +267,7 @@ class Inkling2DSparkExternal:
 
 
 def load_external_drafter(record, target_model, *, num_draft, options=None,
-                          cap_to_block=False):
+                          cap_to_block=False, clamp_requests=False):
     """``cap_to_block`` (default off): an engine depth above the trained block
     is allowed only for a composition with ``prompt_lookup_max_span``; the
     backend then drafts at most ``block_size - 1`` and the composition wrapper
@@ -234,9 +276,10 @@ def load_external_drafter(record, target_model, *, num_draft, options=None,
     from ...adapters.inkling2_dspark import load_drafter
 
     drafter = load_drafter(record, target_model).configure_options(**(options or {}))
+    engine_depth = int(num_draft) if clamp_requests else None
     if cap_to_block:
         num_draft = min(int(num_draft), drafter.config.block_size - 1)
-    return Inkling2DSparkExternal(drafter, num_draft=num_draft)
+    return Inkling2DSparkExternal(drafter, num_draft=num_draft, engine_depth=engine_depth)
 
 
 __all__ = ["Inkling2DSparkExternal", "LastFeatureCache", "load_external_drafter"]

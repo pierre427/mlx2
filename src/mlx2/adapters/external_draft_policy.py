@@ -541,6 +541,10 @@ class ExternalDraftAdapterMixin:
             "progressive_verification_fidelity",
             "ast_physical_target",
             "cost_per_commit_handoff",
+            # Default-off, unqualified (speculative_device_round.py,
+            # prompt_copy_round.py): generic chain-round options.
+            "device_round",
+            "prompt_copy_round",
         } | set(getattr(self, "EXTERNAL_POLICY_EXTENSIONS", ()))
         if set(self.external_policy) - allowed or (
             self.external_policy and not self.external_policy.get("draft_model")
@@ -549,6 +553,12 @@ class ExternalDraftAdapterMixin:
                 f"{family} execution policy has no qualified overrides; only an "
                 "external draft_model, num_draft and adaptive_verification may be configured"
             )
+        if "device_round" in self.external_policy or "prompt_copy_round" in self.external_policy:
+            from ..runtime.prompt_copy_round import PromptCopyPolicy
+            from ..runtime.speculative_device_round import DeviceRoundPolicy
+
+            DeviceRoundPolicy.from_value(self.external_policy.get("device_round"))
+            PromptCopyPolicy.from_value(self.external_policy.get("prompt_copy_round"))
         return bool(self.external_policy)
 
     def _num_draft_ceiling(self, record):
@@ -1058,6 +1068,9 @@ class ExternalDraftAdapterMixin:
                 "cost_per_commit_handoff",
                 self.external_policy["cost_per_commit_handoff"],
             )
+        for key in ("device_round", "prompt_copy_round"):
+            if self.external_policy.get(key) not in (None, False):
+                kwargs.setdefault(key, self.external_policy[key])
         if self.external_policy.get("progressive_verification_tile") is not None:
             requested_tile = self.external_policy["progressive_verification_tile"]
             batch_lanes = kwargs.get("completion_batch_size")

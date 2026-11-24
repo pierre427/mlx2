@@ -965,7 +965,8 @@ class Inkling2Adapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
                 lambda rec, model: load_external_drafter(
                     rec["dspark"], model, num_draft=self._external_num_draft(),
                     options=self.dspark_options,
-                    cap_to_block=self._composition_long_copies()),
+                    cap_to_block=self._composition_long_copies() or self._prompt_copy_long(),
+                    clamp_requests=self._prompt_copy_long()),
                 self.descriptor,
             )
             if cost_depth is not None:
@@ -979,7 +980,22 @@ class Inkling2Adapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
         if self._composition_long_copies():
             span = int(self.external_policy["proposal_composition"]["prompt_lookup_max_span"])
             ceiling = max(ceiling, span)
+        if self._prompt_copy_long():
+            from ..runtime.prompt_copy_round import PromptCopyPolicy
+
+            span = PromptCopyPolicy.from_value(self.external_policy["prompt_copy_round"]).max_tokens
+            ceiling = max(ceiling, span)
         return ceiling
+
+    def _prompt_copy_long(self):
+        """An explicit ``prompt_copy_round`` (opt-in): its copies may run past
+        the drafter block (MTPLX copies up to 24 tokens), so ``num_draft`` may
+        rise to its ``max_tokens``; the DSpark backend stays capped to its
+        block and clamps longer requests (``clamp_requests``)."""
+        from ..runtime.prompt_copy_round import PromptCopyPolicy
+
+        value = (getattr(self, "external_policy", None) or {}).get("prompt_copy_round")
+        return PromptCopyPolicy.from_value(value) is not None
 
     def _composition_long_copies(self):
         """An explicit composition with ``prompt_lookup_max_span`` (opt-in)."""
@@ -1270,6 +1286,11 @@ class Inkling2Adapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
                 "qualified": False,
                 "weights_present": bool(getattr(self, "has_mtp", False)),
                 "num_draft": self._external_num_draft() if getattr(self, "draft_model", None) is not None else None,
+                # prompt_copy_round only: the engine depth above is the copy
+                # span; DSpark rounds draft at most this many tokens.
+                **({"dspark_draft_depth": _dspark_backend_depth(self.draft_model)}
+                   if getattr(self, "draft_model", None) is not None
+                   and getattr(self, "_prompt_copy_long", lambda: False)() else {}),
                 "stats": _drafter_stats(getattr(self, "draft_model", None)),
                 "prefill_reclaim": bool(getattr(self, "dspark_prefill_reclaim", False)),
                 "predraft": bool(getattr(self, "dspark_predraft", False)),
@@ -1295,6 +1316,14 @@ def kv_q8_receipt(selected, *, layout=None):
     if layout is not None:
         out["cache_layout"] = layout
     return out
+
+
+def _dspark_backend_depth(draft):
+    """The DSpark backend's own draft depth (below any wrapper)."""
+    while hasattr(draft, "backend"):
+        draft = draft.backend
+    depth = getattr(draft, "num_draft", None)
+    return int(depth) if depth is not None else None
 
 
 def _drafter_stats(draft):

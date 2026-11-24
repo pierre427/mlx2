@@ -163,6 +163,18 @@ PHASES = (
     {"name": "dspark_composed_splitk_b1", "route": "dspark", "width": 1, "reference": "ordinary_b1",
      "policy": {**DSPARK_POLICY, **COMPOSED, "inkling2_verify_splitk": True}, "cells": "full",
      "counter": "verify_splitk_calls", "status_flag": "prefill_reclaim"},
+    # MTPLX ingest 2026-11-23 (default off, unqualified): the round decided on
+    # the device with lazy drafts (one host read per round), DSpark depth 4,
+    # and prompt-copy rounds (copies up to 24 tokens; DSpark clamped to 7).
+    {"name": "dspark_round_b1", "route": "dspark", "width": 1, "reference": "ordinary_b1",
+     "policy": {**DSPARK_POLICY, "device_round": {"lazy_draft": True, "decide": True}},
+     "cells": "full"},
+    {"name": "dspark_d4_b1", "route": "dspark", "width": 1, "reference": "ordinary_b1",
+     "policy": {**DSPARK_POLICY, "num_draft": 4}, "cells": "full"},
+    {"name": "dspark_copy_b1", "route": "dspark", "width": 1, "reference": "ordinary_b1",
+     "policy": {**DSPARK_POLICY, "num_draft": 24, "prompt_copy_round": {"max_tokens": 24},
+                "device_round": {"lazy_draft": True, "decide": True}},
+     "cells": "full"},
 )
 # Every arm except default_b1 starts from the reference path: the adapter
 # defaults changed on 2026-11-22, and the historical arms mean "reference plus
