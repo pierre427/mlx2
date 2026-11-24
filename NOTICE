@@ -1483,6 +1483,21 @@ runtime. See provenance/maxwell-moe.NOTICE. The full Apache-2.0 text is this
 repository's LICENSE.
 
 ------------------------------------------------------------------------------
+Ling-3.2-air vision tower — mlx-vlm (https://github.com/Neywa-Labs/mlx-vlm,
+revision 67599f2e8ec31bf35cbb7b02794114f20844f0bb,
+mlx_vlm/models/qwen3_vl/vision.py and config.py) — MIT License, Copyright (c)
+2025 Prince Canuma.
+
+src/mlx2/runtime/models/ling32_vision.py adapts the Qwen3-VL vision tower
+(patch embedding, 2D vision RoPE, position-table interpolation, pre-norm
+blocks) to the Ling-3.2-air geometry: DeepStack dropped, a norm-only merger
+and the vendor linear_proj projector added, rotary and position tables
+rebuilt with numpy index construction. The image processor in
+src/mlx2/adapters/ling32_air_images.py follows the vendor Qwen2-VL law of
+inclusionAI/Ling-3.2-air (MIT License, read, not copied). The MIT permission
+notice is reproduced in the mlx-vlm section earlier in this file.
+
+------------------------------------------------------------------------------
 MTPLX by Youssof Altoukhi (https://github.com/youssofal/mtplx, revision
 3890be556160af48887d5bfbf5304c4ad5b9417f) — Apache License 2.0, Copyright
 2026 Youssof Altoukhi.

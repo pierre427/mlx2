@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import replace
+from pathlib import Path
 
 from ..contracts import Capability, ModelDescriptor, StatePlane
 from ..sampling_defaults import MODEL_CARD, SamplingDefaults, VendorSampling
@@ -206,6 +207,18 @@ class Ling32AirAdapter(ling3_flash.Ling3FlashAdapter):
         from .mtp_depth_cap import validate_self_mtp_num_draft
 
         policy = dict(execution_policy or {})
+        # Vision mode (opt-in): image prompts on the ordinary route only; see
+        # ling32_air_vl. Off, nothing below changes (text-only artifact use).
+        self.vision_enabled = policy.pop("ling_vision", False)
+        if type(self.vision_enabled) is not bool:
+            raise ValueError("ling_vision must be a boolean")
+        if self.vision_enabled and ("draft_model" in policy or "num_draft" in policy
+                                    or "prompt_lookup" in policy):
+            raise ValueError("Ling-3.2-air vision mode serves the ordinary route only: start "
+                             "the server with --ordinary (native MTP, AST and prompt lookup "
+                             "do not carry image M-RoPE yet)")
+        self.image_policy = None
+        self.multimodal_routes = frozenset()
         # Native MTP chain route: ``num_draft`` without a draft_model (the
         # vLLM recipe on the card uses 3; sglang NEXTN defaults lower).
         self._num_draft = 2
@@ -215,6 +228,8 @@ class Ling32AirAdapter(ling3_flash.Ling3FlashAdapter):
             # Native-MTP tree tiles: anchor + the default 3x5 topology (depth 5).
             policy.setdefault("num_draft", self.EXTERNAL_DEFAULT_NUM_DRAFT)
         super().__init__(model_path, execution_policy=policy, weight_streaming=weight_streaming)
+        if self.vision_enabled:
+            self._enable_vision()
         self.page_in_receipt = None
         if os.environ.get("MLX2_PAGE_IN_WEIGHTS") == "1" and self.weight_stream is None:
             self.page_in_receipt = self._page_in_weights()
@@ -239,6 +254,74 @@ class Ling32AirAdapter(ling3_flash.Ling3FlashAdapter):
             touched += value.nbytes
         return {"seconds": round(time.time() - started, 1), "bytes": touched}
 
+    def _enable_vision(self):
+        import hashlib
+        import json
+
+        from ..runtime.models.ling32_vision import load_vision
+        from .ling32_air_images import policy as image_policy
+        from .ling32_air_vl import LingVisionModel
+
+        if self.weight_stream is not None:
+            raise ValueError("Ling-3.2-air vision mode requires resident weights")
+        path = self.identity["path"]
+        self.image_policy = image_policy(path)
+        vision, projector = load_vision(path)
+        vl_source = Path(__file__).with_name("ling32_air_vl.py").read_bytes()
+        mrope = (Path(__file__).parents[1] / "runtime/models/ling_mrope.py").read_bytes()
+        # vision.safetensors is outside the indexed shards the base fingerprint
+        # covers: its bytes enter the vision (and so APCv2/media) identity.
+        weights = hashlib.sha256()
+        with open(Path(path) / "vision.safetensors", "rb") as handle:
+            for block in iter(lambda: handle.read(1 << 24), b""):
+                weights.update(block)
+        revision = hashlib.sha256(self.image_policy["revision"].encode() + vl_source + mrope
+                                  + weights.hexdigest().encode()).hexdigest()
+        self.model = LingVisionModel(self.model, vision, projector, self.config)
+        # Vision-mode caches carry an M-RoPE plane: a distinct APCv2 identity and layout.
+        digest = hashlib.sha256((self.identity["fingerprint"] + ":ling32-vl-v1:" + revision).encode()).hexdigest()
+        self.identity = {**self.identity, "fingerprint": digest, "vision_revision": revision}
+        self.layout += ":ling32-vl-v1:" + revision
+        self.descriptor = replace(
+            self.descriptor, cache_layout=self.layout,
+            capabilities=self.descriptor.capabilities | {Capability.VISION},
+            metadata={**self.descriptor.metadata, "scope": "text+image (vision mode, ordinary route)"},
+        )
+        self.multimodal_routes = frozenset({"ordinary"})
+        self.vision_receipt = {"implemented": True, "qualified": False, "modalities": ["image"],
+                               "routes": ["ordinary"], "revision": revision,
+                               "processor": json.loads(json.dumps(self.image_policy))}
+
+    # Serving calls validate_prefill_inputs with no payload too, so image
+    # tokens typed into a text prompt are refused, not embedded.
+    validates_absent_prefill_inputs = True
+
+    def prepare_multimodal_request(self, request, *, file_loader=None):
+        from .ling32_air_vl import prepare
+
+        return prepare(self, request, file_loader=file_loader)
+
+    def validate_prefill_inputs(self, request, remaining_tokens, prefill_input):
+        image = self.config.get("image_token_id")
+        if prefill_input is None:
+            if image is not None and any(t == image for t in remaining_tokens):
+                raise ValueError("Ling-3.2-air image tokens cannot run without their image payload")
+            return None
+        if (not self.vision_enabled or not request.get("_mlx2_media_fingerprint")
+                or set(prefill_input) != {"pixel_values", "image_grid_thw", "_mlx2_rope_media_end"}):
+            raise ValueError("Unbound Ling-3.2-air image prefill")
+        return prefill_input
+
+    def diagnostics(self):
+        result = super().diagnostics()
+        if getattr(self, "vision_enabled", False):
+            from ..runtime.models import ling32_vision
+
+            result["vision"] = {**self.vision_receipt,
+                                "counts": dict(self.model.vision_stats),
+                                "tower_counts": dict(ling32_vision.vision_stats)}
+        return result
+
     def _model_kwargs(self):
         return {"mtp": True}
 
@@ -256,6 +339,8 @@ class Ling32AirAdapter(ling3_flash.Ling3FlashAdapter):
         super()._bind_optimizations()
 
     def profile_name(self, mtp):
+        if mtp and getattr(self, "vision_enabled", False):
+            raise ValueError("Ling-3.2-air vision mode serves the ordinary route only")
         if mtp:
             return f"ling32-air-e4r8-apcv2-mtp{self._num_draft}"
         return self.profile
@@ -373,6 +458,10 @@ class Ling32AirAdapter(ling3_flash.Ling3FlashAdapter):
         return callable_tools(request)
 
     def prompt_tokens(self, request):
+        if "_mlx2_prompt_tokens" in request:
+            if not self.vision_enabled or not request.get("_mlx2_media_fingerprint"):
+                raise ValueError("Unbound Ling-3.2-air image prompt")
+            return list(request["_mlx2_prompt_tokens"])
         if "messages" not in request:
             return self.tokenizer.encode(request["prompt"], add_special_tokens=False)
         return self.tokenizer.apply_chat_template(

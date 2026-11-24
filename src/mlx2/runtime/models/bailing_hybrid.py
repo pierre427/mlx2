@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import mlx.core as mx
+import numpy as np
 from mlx import nn
 
 from ..prefill_checkpoint_rows import select_checkpoint_rows
@@ -83,6 +84,8 @@ class ModelArgs(BaseModelArgs):
     # masking). Ling 3 Flash's oQ4 config also lists router_dtype/limit lists
     # but was served (and qualified) without them, with a quantized router.
     vendor_v32_laws: bool = False
+    # Ling-3.2-air VL: [T, H, W] rotary frequency sections of 3D M-RoPE (ling_mrope).
+    mrope_section: list | None = None
 
 
 def swiglu_limit(values: list[float] | None, layer_idx: int | None) -> float | None:
@@ -226,6 +229,11 @@ class MultiLatentAttention(nn.Module):
                 mscale = 0.1 * mscale_all_dim * math.log(scaling_factor) + 1.0
                 self.scale *= mscale * mscale
 
+        self.rope_base = float(args.rope_theta)
+        # 3D M-RoPE here is the unscaled pair-interleaved law only (no YaRN).
+        self.mrope_section = (tuple(args.mrope_section)
+                              if args.mrope_section is not None and args.rope_interleave
+                              and args.rope_scaling is None else None)
         self.rope = initialize_rope(
             dims=self.qk_rope_head_dim,
             base=args.rope_theta,
@@ -241,6 +249,7 @@ class MultiLatentAttention(nn.Module):
         cache: KVCache | None = None,
         *,
         tree=None,
+        rope_positions=None,
     ) -> mx.array:
         batch, length, _ = x.shape
 
@@ -264,8 +273,11 @@ class MultiLatentAttention(nn.Module):
         kv_latent = self.kv_a_layernorm(compressed_kv)
 
         offset = _cache_offset(cache)
-        q_pe = self.rope(q_pe, offset=offset) if tree is None else tree.rope(self.rope, q_pe, offset)
-        k_pe = self.rope(k_pe, offset=offset) if tree is None else tree.rope(self.rope, k_pe, offset)
+        if rope_positions is None:
+            q_pe = self.rope(q_pe, offset=offset) if tree is None else tree.rope(self.rope, q_pe, offset)
+            k_pe = self.rope(k_pe, offset=offset) if tree is None else tree.rope(self.rope, k_pe, offset)
+        else:
+            q_pe, k_pe = self._rope_at(q_pe, k_pe, rope_positions, tree)
 
         kv_latent = mx.expand_dims(kv_latent, axis=1)
         segmented = tree is None and cache is not None and hasattr(cache, "row_views")
@@ -298,6 +310,51 @@ class MultiLatentAttention(nn.Module):
 
         output = output.reshape(batch, length, -1)
         return self.dense(output)
+
+    def _rope_at(self, q_pe, k_pe, positions, tree):
+        """Request-owned positions (Ling-3.2-air vision mode, ``ling_mrope``).
+
+        An ``int`` or per-row ``mx.array`` replaces the cache offset (text after an
+        image: ``slot + delta``); a ``[3, L]`` array is 3D M-RoPE for one row.
+        """
+        if tree is not None:
+            raise ValueError("Ling tree verification does not take request-owned RoPE positions")
+        if isinstance(positions, np.ndarray):
+            if q_pe.shape[0] != 1:
+                raise ValueError("Ling 3D M-RoPE positions are one request's rows")
+            from .ling_mrope import mrope_rotate
+
+            base, section = self.rope_base, self.mrope_section
+            if section is None:
+                raise ValueError("this Ling artifact has no supported 3D M-RoPE law "
+                                 "(needs mrope_section, rope_interleave and no rope_scaling)")
+            if positions.ndim != 2 or positions.shape != (3, q_pe.shape[-2]):
+                raise ValueError("Ling 3D M-RoPE positions must be [3, L]")
+            # Runs whose three planes are equal and consecutive are 1D RoPE: they
+            # take fast.rope at their offset, bitwise the text path. Only image
+            # rows (unequal planes) use the 3D rotation.
+            equal = (positions[0] == positions[1]) & (positions[1] == positions[2])
+            qs, ks, start, length = [], [], 0, positions.shape[1]
+            while start < length:
+                stop = start + 1
+                if equal[start]:
+                    while (stop < length and equal[stop]
+                           and positions[0, stop] == positions[0, stop - 1] + 1):
+                        stop += 1
+                    offset = int(positions[0, start])
+                    qs.append(self.rope(q_pe[..., start:stop, :], offset=offset))
+                    ks.append(self.rope(k_pe[..., start:stop, :], offset=offset))
+                else:
+                    while stop < length and not equal[stop]:
+                        stop += 1
+                    rows = positions[:, start:stop]
+                    qs.append(mrope_rotate(q_pe[..., start:stop, :], rows, base=base, section=section))
+                    ks.append(mrope_rotate(k_pe[..., start:stop, :], rows, base=base, section=section))
+                start = stop
+            if len(qs) == 1:
+                return qs[0], ks[0]
+            return mx.concatenate(qs, axis=-2), mx.concatenate(ks, axis=-2)
+        return self.rope(q_pe, offset=positions), self.rope(k_pe, offset=positions)
 
     def _attend_latent(self, q_nope, q_pe, kv_latent, k_pe, mask, cache):
         """Reference latent attention over dense history -> [B, heads, L, v].
@@ -936,13 +993,19 @@ class DecoderLayer(nn.Module):
         cache: Any | None = None,
         *,
         tree=None,
+        rope_positions=None,
     ) -> mx.array:
-        attention_output = self.attention(
-            self.input_layernorm(x),
-            mask,
-            cache,
-            tree=tree,
-        )
+        if rope_positions is not None and self.is_global:
+            attention_output = self.attention(
+                self.input_layernorm(x), mask, cache, tree=tree, rope_positions=rope_positions,
+            )
+        else:
+            attention_output = self.attention(
+                self.input_layernorm(x),
+                mask,
+                cache,
+                tree=tree,
+            )
         hidden = x + attention_output
         mlp_output = self.mlp(self.post_attention_layernorm(hidden))
         return hidden + mlp_output
@@ -982,15 +1045,23 @@ class LanguageModel(nn.Module):
         cache: list[Any] | None = None,
         *,
         tail_row: bool = False,
+        inputs_embeds: mx.array | None = None,
+        rope_positions=None,
     ) -> mx.array:
         # Admits the NAX sorted gather for prompt chunks when the adapter
         # claimed it (bit-identical to stock sorted gather_qmm); a no-op
         # under claim_stock_moe and for decode rows.
         with moe_nax_gather.forward_scope(inputs, cache):
-            return self._forward(inputs, cache, tail_row=tail_row)
+            return self._forward(inputs, cache, tail_row=tail_row,
+                                 inputs_embeds=inputs_embeds, rope_positions=rope_positions)
 
-    def _forward(self, inputs, cache=None, *, tail_row=False):
-        hidden = self.word_embeddings(inputs)
+    def _forward(self, inputs, cache=None, *, tail_row=False, inputs_embeds=None,
+                 rope_positions=None):
+        """``inputs_embeds`` / ``rope_positions``: Ling-3.2-air vision mode only
+        (image features scattered into the embeddings; request-owned RoPE)."""
+        if (inputs_embeds is not None or rope_positions is not None) and tail_row:
+            raise ValueError("Ling vision-mode rows do not take the prompt tail path")
+        hidden = self.word_embeddings(inputs) if inputs_embeds is None else inputs_embeds
         if cache is None:
             cache = [None] * len(self.layers)
 
@@ -1006,6 +1077,8 @@ class LanguageModel(nn.Module):
             mask = attention_mask if layer.is_global else kda_mask
             if tail_row and index == last:
                 hidden = layer.tail(hidden, mask=mask, cache=layer_cache)
+            elif rope_positions is not None:
+                hidden = layer(hidden, mask=mask, cache=layer_cache, rope_positions=rope_positions)
             else:
                 hidden = layer(hidden, mask=mask, cache=layer_cache)
         return self.norm(hidden)
