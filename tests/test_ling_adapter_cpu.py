@@ -337,7 +337,7 @@ def test_ordinary_optimization_policy_loads_and_revisions_cache(tiny_ling):
         assert diagnostics['policy']['fused_mla_decode'] is False
         assert ordinary.diagnostics()['optimizations']['policy'] == {
             'merged_conv': False, 'fused_norm': False, 'fused_mla_decode': False,
-            'moe_nax': False, 'kda_fused': False,
+            'moe_nax': False, 'kda_fused': False, 'routed_moe_decode': False,
         }
     finally:
         ordinary.close()
@@ -368,3 +368,73 @@ def test_kda_fused_policy_revisions_cache_and_hashes_kernel_sources(tiny_ling):
         ordinary.close()
         if candidate is not None:
             candidate.close()
+
+
+def test_routed_moe_decode_is_bound_and_declines_bitwise_on_cpu(tiny_ling):
+    from mlx2.runtime.models import ling_routed_decode
+    from mlx2.runtime.models.bailing_hybrid import SparseMoeBlock
+
+    ordinary = ling3_flash.Ling3FlashAdapter(tiny_ling)
+    candidate = None
+    try:
+        candidate = ling3_flash.Ling3FlashAdapter(tiny_ling, execution_policy={
+            'ling_optimizations': {'routed_moe_decode': True},
+        })
+        assert candidate.layout != ordinary.layout
+        assert candidate.identity['fingerprint'] != ordinary.identity['fingerprint']
+        assert 'ling_routed_decode.py' in candidate.optimization_sources
+        blocks = [(a, m) for adapter in (ordinary, candidate)
+                  for a, m in [(adapter, m) for _, m in adapter.model.named_modules()
+                               if isinstance(m, SparseMoeBlock)]]
+        assert blocks and all(m.ling_routed_decode == (a is candidate) for a, m in blocks)
+        ling_routed_decode.status(reset=True)
+        caches = [adapter.model.make_cache() for adapter in (ordinary, candidate)]
+        for tokens in ([[1, 2, 3]], [[4]], [[5]]):
+            outputs = [adapter.model(mx.array(tokens), cache=cache)
+                       for adapter, cache in zip((ordinary, candidate), caches)]
+            mx.eval(outputs)
+            assert mx.array_equal(*outputs).item()
+        counts = candidate.diagnostics()['optimizations']['routed_moe_decode']
+        assert 'engaged' not in counts  # hidden 128 is outside the kernel gate
+        assert counts['decline:not_one_row'] == 2 and counts['decline:kernel_shape'] == 4
+        assert 'routed_moe_decode' not in ordinary.diagnostics()['optimizations']
+    finally:
+        ordinary.close()
+        if candidate is not None:
+            candidate.close()
+
+
+def test_routed_moe_decode_refuses_expert_streaming(tiny_ling):
+    with pytest.raises(ValueError, match='routed_moe_decode requires resident'):
+        ling3_flash.Ling3FlashAdapter(tiny_ling, execution_policy={
+            'ling_optimizations': {'routed_moe_decode': True},
+        }, weight_streaming=WeightStreamRequest(
+            mode="moe_experts", budget_bytes=128 << 10, read_workers=2,
+        ))
+
+
+def test_routed_decode_ab_script_phases_run_on_cpu(tiny_ling):
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "ling_routed_decode_ab",
+        Path(__file__).resolve().parents[1] / "scripts/research/ling_routed_decode_ab.py")
+    ab = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ab)
+    adapter = ling3_flash.Ling3FlashAdapter(tiny_ling, execution_policy={
+        'ling_optimizations': {'routed_moe_decode': True},
+    })
+    try:
+        model = adapter.model
+        stub = SimpleNamespace(prompt_tokens=lambda request: [1, 2, 3],
+                               tokenizer=SimpleNamespace(decode=lambda ids: " ".join(map(str, ids))))
+        parity = ab.parity_phase(model, list(range(1, 9)), mx)
+        assert parity["visits"] == 2 and parity["engaged"] == 0
+        assert {row["refusal"] for row in parity["rows"]} == {"kernel_shape"}
+        tokens = ab.tokens_phase(model, stub, 4, mx)
+        assert all(t["tokens_equal"] and t["logits_bitwise_steps"] == 4 for t in tokens)
+        timing = ab.ab_phase(model, {8: list(range(1, 9))}, 1, mx)
+        assert timing["8"]["off"]["steps"] == timing["8"]["routed"]["steps"] == ab.BLOCK
+        assert all(m.ling_routed_decode for _, m in ab.blocks(model))  # last block ran routed
+    finally:
+        adapter.close()

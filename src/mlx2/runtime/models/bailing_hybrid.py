@@ -835,6 +835,7 @@ class SparseMoeBlock(nn.Module):
             bias=args.use_bias,
         )
         self.gate = Gate(args)
+        self.ling_routed_decode = False
         shared_size = (
             args.moe_shared_expert_intermediate_size or args.moe_intermediate_size
         ) * args.num_shared_experts
@@ -846,7 +847,15 @@ class SparseMoeBlock(nn.Module):
 
     def __call__(self, x: mx.array) -> mx.array:
         indices, weights = self.gate(x)
-        output = self.switch_mlp(x, indices)
+        output = None
+        if self.ling_routed_decode:
+            # Opt-in (ling_optimizations.routed_moe_decode): one-token decode
+            # through the device-routed gate_up/down kernels; None declines.
+            from . import ling_routed_decode
+
+            output = ling_routed_decode.switch_glu(self.switch_mlp, x, indices)
+        if output is None:
+            output = self.switch_mlp(x, indices)
         output = (output * weights[..., None]).sum(axis=-2)
         if self.fp32_route_weights:
             output = output.astype(x.dtype)

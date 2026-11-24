@@ -189,6 +189,11 @@ class Ling32AirAdapter(ling3_flash.Ling3FlashAdapter):
     artifact_inspector = staticmethod(inspect_artifact)
     profile = "ling32-air-e4r8-apcv2-ordinary"
     family_label = "Ling-3.2-air"
+    # Pierre 2026-11-23: kernels that pass the checkpoint smoke go default on.
+    # kda_fused passed (bitwise, engaged, not slower); routed_moe_decode was
+    # slower and stays off (see ling3_flash.optimization_policy).
+    # {"ling_optimizations": {"kda_fused": false}} selects the eager path.
+    optimization_overrides = {"kda_fused": True}
     cache_layout_base = CACHE_LAYOUT
     tree_variant_prefix = "mlx2-e4r8-mtp-ast"
     # No Ling-3.2-air UBTree drafter exists; the 3.0 drafter is a different

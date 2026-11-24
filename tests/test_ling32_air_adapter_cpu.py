@@ -64,3 +64,18 @@ def test_page_in_reads_every_parameter_once():
     expected = sum(v.nbytes for v in (adapter.model.layers[0].weight, adapter.model.layers[0].bias,
                                       adapter.model.layers[1].weight, adapter.model.layers[1].bias))
     assert receipt["bytes"] == expected and receipt["seconds"] >= 0
+
+
+def test_kernel_defaults_are_air_only():
+    from mlx2.adapters import ling3_flash
+
+    flash = ling3_flash.optimization_policy(None, ling3_flash.Ling3FlashAdapter.optimization_overrides)
+    assert not any(flash.values())  # Ling 3 Flash: every optimization stays off
+    air = ling3_flash.optimization_policy(None, ling32_air.Ling32AirAdapter.optimization_overrides)
+    assert air["kda_fused"] is True and air["routed_moe_decode"] is False
+    assert sum(air.values()) == 1
+    opt_out = ling3_flash.optimization_policy({"kda_fused": False},
+                                              ling32_air.Ling32AirAdapter.optimization_overrides)
+    assert opt_out["kda_fused"] is False
+    with pytest.raises(ValueError, match="override"):
+        ling3_flash.optimization_policy(None, {"nope": True})

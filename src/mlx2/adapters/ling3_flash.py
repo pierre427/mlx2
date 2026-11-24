@@ -23,7 +23,7 @@ from .ordinary_text import OrdinaryTextAdapter
 CACHE_LAYOUT = "ling3-flash-hybrid-kda-bounded-mla-v3"
 
 
-def optimization_policy(value):
+def optimization_policy(value, overrides=None):
     # The shared Kimi split MLA is a different reduction law. Synthetic M5
     # checks at 257/4097 keys were slower than the existing Ling attention;
     # retain it as an explicit experiment, never an automatic selection.
@@ -33,10 +33,24 @@ def optimization_policy(value):
     # FN measured the MoE layer 1.27-1.67x, prefill up to 1.20x. Off until a
     # Ling checkpoint A/B shows engagement and a win.
     # kda_fused: the one-launch B1 KDA decode body (ling_kda_fused decode_v1,
-    # port of glm53_kda_fused), bitwise vs the eager chain on synthetic
-    # layers. Off until a Ling checkpoint A/B shows engagement and a win.
+    # port of glm53_kda_fused). Ling-3.2-air smoke 2026-11-23 (Ling-3.2-air-
+    # mlx2-e4r8@sha256:12d9f57b..., tree c02b49792 on main 50f52f56f): all
+    # decode logit rows bitwise equal to eager, 20160 engagements, decode
+    # +1.9 / +6.0 % on the two warm prompts. Default ON for Ling-3.2-air only
+    # (Pierre 2026-11-23, Ling32AirAdapter.optimization_overrides); Ling 3
+    # Flash stays off (no checkpoint on disk to test).
+    # routed_moe_decode: one-token routed experts through the DS4.1 device-
+    # routed gate_up/down kernels (ling_routed_decode). Not a route-readback
+    # fix (resident Ling decode has none); launch fusion only. Same smoke:
+    # bitwise and engaged (23040), but decode -9.1 / -3.8 % on the warm
+    # prompts, and kda_fused alone beat kda_fused + routed. Clearly not
+    # helpful on Ling's 8-of-512 shape: left OFF.
     defaults = {"merged_conv": False, "fused_norm": False, "fused_mla_decode": False,
-                "moe_nax": False, "kda_fused": False}
+                "moe_nax": False, "kda_fused": False, "routed_moe_decode": False}
+    if overrides:
+        if set(overrides) - defaults.keys():
+            raise ValueError("unknown Ling optimization default override")
+        defaults = {**defaults, **overrides}
     if value is None:
         return defaults
     if not isinstance(value, dict) or set(value) - defaults.keys():
@@ -224,6 +238,8 @@ class Ling3FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
     # loader installs bounded row caches before materializing any expert table.
     weight_streaming_modes = frozenset({"moe_experts"})
     family_label = "Ling 3 Flash"
+    # Adapter-owned optimization defaults on top of optimization_policy's.
+    optimization_overrides = {}
     cache_layout_base = CACHE_LAYOUT
     tree_variant_prefix = "oq4-ubtree-ast"
     ast_prompt_lookup_tiles = False
@@ -278,7 +294,9 @@ class Ling3FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
 
         stream_request = require_declared(type(self), weight_streaming)
         policy = dict(execution_policy or {})
-        self.optimizations = optimization_policy(policy.pop("ling_optimizations", None))
+        self.optimizations = optimization_policy(
+            policy.pop("ling_optimizations", None), self.optimization_overrides
+        )
         external = self._parse_external_policy(policy, family="Ling 3 Flash")
         _tree_controls(self.external_policy)
         if type(self.external_policy.get("ast_graft_prompt_lookup", False)) is not bool:
@@ -297,6 +315,8 @@ class Ling3FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
         # gather, no NAX scope): pin the MoE process globals for this load.
         from .process_globals import claim_moe, claim_stock_moe
 
+        if self.optimizations["routed_moe_decode"] and stream_request is not None:
+            raise ValueError("Ling routed_moe_decode requires resident stacked experts")
         if self.optimizations["moe_nax"]:
             if stream_request is not None:
                 raise ValueError("Ling moe_nax requires resident experts (streaming forces stock arithmetic)")
@@ -456,6 +476,11 @@ class Ling3FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             from ..runtime.models.ling_kda_fused import served_spellings
 
             self.kda_fused_spellings = served_spellings()
+        from ..runtime.models.bailing_hybrid import SparseMoeBlock
+
+        for _name, module in self.model.named_modules():
+            if isinstance(module, SparseMoeBlock):
+                module.ling_routed_decode = self.optimizations["routed_moe_decode"]
         if any(self.optimizations.values()):
             root = Path(__file__).parents[1] / "runtime" / "models"
             sources = ["bailing_hybrid.py", "ling_tree.py"]
@@ -469,6 +494,9 @@ class Ling3FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
                 sources += [name for name in ("ling_kda_fused.py", "ling_fused.py",
                                               "qwen4_fused_gdn.py", "served_exp.py", "gated_delta.py")
                             if name not in sources]
+            if self.optimizations["routed_moe_decode"]:
+                sources += ["ling_routed_decode.py", "deepseek_v41_routed_decode.py",
+                            "qwen4_routed_decode.py", "switch_layers.py"]
             self.optimization_sources = {name: hashlib.sha256((root/name).read_bytes()).hexdigest()
                                          for name in sources}
             digest = hashlib.sha256((self.identity["fingerprint"] + ":ling-kimi-ops-v1:"
@@ -720,6 +748,11 @@ class Ling3FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
         optimizations = {"policy": getattr(self, "optimizations", optimization_policy(None)),
                          "source_hashes": getattr(self, "optimization_sources", {}),
                          "graph_build_calls": dict(calls)}
+        if optimizations["policy"].get("routed_moe_decode"):
+            from ..runtime.models import ling_routed_decode
+
+            # Process-wide graph-build counters (engaged / decline:<reason>).
+            optimizations["routed_moe_decode"] = ling_routed_decode.status()
         if self.draft_model is None:
             return {"route": "ordinary", "qualification": "unqualified",
                     "optimizations": optimizations}

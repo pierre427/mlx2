@@ -42,6 +42,7 @@ VARIANTS = {
     "qwen4_exp": ("base", "flash-next"),
     "flint": ("40b-a2.5b",),
     "llama": ("base", "33b"),
+    "bailing_hybrid": ("base", "ling32_air"),
 }
 
 # Features that are selected through execution policy or adapter configuration
@@ -97,6 +98,7 @@ FEATURES = (
     "source_expert_decayed_retention", "native_fp_tensor_verify", "apc_inpass_checkpoints",
     "ling_optimizations", "ast_apcv2_current_source",
     "ling_kda_fusion_components", "ling_split_mla_components",
+    "ling_kda_fused_decode", "ling_routed_moe_decode",
     "inkling_fused_ops", "inkling_q2_down_combine", "inkling_inline_relative_attention",
     # Inkling 2 Mini (2026-11-21).
     "inkling2_fused_projections", "inkling2_head_kernel", "inkling2_sink_sdpa", "inkling2_sink_slot",
