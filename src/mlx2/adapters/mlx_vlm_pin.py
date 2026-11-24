@@ -1,10 +1,11 @@
 """The mlx-vlm revision the Gemma 4, Gemma 3n, MiniCPM-o and Qwen-Image routes execute.
 
 These routes import mlx-vlm model code at runtime, so the installed revision is
-part of what a qualification run measured.  ``MLX_VLM_REVISION`` is Blaizzy
-mlx-vlm main after the 0.7.3 release (0.7.3 plus the empty 3/5/6-bit quantized
-KV width fix #2342, Qwen3.5 batched left padding #2357, small top-p / low
-temperature sampling #2358 and interleaved image order #2362).  Adapters refuse
+part of what a qualification run measured.  ``MLX_VLM_REVISION`` is
+Neywa-Labs/mlx-vlm (formerly Blaizzy/mlx-vlm, renamed 2026-11) main after
+the 0.7.3 release (0.7.3 plus the empty 3/5/6-bit quantized KV width fix
+#2342, Qwen3.5 batched left padding #2357, small top-p / low temperature
+sampling #2358 and interleaved image order #2362).  Adapters refuse
 to load on any other revision or on an editable checkout with local changes
 under ``mlx_vlm/``, and the resolved revision is recorded in the runtime
 identity so receipts bind it.

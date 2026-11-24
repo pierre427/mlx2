@@ -252,7 +252,7 @@ def main() -> int:
         "torch_default_device": torch_default_device,
         "metal_imported": "mlx" in sys.modules or "mlx.core" in sys.modules,
         "source": {
-            "repository": "Blaizzy/mlx-vlm",
+            "repository": "Neywa-Labs/mlx-vlm",
             "revision": source_revision,
             "path": str(source),
         },

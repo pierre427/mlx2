@@ -537,7 +537,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 ------------------------------------------------------------------------------
-RADIO image encoder: mlx-vlm (https://github.com/Blaizzy/mlx-vlm, revision
+RADIO image encoder: mlx-vlm (https://github.com/Neywa-Labs/mlx-vlm, revision
 06ff63d6e9c8e14649ed3e5cb380810d27c790b8, mlx_vlm/models/nemotron_h_nano_omni/vision.py),
 adapted in src/mlx2/adapters/radio.py
 
@@ -957,7 +957,7 @@ The MIT permission notice and warranty disclaimer are as in the DwarfStar /
 ds4 section above.
 
 ------------------------------------------------------------------------------
-mlx-vlm (https://github.com/Blaizzy/mlx-vlm) — MIT License
+mlx-vlm (https://github.com/Neywa-Labs/mlx-vlm) — MIT License
 
 - Revision 8a5e704e0fe43cd8654c144c4ecbd4c8aececeb5
   (mlx_vlm/models/deepseek_v4/language.py, hyper_connection.py, config.py,
@@ -1120,7 +1120,7 @@ from the following sources, which are attributed here:
 - llama.cpp (https://github.com/ggml-org/llama.cpp, revision aa588a346335,
   src/models/glm5-next.cpp) — MIT License, Copyright (c) 2023-2026 The ggml
   authors. Its MIT permission notice is reproduced earlier in this file.
-- mlx-vlm (https://github.com/Blaizzy/mlx-vlm, revision 64ff26c53433,
+- mlx-vlm (https://github.com/Neywa-Labs/mlx-vlm, revision 64ff26c53433,
   mlx_vlm/models/glm5_next/language.py) — MIT License, Copyright (c) 2025
   Prince Canuma. Its MIT permission notice is reproduced in the mlx-vlm
   section earlier in this file.
@@ -1139,7 +1139,7 @@ and the installed MLX 0.32.4 Metal kernels (MIT License). The Apache License
 mlx2 source files.
 
 ------------------------------------------------------------------------------
-mlx-vlm (https://github.com/Blaizzy/mlx-vlm) — MIT License, Copyright (c)
+mlx-vlm (https://github.com/Neywa-Labs/mlx-vlm) — MIT License, Copyright (c)
 2025 Prince Canuma. Additional adapted files (the MIT permission notice is
 reproduced in the mlx-vlm section earlier in this file):
 - Revision 67599f2e8ec31bf35cbb7b02794114f20844f0bb
