@@ -418,3 +418,23 @@ def test_ast_and_dfly2_commit_masked_ordinary_decode_under_an_overlay(tmp_path, 
         assert adapter.diagnostics()["ast"]["selected"]
     finally:
         adapter.close()
+
+
+@pytest.mark.parametrize("draft", ["embedded_dfly", "MODEL_PATH"])
+def test_amoeba_mask_keeps_the_dfly2_route(tmp_path, tiny, draft):
+    """A box mask is a model key only: with the same draft_model (``embedded_dfly``, or the artifact's own path as
+    ``server --ast`` passes it) the external/AST policy and drafter kind are identical with and without the mask, so
+    a boxed arm runs base's DFly2 route (2026-11-23: a policy file with the mask alone selects ordinary instead)."""
+    from mlx2.adapters import hy_v4_flash as A
+
+    config, W, _, _ = tiny
+    (tmp_path / "art").mkdir()
+    root = _tiny_artifact(tmp_path / "art", config, W)
+    bundle = _mask_bundle(root, tmp_path / "mask")
+    d = str(root) if draft == "MODEL_PATH" else draft
+    m0, e0, k0 = A._parse_policy({"draft_model": d}, str(root))
+    m1, e1, k1 = A._parse_policy({"draft_model": d, "amoeba_mask": {"bundle": str(bundle), "mode": "zero"}}, str(root))
+    assert (e1, k1) == (e0, k0) and k1 == "dfly" and e1["num_draft"] == 5
+    assert m1 == {**m0, "amoeba_mask": {"bundle": str(bundle), "mode": "zero"}}
+    m2, e2, k2 = A._parse_policy({"amoeba_mask": str(bundle)}, str(root))      # the mask alone: no drafter
+    assert e2 == {} and k2 is None

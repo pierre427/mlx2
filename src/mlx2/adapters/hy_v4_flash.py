@@ -223,6 +223,11 @@ def fusion_policy(policy: dict) -> dict:
     return {k: policy.get(k, v) for k, v in FUSION_SERVED_DEFAULTS.items()}
 
 
+# ``pageout`` stays an explicit opt-in and is not helpful as built (2026-11-23, Hy4-flash-MLX-4.6bit-mlx2@f2a8fa8d,
+# d8d9d9705, GSM8K box cut 0.1): decode ~1.1 tok/s against 32 tok/s for ``zero`` on the same ordinary route (each routed
+# expert runs up to F/64 = 24 sequential 64-neuron block passes), prefill ~24 tok/s, and no memory saved (server
+# footprint ~93 GB against ~85 GB base). Use ``zero`` for box quality runs; evidence
+# qualification/runs/hy4-gsm8k-box-cut0.1-20261123-d8d9d9705/evidence.json.
 AMOEBA_MASK_MODES = ("zero", "pageout")
 
 
@@ -397,6 +402,9 @@ def inspect_artifact(model_path: str | Path) -> dict:
             required |= {p + "mlp.gate.e_score_correction_bias", p + "mlp.combine_output_norm.weight"}
             if sanitized:
                 required.add(p + "mlp.experts.gate_proj.weight")
+            elif isinstance(config.get("mlx2_expert_buckets"), dict):
+                # A baked aMoEba box (runtime/models/hy_v4_flash_buckets.py): width-bucketed banks + table.
+                required |= {p + "mlp.switch_mlp.buckets.0.gate_proj.weight", p + "mlp.switch_mlp.bucket_table"}
             elif p + "mlp.switch_mlp.gate_proj.weight" in weights:
                 # mlx-lm expert naming (unfused, ``switch_mlp``).
                 required |= {p + f"mlp.switch_mlp.{r}_proj.weight" for r in ("gate", "up", "down")}
@@ -799,6 +807,17 @@ DET_TILE_DEFAULT_MANIFESTS = {
         "hy4-flash-mlx-4.6bit-mlx2-f2a8fa8d2b7f",
 }
 DET_TILE_ASSET_ROOT = Path(__file__).resolve().with_name("assets") / "det_tiles"
+
+
+def det_tile_fingerprint(artifact) -> str:
+    """The checkpoint deterministic tiles bind to: a baked aMoEba box (``mlx2_expert_buckets``) is its source
+    checkpoint's zero-mask model, so it keeps that checkpoint's tile default and fit (2026-11-23)."""
+    spec = artifact["config"].get("mlx2_expert_buckets")
+    if isinstance(spec, dict):
+        src = str((spec.get("source") or {}).get("checkpoint", ""))
+        if "@" in src:
+            return src.rsplit("@", 1)[1]
+    return artifact["identity"]["fingerprint"]
 
 
 def default_det_tile_manifest(fingerprint: str) -> str | None:
@@ -1298,6 +1317,17 @@ def load_model(path, artifact, *, keep_dfly=False, engram_cache_rows=1 << 16, me
         raise ValueError("Hy4-flash latent_kv must be 'native' (default) or 'fp8'")
     args.latent_kv = latent_kv
     model = Model(args)
+    buckets = config.get("mlx2_expert_buckets")
+    model.expert_buckets = None
+    if buckets is not None:
+        from ..runtime.models import hy_v4_flash_buckets
+
+        if amoeba_mask is not None or moe_fused_gate_up or lazy:
+            raise ValueError("Hy4-flash baked expert buckets: the box is already baked (no amoeba_mask), the "
+                             "bucket banks are split gate/up (no moe_fused_gate_up), and research lazy loads "
+                             "read stock banks")
+        # Before quantize and the strict load: each sparse layer's bank becomes its bucket banks.
+        model.expert_buckets = hy_v4_flash_buckets.install(model, buckets)
     if engram_hash not in ENGRAM_HASH_MODES:
         raise ValueError(f"Hy4-flash engram_hash must be one of {ENGRAM_HASH_MODES}")
     # ``auto`` binds on the host, then switches to device hashing only if the
@@ -1365,6 +1395,10 @@ def load_model(path, artifact, *, keep_dfly=False, engram_cache_rows=1 << 16, me
         model.fuse_routed_gate_up(weights)
     model.load_weights(list(weights.items()), strict=True)
     weights.clear()
+    if model.expert_buckets is not None:
+        from ..runtime.models import hy_v4_flash_buckets
+
+        model.expert_buckets.update(hy_v4_flash_buckets.prepare(model, buckets))
     if keep_vision:
         from ..runtime.models.hy_v4_flash_vision import load_vision_tower
 
@@ -1641,6 +1675,15 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
                                  "(the grouped kernels read split gate/up tables)")
         self.amoeba_mask = None
         self.amoeba_mask_mode = None
+        self.expert_buckets = artifact["config"].get("mlx2_expert_buckets")
+        self._det_bind_fingerprint = det_tile_fingerprint(artifact) if self.expert_buckets is not None else None
+        if self.expert_buckets is not None:
+            clash = sorted(k for k in ("amoeba_mask", "moe_fused_gate_up", "moe_expert_read_once", "resident_bf16")
+                           if policy.get(k) not in (None, False))
+            if self.moe_nax != "off":
+                clash.append("moe_nax")
+            if clash:
+                raise ValueError(f"Hy4-flash baked expert buckets run their own split bucket banks: not with {clash}")
         if policy.get("amoeba_mask") is not None:
             from ..runtime.amoeba_neuron_mask import NeuronMaskBundle
             from ..runtime.models.hy_v4_flash import ModelArgs
@@ -1674,6 +1717,15 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
                                       resident_bf16=policy.get("resident_bf16", False),
                                       fusions=fusion_policy(policy),
                                       verify_phase_align=bool(external.get("verify_phase_align")))
+        if self.expert_buckets is not None:
+            # Own APCv2 namespace and receipt tag (the artifact fingerprint already differs from its source).
+            from ..runtime.models.hy_v4_flash_buckets import LAW as _BUCKET_LAW
+
+            from ..runtime.models.hy_v4_flash_buckets import SMALL_PATH as _BUCKET_PATH
+
+            self.layout = f"{self.layout}+{_BUCKET_LAW}-{str(self.expert_buckets.get('layout_digest', ''))[:16]}"
+            if _BUCKET_PATH == "fanout":                 # float32 block partials: its own numerics namespace
+                self.layout += "+fanout-fp32-v1"
         self.environment = configure_environment()
         from .process_globals import claim_moe, claim_stock_moe
 
@@ -1821,7 +1873,7 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
                                             "source": "policy_opt_out" if cap == 0 else "policy"}
         self.policy_defaults = defaults
         det = policy.get("amoeba_det_tiles")
-        fingerprint = artifact["identity"]["fingerprint"]
+        fingerprint = det_tile_fingerprint(artifact)
         packaged = default_det_tile_manifest(fingerprint)
         if det is None:
             self._det_tile_default = {"manifest": packaged, "defaulted": packaged is not None,
@@ -1839,7 +1891,7 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
         from ..runtime import amoeba_det_tiles as D
 
         manifest = D.admit_position_matched(
-            manifest_path, source_fingerprint=artifact["identity"]["fingerprint"],
+            manifest_path, source_fingerprint=det_tile_fingerprint(artifact),
             layers_count=int(text_config(artifact["config"])["num_hidden_layers"]))
         # Both are required: a manifest that does not say what its probe read, or under which
         # trunk numerics, cannot be checked against this route and fails closed.
@@ -1890,7 +1942,8 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
         # The artifact's own fingerprint: on a drafter route ``identity``
         # carries the target+drafter digest (its ``target_fingerprint`` is this one).
         tiles = D.build(manifest_path, None,
-                        source_fingerprint=self.identity.get("target_fingerprint", self.identity["fingerprint"]),
+                        source_fingerprint=(self._det_bind_fingerprint if getattr(self, "_det_bind_fingerprint", None)
+                                            else self.identity.get("target_fingerprint", self.identity["fingerprint"])),
                         layers_count=len(self.model.model.layers), route=route)
         if tiles.identity["manifest_sha256"] != manifest["_digest"]:
             raise ValueError("Hy4-flash calculator manifest changed during model loading")
@@ -2555,6 +2608,7 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             "moe_nax_gather": self._moe_nax_receipt(),
             "moe_top_k": getattr(self, "moe_top_k", None),
             "amoeba_mask": self._amoeba_mask_receipt(),
+            "expert_buckets": self._expert_buckets_receipt(),
             "sliding_attention_blocks": self._sliding_band_receipt(),
             "prefill_step_cap": self._prefill_step_cap_receipt(),
             "sparse_prefill_attention": self._sparse_prefill_receipt(),
@@ -2607,6 +2661,27 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
                 "modes": ENGRAM_HASH_MODES, "default": ENGRAM_HASH_DEFAULT, "implemented": True,
                 "exact": True, "qualified": False, "selected": mode == "device",
                 "observed_used": bool(stats.get("device_forwards")), "stats": stats}
+    def _expert_buckets_receipt(self):
+        spec = getattr(self, "expert_buckets", None)
+        if spec is None:
+            return {"implemented": True, "qualified": False, "selected": False, "observed_used": False}
+        calls = {"remap": 0, "sliced": 0, "fanout": 0}
+        model = getattr(self, "model", None)
+        if model is not None:
+            for layer in model.model.layers:
+                bank = getattr(getattr(layer, "mlp", None), "experts", None)
+                if hasattr(bank, "describe") and getattr(bank, "law", None) == spec.get("law"):
+                    for k, v in bank.describe()["calls"].items():
+                        calls[k] += v
+        return {"implemented": True, "qualified": False, "selected": True,
+                "observed_used": any(calls.values()), "calls": calls,
+                "small_path": (model.expert_buckets or {}).get("small_path") if model is not None else None,
+                "schema": spec.get("schema"), "law": spec.get("law"), "block": spec.get("block"),
+                "classes": spec.get("classes"), "layout_digest": spec.get("layout_digest"),
+                "source": spec.get("source"),
+                "expert_bytes_before": sum(v.get("bytes_before", 0) for v in spec.get("layers", {}).values()),
+                "expert_bytes_after": sum(v.get("bytes_after", 0) for v in spec.get("layers", {}).values())}
+
     def _amoeba_mask_receipt(self):
         bundle = getattr(self, "amoeba_mask", None)
         if bundle is None:

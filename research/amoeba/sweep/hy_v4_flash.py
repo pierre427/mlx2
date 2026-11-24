@@ -362,6 +362,10 @@ class HyV4FlashFamily:
         H, p = self.H, f"model.layers.{l}."
         w = {k[len(p):]: v for k, v in self._layer_weights(l).items()}
         layer = H.DecoderLayer(self.args, l)
+        buckets = self.config.get("mlx2_expert_buckets")
+        if buckets is not None:                              # a baked aMoEba box: the layer's bucket banks
+            from mlx2.runtime.models.hy_v4_flash_buckets import install_layer
+            install_layer(layer, l, buckets)
         self._quantize(layer, p, w)
         layer.load_weights(list(w.items()), strict=True)
         if l in self._round_trip:

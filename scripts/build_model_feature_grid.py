@@ -60,6 +60,8 @@ FEATURES = (
     # Hy4-flash night 2026-11-21: drafter q8, top-k, band attention, latches, calculator.
     "draft_quantization", "moe_top_k", "sliding_attention_blocks", "adaptive_verification",
     "cost_per_commit_handoff", "amoeba_det_tiles", "residual_ablation_overlays",
+    # Hy4-flash aMoEba neuron-mask serving (2026-11-23): one row per mode, the box cut named in the decision.
+    "amoeba_mask_zero", "amoeba_mask_pageout", "amoeba_box_bake_buckets",
     # Hy4-flash default autoscale bound (2026-11-21).
     "prefill_step_cap",
     # Hy4-flash opt-in sparse prefill kernel for indexed layers (2026-11-21).
