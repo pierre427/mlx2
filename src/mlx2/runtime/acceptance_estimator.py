@@ -186,6 +186,17 @@ class OnlineAcceptanceEstimator:
         outcome = -1 if rejected and accepted == 0 else int(accepted)
         self._round_best = outcome if self._round_best is None else max(self._round_best, outcome)
 
+    def reset_streak(self):
+        """Forget the reject-cooldown streak (a new request starts clean).
+
+        The streak and its pending solo rounds describe the request that
+        produced them; carried into the next request they forced solo rounds
+        on a prompt that never rejected (sweep 2026-11-23, ollama #19843
+        class).  The learned acceptance model is kept."""
+        self.cooldown = 0
+        self.low_streak = 0
+        self._round_best = None
+
     def finish_round(self):
         self.rounds += 1
         if self.reject_cooldown and self._round_best is not None:

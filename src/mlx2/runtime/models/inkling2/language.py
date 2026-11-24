@@ -103,6 +103,28 @@ def _route(x, weight, bias, top_k, route_scale):
     return indices, weights
 
 
+def _route_logdomain(x, weight, bias, top_k, route_scale):
+    """``inkling2_moe_logdomain_renorm`` (default off): ``_route`` with the
+    picked gate weights renormalized in the log domain.
+
+    ``sigmoid / (sum + 1e-20)`` underflows when every picked logit is at or
+    below about -90 (FP32 sigmoid is 0), silently zeroing the MoE output;
+    this keeps the same expert choice (same scores + bias) and computes
+    ``softmax(log_sigmoid(picked logits)) * route_scale``, with the stable
+    ``log_sigmoid(z) = min(z, 0) - log1p(exp(-|z|))``.  Idea: SGLang #50525
+    (rewritten).  Not bitwise equal to the default where both are finite."""
+    logits = x.astype(mx.float32) @ weight.astype(mx.float32).T
+    scores = mx.sigmoid(logits)
+    indices = mx.argpartition(-(scores + bias), top_k - 1, axis=-1)[..., :top_k]
+    indices = mx.stop_gradient(indices)
+    picked = mx.take_along_axis(logits, indices, axis=-1)
+    log_weights = mx.minimum(picked, 0) - mx.log1p(mx.exp(-mx.abs(picked)))
+    log_weights = log_weights - log_weights.max(axis=-1, keepdims=True)
+    weights = mx.exp(log_weights)
+    weights = weights / weights.sum(axis=-1, keepdims=True) * route_scale
+    return indices, weights
+
+
 @mx.compile
 def _combine_routes(out, weights):
     return (out.astype(mx.float32) * weights[..., None]).sum(axis=-2).astype(out.dtype)
@@ -1436,7 +1458,8 @@ class SparseMoE(nn.Module):
                 return moe_fast.fused_call(self, experts, x, weighted_sum=weighted)
             counts = self.__dict__.setdefault("moe_fast_counts", {})
             counts["declined:" + reason] = counts.get("declined:" + reason, 0) + 1
-        indices, weights = _route(
+        route = _route_logdomain if self.__dict__.get("_logdomain_renorm") else _route
+        indices, weights = route(
             x, _fp32(self, "gate_weight"), self.e_score_correction_bias, self.top_k, self.route_scale
         )
         fmt = self.__dict__.get("_act_quant")
@@ -2012,7 +2035,7 @@ class Model(nn.Module):
                           moe_nax_mxfp8=False, prefill_handover=False, pass_messages=False,
                           stage_a_kernel=False, gate_merge=False, attn_output_kernel=False,
                           embed_kernel=False, prefill_onelaunch_attention=False,
-                          native_replay=False):
+                          native_replay=False, moe_logdomain_renorm=False):
         """Adapter-owned opt-in execution switches (all default off).
 
         ``loop_passes`` None keeps the trained count.  ``moe_weighted_sum``
@@ -2033,6 +2056,11 @@ class Model(nn.Module):
             raise ValueError("Inkling 2 moe_decode_kernel requires moe_fused")
         if moe_panel_kernel and not moe_fused:
             raise ValueError("Inkling 2 moe_panel_kernel requires moe_fused")
+        if moe_logdomain_renorm and (moe_decode_kernel or moe_panel_kernel or native_replay):
+            # The Metal decode/panel epilogues and the native replay keep the
+            # reference renormalization; refuse rather than mix the two rules.
+            raise ValueError("Inkling 2 moe_logdomain_renorm is not combined with "
+                             "moe_decode_kernel, moe_panel_kernel or native_replay")
         nax_mxfp8_decline = None
         if moe_nax_mxfp8 and not moe_nax_gather:
             # Fail closed, counted (no load failure): an unset
@@ -2149,6 +2177,8 @@ class Model(nn.Module):
             object.__setattr__(layer.mlp, "_moe_decode_kernel", bool(moe_decode_kernel))
             # inkling2_moe_panel_kernel (moe_panel_kernel.py; hook in moe_fast).
             object.__setattr__(layer.mlp, "_moe_panel_kernel", bool(moe_panel_kernel))
+            # inkling2_moe_logdomain_renorm (_route_logdomain; default off).
+            object.__setattr__(layer.mlp, "_logdomain_renorm", bool(moe_logdomain_renorm))
             # inkling2_moe_nax_mxfp8: the MXFP8 expert tables (layers 20-23)
             # admit the NAX sorted gather's MXFP8 loader (moe_nax_gather,
             # canary-proven bitwise against the stock sorted kernel); a
@@ -2178,6 +2208,7 @@ class Model(nn.Module):
              "compile_decode_blocks": bool(compile_decode_blocks),
              "moe_decode_kernel": bool(moe_decode_kernel),
              "moe_panel_kernel": bool(moe_panel_kernel),
+             "moe_logdomain_renorm": bool(moe_logdomain_renorm),
              "moe_nax_mxfp8": bool(moe_nax_mxfp8) and nax_mxfp8_decline is None,
              "head_softcap_compiled": bool(head_softcap_compiled), "kv_q8": bool(kv_q8),
              "prefill_mask_bf16_budget": bool(prefill_mask_bf16_budget),

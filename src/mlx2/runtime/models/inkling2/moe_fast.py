@@ -68,6 +68,16 @@ def _route(x, weight, bias, top_k, route_scale):
 route_compiled = mx.compile(_route)
 
 
+def _route_logdomain(*args):
+    from .language import _route_logdomain as route
+
+    return route(*args)
+
+
+# inkling2_moe_logdomain_renorm (default off): language._route_logdomain.
+route_logdomain_compiled = mx.compile(_route_logdomain)
+
+
 def _scale_law(y, scale):
     # ``nvfp4_linear._scale_law``: FP32 multiply, rounded back.
     return (y.astype(mx.float32) * scale).astype(y.dtype)
@@ -277,7 +287,8 @@ def fused_call(moe, experts, x, weighted_sum=False, *, compiled_decode=False,
 
     if router_weight is None:
         router_weight = _fp32(moe, "gate_weight")
-    indices, weights = route_compiled(
+    route = route_logdomain_compiled if moe.__dict__.get("_logdomain_renorm") else route_compiled
+    indices, weights = route(
         x, router_weight, moe.e_score_correction_bias, moe.top_k, moe.route_scale
     )
     act_fmt = moe.__dict__.get("_act_quant")

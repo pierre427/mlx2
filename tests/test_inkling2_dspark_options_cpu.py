@@ -507,3 +507,41 @@ def test_predraft_refuses_untested_pairings():
                   "inkling2_dspark_predraft": True, **extra}
         with _pytest.raises(ValueError, match="not yet combined"):
             Inkling2Adapter("/nonexistent-inkling2", execution_policy=policy)
+
+
+def test_reject_cooldown_does_not_carry_across_requests(pair):
+    """Sweep 2026-11-23: the reject cooldown (cooldown / low_streak) was reset
+    only in deterministic controller mode, so a streak one request left behind
+    forced solo rounds on the next.  A request admitted to an idle engine
+    starts with no streak; the learned acceptance model is kept."""
+    from mlx2.runtime.drafters.inkling2_dspark_external import Inkling2DSparkExternal
+    from mlx2.runtime.external_speculative import ExternalDraftBatchGenerator
+
+    target, draft, _ = pair
+    value = _cost_value(7, FLAT, allow_solo=False, reject_cooldown=8, min_observations=10_000)
+    batch = ExternalDraftBatchGenerator(
+        target, draft_model=Inkling2DSparkExternal(draft, num_draft=7), binding="test",
+        num_draft=7, prefill_step_size=16, adaptive_verification=value)
+    try:
+        mx.random.seed(11)
+        seen = []
+        for _request in range(2):
+            prompt = [int(t) for t in mx.random.randint(1, 400, (24,)).tolist()]
+            batch.insert([prompt], max_tokens=[6], sampling_configs=[{"sampling_temp": 0}])
+            estimator = batch.acceptance_estimator
+            seen.append(estimator)
+            assert estimator.cooldown == 0 and estimator.low_streak == 0
+            for _ in range(200):
+                batch.next()
+                if not batch.lanes:
+                    break
+            # What a request with a reject streak leaves behind.
+            estimator.cooldown, estimator.low_streak = 5, 3
+        assert seen[0] is seen[1] and seen[1].rounds > 0  # the learned model persists
+        # A preemption replay of the same request (``continuing``) keeps it.
+        prompt = [int(t) for t in mx.random.randint(1, 400, (24,)).tolist()]
+        batch.insert([prompt], max_tokens=[6], sampling_configs=[{"sampling_temp": 0}],
+                     continuing=[True])
+        assert estimator.cooldown == 5 and estimator.low_streak == 3
+    finally:
+        batch.close()

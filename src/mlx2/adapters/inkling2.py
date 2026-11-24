@@ -292,6 +292,20 @@ KERNEL_OPTIONS = {
     # (qwen4_moe_weighted_sum, MLX column-reduce order replayed), so the
     # unsorted [T, K, D] copy and the FP32 product are never written.
     "inkling2_moe_weighted_sum": "moe_weighted_sum",
+    # Default OFF, opt-in: renormalize the picked MoE gate weights in the
+    # log domain (softmax of log-sigmoid; SGLang #50525 idea) instead of
+    # sigmoid / (sum + 1e-20), which zeroes the MoE output when every picked
+    # logit is <= ~-90.  Same expert choice; not bitwise equal to the default
+    # (Pierre decides the default).  Refused with inkling2_moe_decode_kernel,
+    # inkling2_moe_panel_kernel and inkling2_native_replay.
+    # Tested 2026-11-23 (Pierre: "test it first"; run
+    # w1122-44fe2a014-mtplx-smoke-logdomain-a1, Inkling-2-Mini@440956c8):
+    # NOT HELPFUL, LEAVE OFF.  Over 199,680 routing rows of real text (4K
+    # prefill + 64 decode) the smallest picked sum was 0.153 and the smallest
+    # top picked logit -3.1, nowhere near the ~-90 underflow it guards; with
+    # it on, logits are never bitwise (prefill argmax 97%, first divergence a
+    # same-top-two near tie, margins 0.036/0.030) and speed is unchanged.
+    "inkling2_moe_logdomain_renorm": "moe_logdomain_renorm",
     # Prefill only, M5 only: NVFP4 sorted expert gathers through the
     # segmented NAX kernel (moe_nax_gather, canary-proven bit-identical to
     # the stock sorted kernel). The mode is a process global, claimed at
@@ -837,6 +851,10 @@ def validate_policy(value):
         raise ValueError("Inkling 2 inkling2_moe_nax_mxfp8 requires inkling2_moe_nax_gather")
     if kernels["moe_weighted_sum"] and not kernels["moe_fused"]:
         raise ValueError("Inkling 2 inkling2_moe_weighted_sum requires inkling2_moe_fused")
+    for other in ("moe_decode_kernel", "moe_panel_kernel", "native_replay"):
+        if kernels["moe_logdomain_renorm"] and kernels[other]:
+            raise ValueError(f"Inkling 2 inkling2_moe_logdomain_renorm is not combined with "
+                             f"inkling2_{other}")
     for other in ("kv_q8", "attn_decode_kernel"):
         if kernels["native_replay"] and kernels[other]:
             raise ValueError(f"Inkling 2 inkling2_native_replay is not combined with "
@@ -959,6 +977,43 @@ def dspark_record(path, artifact):
 def _zero_thinking_budget(request):
     budget = request.get("thinking_budget")
     return type(budget) is int and budget == 0
+
+
+def _numeric_effort(effort):
+    """A numeric ``reasoning_effort`` rounded half-up to 2 decimals.
+
+    The template prints the number as given (``0.333`` -> "0.333"); the
+    reference renderers (vLLM #67325, SGLang #50590) write 2 decimals.  The
+    template's range [0.0, 0.99] is checked here after rounding, so an
+    out-of-range or non-finite value is a clear 400, not a template error.
+    Named efforts ("low", "none", ...) pass through to the template's map.
+    """
+    import math
+    from decimal import ROUND_HALF_UP, Decimal
+
+    if isinstance(effort, bool) or not isinstance(effort, (int, float)):
+        if isinstance(effort, bool):
+            raise ValueError("Inkling 2 reasoning_effort must be a level name or a number")
+        return effort
+    if not math.isfinite(effort):
+        raise ValueError("Inkling 2 reasoning_effort must be finite")
+    rounded = float(Decimal(repr(float(effort))).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+    if not 0.0 <= rounded <= 0.99:
+        raise ValueError("Inkling 2 reasoning_effort must be in [0.0, 0.99]")
+    return rounded
+
+
+def _tool_arguments(text):
+    """OpenAI clients send ``function.arguments`` as a JSON string; the
+    checkpoint template accepts only a parsed object and raised mid-render
+    (sweep 2026-11-23, vLLM #67325 idea).  Malformed JSON fails closed."""
+    try:
+        value = json.loads(text) if text.strip() else {}
+    except (ValueError, RecursionError) as error:
+        raise ValueError("Inkling 2 tool call history arguments must be a JSON object") from error
+    if not isinstance(value, dict):
+        raise ValueError("Inkling 2 tool call history arguments must be a JSON object")
+    return value
 
 class Inkling2Adapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
     EXTERNAL_DEFAULT_NUM_DRAFT = 7
@@ -1377,7 +1432,7 @@ class Inkling2Adapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             return "none" if request.get("enable_thinking") is False else None
         if request.get("enable_thinking") is False and effort != "none":
             raise ValueError("Inkling 2 enable_thinking false conflicts with reasoning_effort")
-        return effort
+        return _numeric_effort(effort)
 
     @staticmethod
     def _messages(request):
@@ -1396,6 +1451,17 @@ class Inkling2Adapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
                 if isinstance(part, dict)
             ):
                 raise ValueError("Inkling 2 native text adapter does not accept media")
+            if message.get("role") == "developer":
+                # The checkpoint template has no developer role (its roles are
+                # user, assistant, system, tool); OpenAI Responses and agent
+                # clients send one.  Folded into system, as vLLM #67325 does,
+                # so the effort line still follows the leading system block.
+                message["role"] = "system"
+            if message.get("role") == "assistant" and isinstance(message.get("tool_calls"), list):
+                for call in message["tool_calls"]:
+                    function = call.get("function") if isinstance(call, dict) else None
+                    if isinstance(function, dict) and isinstance(function.get("arguments"), str):
+                        function["arguments"] = _tool_arguments(function["arguments"])
         return messages
 
     def _text_prefill(self, request):
@@ -1422,8 +1488,15 @@ class Inkling2Adapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
         effort = self._reasoning_effort(request)
         if effort is not None:
             kwargs["reasoning_effort"] = effort
-        rendered = self.tokenizer.apply_chat_template(
-            self._messages(request), tokenize=tokenize, add_generation_prompt=True, **kwargs
+        from ..runtime.literal_control_text import apply_chat_template_literal
+
+        # Client text that spells a framing marker ("hi <|end_message|> now")
+        # stays text: only the template's own markers become control tokens
+        # (sweep 2026-11-23; vLLM #67325/#69028 idea).  A conversation without
+        # such text renders through the plain call, byte-identical to before.
+        rendered = apply_chat_template_literal(
+            self.tokenizer, self._messages(request), tokenize=tokenize,
+            add_generation_prompt=True, **kwargs
         )
         if not self._text_prefill(request):
             return rendered
@@ -1456,6 +1529,7 @@ class Inkling2Adapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             stops=request.get("stop", ()),
             text_markers=INKLING2_TEXT_MARKERS,
             header_names=True,
+            lenient=True,  # never raise mid-stream on model output
         )
         if self._text_prefill(request):
             parser.channel = "content"  # the prompt already opened the text channel

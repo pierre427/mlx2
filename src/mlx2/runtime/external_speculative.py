@@ -2800,7 +2800,9 @@ class ExternalDraftBatchGenerator:
                logits_processors=None, samplers=None, resume_rng=False,
                apc_interior_positions=None, prefill_inputs=None,
                prefill_cuts=None, session_keys=None,
-               ast_memo_layout_revisions=None, state_boundaries=None):
+               ast_memo_layout_revisions=None, state_boundaries=None, continuing=None):
+        """``continuing``: per prompt, True when the lane resumes a request
+        admitted before (a memory preemption replay), not a new request."""
         if self._open:
             raise RuntimeError("Membership change during external transaction")
         if session_keys is not None and (len(session_keys) != len(prompts) or any(
@@ -3016,6 +3018,15 @@ class ExternalDraftBatchGenerator:
             self.scheduler_stats["external_ast_controller_cost"] = dict(self.controller_cost)
             if not self.lanes:
                 self._det_reset_learned_state()     # the request starts from the same controller state
+        if (not self.lanes and getattr(self, "acceptance_estimator", None) is not None
+                and not (continuing is not None and len(continuing) == len(pending_lanes)
+                         and all(continuing))):
+            # Measured mode too: the reject cooldown is per request, never
+            # carried from the previous one (deterministic mode rebuilt it
+            # above).  A resumed request (``continuing``) keeps its streak.
+            reset = getattr(self.acceptance_estimator, "reset_streak", None)
+            if callable(reset):
+                reset()
         self.lanes.update((lane.uid, lane) for lane in pending_lanes)
         self.next_uid += len(pending_lanes)
         self.scheduler_stats["paired_cache_resumes"] += resumed

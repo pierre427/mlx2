@@ -4479,6 +4479,7 @@ class Job:
     thinking_tokens: list[int] = field(default_factory=list)
     tool_parse_fallbacks_seen: int = 0
     tool_markers_as_text_seen: int = 0
+    output_framing_repairs_seen: int = 0
     tool_constraint_truncations_seen: int = 0
     tool_call_id_replacements_seen: int = 0
     tool_grammar_status: str = "disabled"
@@ -5481,6 +5482,7 @@ class ServingEngine(KernelReloadMixin):
                 "apc_shutdown_pinned_parks_lost": 0,
                 "tool_call_parse_fallbacks": 0,
                 "tool_markers_served_as_text": 0,
+                "output_framing_repairs": 0,
                 "tool_call_constraint_failures": 0,
                 "tool_call_constraint_truncations": 0,
                 "tool_call_id_replacements": 0,
@@ -6551,6 +6553,12 @@ class ServingEngine(KernelReloadMixin):
 
         Adapters opt in with ``render_prompt(request) -> str`` whose encoding
         (without added special tokens) equals ``prompt_tokens(request)``.
+        The equality holds for the request after ``protect_control_text``,
+        as rendered here: client text then holds no control-token string.
+        A direct adapter call on unprotected text that spells a control token
+        (``literal_control_text.apply_chat_template_literal``) keeps the
+        client's characters in its tokens and returns the broken text, so
+        the two differ there by the break inside each literal.
         """
         if not self.ready.is_set() or self.error or not self.thread.is_alive():
             raise RuntimeError(self.error or "model is not ready")
@@ -16318,7 +16326,10 @@ class ServingEngine(KernelReloadMixin):
                                 **job.request["batch_cohort"],
                             }
                         state_options = (
-                            {"cache_states": [hit.sidecar], "sampling_configs": [sampling_config]}
+                            {"cache_states": [hit.sidecar], "sampling_configs": [sampling_config],
+                             # A preemption replay resumes the same request:
+                             # its reject-cooldown streak is not reset.
+                             "continuing": [bool(job.preemptions)]}
                             if external_draft else
                             {"prompt_lookup_configs": [sampling_config]}
                             if prompt_lookup else
@@ -17499,6 +17510,12 @@ class ServingEngine(KernelReloadMixin):
                         if as_text > job.tool_markers_as_text_seen:
                             count_add(self.counts, "tool_markers_served_as_text", as_text - job.tool_markers_as_text_seen)
                             job.tool_markers_as_text_seen = as_text
+                        # Framing outside the response grammar a lenient parser
+                        # repaired instead of failing the stream (Inkling 2).
+                        repairs = int(getattr(job.output_parser, "framing_repairs", 0))
+                        if repairs > job.output_framing_repairs_seen:
+                            count_add(self.counts, "output_framing_repairs", repairs - job.output_framing_repairs_seen)
+                            job.output_framing_repairs_seen = repairs
                         truncations = int(
                             getattr(
                                 job.output_parser,

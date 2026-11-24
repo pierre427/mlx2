@@ -366,7 +366,7 @@ def test_policy_parsing():
     assert validate_policy(None) == (
         {"fused_projections": False, "head_kernel": False, "sink_sdpa": True,
          "sink_slot": True, "flash_prefill": False, "verify_splitk": True,
-         "moe_fused": True, "moe_weighted_sum": True,
+         "moe_fused": True, "moe_weighted_sum": True, "moe_logdomain_renorm": False,
          "moe_nax_gather": None, "hard_no_thinking": False, "dspark_prefill_reclaim": None,
          "dspark_predraft": False,
          "prefill_mask_mb": None, "loop_passes": None, "fuse_controllers": True, "fuse_residual": True, "fuse_sconv": True,
@@ -410,6 +410,7 @@ def test_fused_projection_toggle_round_trip():
                                    "fuse_dconv_kernel": False, "fuse_message_kernel": False,
                                    "compile_decode_blocks": False, "head_softcap_compiled": False,
                                    "moe_decode_kernel": False, "moe_panel_kernel": False,
+                                   "moe_logdomain_renorm": False,
                                    "moe_nax_mxfp8": False,
                                    "kv_q8": False,
                                    "prefill_mask_bf16_budget": False,
