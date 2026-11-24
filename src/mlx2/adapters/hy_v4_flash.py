@@ -675,7 +675,7 @@ MODEL_KEYS = frozenset({"engram_cache_rows", "engram_hash", "engram_precision",
                         "moe_fused_gate_up", "moe_nax", "moe_top_k", "amoeba_det_tiles",
                         "moe_expert_read_once",
                         "amoeba_mask",
-                        "sliding_attention_blocks", "prefill_step_cap", "sparse_prefill_attention",
+                        "sliding_attention_blocks", "prefill_step_cap", "prefill_step_fixed", "sparse_prefill_attention",
                         "prefill_head_trim", "prefill_tail_skip", "moe_sorted_weighted_sum",
                         "hc_seam_fused", "mla_fused_input_proj", "engram_fused_proj",
                         "indexer_fused_scores", "engram_gate_rounding",
@@ -774,6 +774,37 @@ def det_tile_capture(streams):
 # prompts keep their smaller autoscaled steps.  Opt-out:
 # ``"prefill_step_cap": 0`` (the schedule's own top).
 PREFILL_STEP_CAP_DEFAULT = 2048
+# ``prefill_step_fixed`` (DEFAULT 2048 on every Hy4-flash artifact, Pierre
+# 2026-11-24; unqualified): the server's prefill step (``prefill_step_default``)
+# instead of the prompt-length autoscale, whose 512-row chunks below 32K left
+# prefill throughput on the table.  Same weights, mlx2 2643619b5, blocks A B B A,
+# 3 reps each, no thermal hold (~/amoeba-runs/hy4-kapitsa-prefill-20261124-
+# 2643619b5): median tok/s autoscale vs 2048 at 1K 554 vs 746, 4K 615 vs 605,
+# 16K 564 vs 733, 32K 510 vs 649; peak footprint ~+1 GB.  Above 32K it is the
+# capped schedule's own step (prefill_step_cap above), so the 128K admission
+# math is unchanged.  Scheduling only, the same on both routes.  An operator
+# ``--prefill-step`` still wins.  Opt-out: ``"prefill_step_fixed": 0`` (the
+# autoscale, bounded by ``prefill_step_cap``).
+PREFILL_STEP_FIXED_DEFAULT = 2048
+# Hy4-flash default AST controller (Pierre 2026-11-24; unqualified): the
+# deterministic mode (runtime/external_speculative.CONTROLLER_MODES) with a
+# cost table (ms; speculative round a + b x verify rows, ordinary step) per
+# target checkpoint, on the embedded DFly2 drafter route only (the measured
+# route; prompt lookup keeps the measured controller).  Only
+# Hy4-flash-MLX-4.6bit-mlx2@f2a8fa8d has a fitted table; any other checkpoint
+# (a baked box decodes ~32% slower, so fixed prices would mislead the park /
+# speculate choice) keeps the measured controller.  Night 2026-11-24 at mlx2
+# a16d9d398 (~/amoeba-runs/hy4-night-gsm8k-det-20261124-a16d9d398): GSM8K 200
+# 96.5% in both modes with no answer flips, mean acceptance 4.059 vs 4.060,
+# decode median 49.4 vs 51.1 tok/s (sequential arms, no thermal hold; the
+# 2026-11-23 check had 26.0 vs 25.5); three cold 512-token replays gave one
+# output in deterministic mode and three in measured mode.  Opt-out:
+# ``MLX2_AST_CONTROLLER_MODE=measured``; MLX2_AST_CONTROLLER_COST (with the
+# env mode set) overrides the table.
+AST_CONTROLLER_DEFAULT = ("deterministic", {"a_ms": 22.0, "b_ms": 6.18, "ordinary_ms": 26.3})
+AST_CONTROLLER_DEFAULTS = {
+    "f2a8fa8d2b7f22150ee5bd988c5acc1814d8494aa82ee01aff40a7efc13aad93": AST_CONTROLLER_DEFAULT,
+}
 # ``sliding_attention_blocks`` (DEFAULT 512 on Hy4-flash, Pierre 2026-11-21;
 # unqualified): prefill at mlx2 2df2aa9fa, band512 vs off
 # (qualification/runs/hy4-profile-prefill-20261121-2df2aa9fa-band512 and
@@ -1112,6 +1143,10 @@ def _parse_policy(execution_policy, model_path=None) -> tuple[dict, dict, str | 
     if cap is not None and (type(cap) is not int or cap < 0):
         raise ValueError("Hy4-flash prefill_step_cap must be a positive integer, or 0 for no cap "
                          f"(default {PREFILL_STEP_CAP_DEFAULT})")
+    fixed = policy.get("prefill_step_fixed")
+    if fixed is not None and (type(fixed) is not int or fixed < 0):
+        raise ValueError("Hy4-flash prefill_step_fixed must be a positive integer, or 0 for the prompt-length "
+                         f"autoscale (default {PREFILL_STEP_FIXED_DEFAULT})")
     top_k = policy.get("moe_top_k")
     if top_k is not None and (type(top_k) is not int or top_k < 1):
         raise ValueError("Hy4-flash moe_top_k must be a positive integer (default: the checkpoint's)")
@@ -1511,7 +1546,8 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
     # both routes (``_install_det_tiles``), so ``--det-tile`` keeps DFly2.
     route_neutral_policy_keys = frozenset({
         "engram_table_format", "engram_precision", "engram_cache_rows", "engram_hash",
-        "vision", "moe_fused_gate_up", "amoeba_det_tiles", "prefill_step_cap", "sliding_attention_blocks",
+        "vision", "moe_fused_gate_up", "amoeba_det_tiles", "prefill_step_cap", "prefill_step_fixed",
+        "sliding_attention_blocks",
         "sparse_prefill_attention", "moe_expert_read_once", "sparse_prefill_union_rows", "resident_bf16",
         "prefill_head_trim", "prefill_tail_skip", "moe_sorted_weighted_sum",
         # Opt-in small-op fusions: the same install on both routes.
@@ -1770,6 +1806,7 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
         self.moe_top_k = set_moe_top_k(self.model, policy.get("moe_top_k"))
         self.sliding_attention_blocks = int(policy.get("sliding_attention_blocks", 0))
         self._prefill_step_cap = policy.get("prefill_step_cap") or None
+        self._prefill_step_fixed = policy.get("prefill_step_fixed") or None
         self.model.set_sliding_attention_blocks(self.sliding_attention_blocks)
         self.sparse_prefill_attention = bool(policy.get("sparse_prefill_attention",
                                                         SPARSE_PREFILL_ATTENTION_DEFAULT))
@@ -1843,8 +1880,8 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
     def _resolve_policy_defaults(self, policy: dict, artifact: dict) -> None:
         """Fill the absent default keys into ``policy`` (in place) and keep their receipts.
 
-        ``sliding_attention_blocks`` 512 and ``prefill_step_cap`` 2048 on every
-        Hy4-flash artifact; ``amoeba_det_tiles`` from ``DET_TILE_DEFAULT_MANIFESTS``
+        ``sliding_attention_blocks`` 512, ``prefill_step_cap`` 2048 and
+        ``prefill_step_fixed`` 2048 on every Hy4-flash artifact; ``amoeba_det_tiles`` from ``DET_TILE_DEFAULT_MANIFESTS``
         for its target fingerprint.  The ``_parse_policy`` result stays the
         operator's own keys (route-neutral parsing is unchanged); a default
         that cannot apply is skipped with its reason, never refused.
@@ -1871,6 +1908,13 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
         else:
             defaults["prefill_step_cap"] = {"defaulted": False,
                                             "source": "policy_opt_out" if cap == 0 else "policy"}
+        fixed = policy.get("prefill_step_fixed")
+        if fixed is None:
+            policy["prefill_step_fixed"] = PREFILL_STEP_FIXED_DEFAULT
+            defaults["prefill_step_fixed"] = {"defaulted": True, "source": "adapter_default"}
+        else:
+            defaults["prefill_step_fixed"] = {"defaulted": False,
+                                              "source": "policy_opt_out" if fixed == 0 else "policy"}
         self.policy_defaults = defaults
         det = policy.get("amoeba_det_tiles")
         fingerprint = det_tile_fingerprint(artifact)
@@ -2038,6 +2082,11 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
         for key in ("ast_topology", "ast_adaptive_rows", "ready_drain"):
             if key in self.external_policy:
                 kwargs.setdefault(key, self.external_policy[key])
+        controller = AST_CONTROLLER_DEFAULTS.get(self.identity.get("target_fingerprint", self.identity["fingerprint"]))
+        if getattr(self, "drafter_kind", None) != "dfly":
+            controller = None
+        kwargs.setdefault("controller_default", controller)
+        self._ast_controller_default = controller
         import weakref
 
         batch = super().create_external_batch(**kwargs)
@@ -2402,6 +2451,16 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
 
         self.descriptor = replace(self.descriptor, cache_layout=self.layout)
 
+    def prefill_step_default(self):
+        """The server's prefill step (policy ``prefill_step_fixed``); None: the prompt-length autoscale."""
+        return getattr(self, "_prefill_step_fixed", None)
+
+    def prefill_step_reference(self):
+        """No fixed reference step: APCv2 keys before 2026-11-24 were built under the prompt-length autoscale,
+        so every fixed step (the 2048 default included) binds the namespace (serving.prefill_step_namespace_term)
+        and a 1024 server never shares states with a 2048 one."""
+        return None
+
     def prefill_step_autoscale_cap(self):
         """Bound on the server's prompt-length autoscaled step (policy
         ``prefill_step_cap``); None (default) keeps the schedule's top."""
@@ -2523,10 +2582,32 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
         state = (getattr(self, "policy_defaults", None) or {}).get("prefill_step_cap", {})
         return {"implemented": True, "qualified": False,
                 "cap": getattr(self, "_prefill_step_cap", None),
+                # The cap bounds the autoscale only; a fixed step (default) leaves it unused.
+                "engaged": getattr(self, "_prefill_step_fixed", None) is None,
                 "defaulted": bool(state.get("defaulted")), "source": state.get("source"),
                 "default_cap": PREFILL_STEP_CAP_DEFAULT,
                 "applies_to": "the prompt-length autoscale only; an operator prefill step wins",
                 "opt_out": '{"prefill_step_cap": 0}'}
+
+    def _ast_controller_default_receipt(self):
+        """The adapter's controller default for this checkpoint and route (the engine reports the mode it ran)."""
+        controller = getattr(self, "_ast_controller_default", None)
+        return {"implemented": True, "qualified": False,
+                "default_mode": None if controller is None else controller[0],
+                "cost_table": None if controller is None else dict(controller[1]),
+                "applies_to": "the embedded DFly2 route of checkpoints in AST_CONTROLLER_DEFAULTS; "
+                              "a set MLX2_AST_CONTROLLER_MODE wins",
+                "opt_out": "MLX2_AST_CONTROLLER_MODE=measured"}
+
+    def _prefill_step_fixed_receipt(self):
+        """Route-receipt block of the fixed prefill step (the server reports the step it ran)."""
+        state = (getattr(self, "policy_defaults", None) or {}).get("prefill_step_fixed", {})
+        return {"implemented": True, "qualified": False,
+                "step": getattr(self, "_prefill_step_fixed", None),
+                "defaulted": bool(state.get("defaulted")), "source": state.get("source"),
+                "default_step": PREFILL_STEP_FIXED_DEFAULT,
+                "applies_to": "the server prefill step; an operator prefill step wins",
+                "opt_out": '{"prefill_step_fixed": 0}'}
 
     def _latent_kv_receipt(self):
         from ..runtime.models.hy_v4_flash_fp8kv import latent_fp8_stats
@@ -2611,6 +2692,8 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             "expert_buckets": self._expert_buckets_receipt(),
             "sliding_attention_blocks": self._sliding_band_receipt(),
             "prefill_step_cap": self._prefill_step_cap_receipt(),
+            "prefill_step_fixed": self._prefill_step_fixed_receipt(),
+            "ast_controller_default": self._ast_controller_default_receipt(),
             "sparse_prefill_attention": self._sparse_prefill_receipt(),
             "moe_expert_read_once": self._moe_read_once_receipt(),
             "prefill_exact": self._prefill_exact_receipt(),

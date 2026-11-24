@@ -62,6 +62,8 @@ FEATURES = (
     "cost_per_commit_handoff", "amoeba_det_tiles", "residual_ablation_overlays",
     # Hy4-flash aMoEba neuron-mask serving (2026-11-23): one row per mode, the box cut named in the decision.
     "amoeba_mask_zero", "amoeba_mask_pageout", "amoeba_box_bake_buckets",
+    # Hy4-flash defaults of 2026-11-24: fixed 2048 prefill step, deterministic AST controller.
+    "prefill_step_fixed", "ast_controller_deterministic",
     # Hy4-flash default autoscale bound (2026-11-21).
     "prefill_step_cap",
     # Hy4-flash opt-in sparse prefill kernel for indexed layers (2026-11-21).

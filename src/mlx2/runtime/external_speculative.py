@@ -738,31 +738,51 @@ def _verify_trace(row, lane, inputs, logits, *, parents=None, kind="chain"):
         "shape": list(logits.shape)}) + "\n")
 
 
-# Controller mode (opt-in, unqualified; 2026-11-23 Hy4 DFly2 cold-replay drift). "measured" (default) keeps the
+# Controller mode (unqualified; 2026-11-23 Hy4 DFly2 cold-replay drift). "measured" (builtin default) keeps the
 # wall-clock tile budget and cost-per-commit handoff. "deterministic" (MLX2_AST_CONTROLLER_MODE=deterministic, with
 # MLX2_AST_CONTROLLER_COST='{"a_ms": A, "b_ms": B, "ordinary_ms": O}') prices every round from that fixed table
 # (speculative round A + B x verify rows, ordinary step O) instead of measured time, resets the tile budget's learned
 # state when a request is admitted to an idle engine, and seeds no cross-request cost prior: decisions depend only
 # on the request's own tokens and acceptance, so the same prefix gives the same verify widths at width one.
+# An adapter may declare its own default (the generator's ``controller_default=(mode, cost)``; Hy4-flash:
+# deterministic, Pierre 2026-11-24); a set MLX2_AST_CONTROLLER_MODE always wins, so
+# ``MLX2_AST_CONTROLLER_MODE=measured`` is the opt-out, and with the env mode set to deterministic an
+# MLX2_AST_CONTROLLER_COST overrides the adapter's table.
 CONTROLLER_MODES = ("measured", "deterministic")
 
 
-def controller_settings():
-    mode = os.environ.get("MLX2_AST_CONTROLLER_MODE", "measured") or "measured"
+def _controller_cost(cost, where):
+    if not isinstance(cost, dict) or set(cost) != {"a_ms", "b_ms", "ordinary_ms"} or not all(
+            isinstance(v, (int, float)) and not isinstance(v, bool) and v >= 0 for v in cost.values()) \
+            or not cost["a_ms"] > 0 or not cost["ordinary_ms"] > 0:
+        raise ValueError(f"{where} needs a_ms > 0, b_ms >= 0 and ordinary_ms > 0")
+    return {k: float(v) for k, v in cost.items()}
+
+
+def controller_settings(default=None):
+    """-> ``(mode, cost table or None, source)``; source is "env", "env_mode+adapter_cost", "adapter_default"
+    or "builtin"."""
+    env_mode = os.environ.get("MLX2_AST_CONTROLLER_MODE") or None
+    if env_mode is None and default is not None:
+        mode, cost = default
+        if mode not in CONTROLLER_MODES:
+            raise ValueError(f"adapter controller_default mode must be one of {CONTROLLER_MODES}")
+        if mode == "measured":
+            return mode, None, "adapter_default"
+        return mode, _controller_cost(cost, "adapter controller_default"), "adapter_default"
+    mode = env_mode or "measured"
+    source = "env" if env_mode else "builtin"
     if mode not in CONTROLLER_MODES:
         raise ValueError(f"MLX2_AST_CONTROLLER_MODE must be one of {CONTROLLER_MODES}")
     if mode == "measured":
-        return mode, None
+        return mode, None, source
     raw = os.environ.get("MLX2_AST_CONTROLLER_COST")
     if not raw:
+        if default is not None and default[0] == "deterministic":
+            return mode, _controller_cost(default[1], "adapter controller_default"), "env_mode+adapter_cost"
         raise ValueError("MLX2_AST_CONTROLLER_MODE=deterministic needs MLX2_AST_CONTROLLER_COST "
                          '(\'{"a_ms": ..., "b_ms": ..., "ordinary_ms": ...}\')')
-    cost = json.loads(raw)
-    if set(cost) != {"a_ms", "b_ms", "ordinary_ms"} or not all(
-            isinstance(v, (int, float)) and v >= 0 for v in cost.values()) or not cost["a_ms"] > 0 \
-            or not cost["ordinary_ms"] > 0:
-        raise ValueError("MLX2_AST_CONTROLLER_COST needs a_ms > 0, b_ms >= 0 and ordinary_ms > 0")
-    return mode, {k: float(v) for k, v in cost.items()}
+    return mode, _controller_cost(json.loads(raw), "MLX2_AST_CONTROLLER_COST"), source
 
 
 _PROFILE_PATH = os.environ.get("MLX2_EXTERNAL_ROUND_PROFILE") or None
@@ -1395,6 +1415,7 @@ class ExternalDraftBatchGenerator:
                  progressive_cross_session_pack_rows=None,
                  progressive_cross_session_pack_mode=None,
                  multilane_draft_cap=None,
+                 controller_default=None,
                  progressive_verification_fidelity=None,
                  progressive_target_protocol=None,
                  progressive_protocol_binding=None,
@@ -1658,7 +1679,7 @@ class ExternalDraftBatchGenerator:
         self.tree_node_budget_by_lanes = tree_node_budget_by_lanes
         # Measured tile size within the knob maximum (default on for the
         # tree route; ``ast_adaptive_rows: false`` keeps the knob budget).
-        self.controller_mode, self.controller_cost = controller_settings()
+        self.controller_mode, self.controller_cost, self.controller_source = controller_settings(controller_default)
         self._det_round_rows = None
         self.tile_budget = None
         if dynamic_singleton_tree and self._ast_adaptive_rows is not False:
@@ -1672,6 +1693,12 @@ class ExternalDraftBatchGenerator:
                 raise ValueError(
                     f"MLX2_AST_TILE_BUDGET_COST must be one of {COST_MODES}"
                 )
+            if self.controller_mode == "deterministic" and os.environ.get("MLX2_AST_TILE_BUDGET_COST"):
+                # A measured tile-budget cost mode cannot run under the modelled controller: refuse it
+                # rather than silently replacing the operator's choice.
+                raise ValueError(
+                    f"MLX2_AST_TILE_BUDGET_COST={cost_mode} needs the measured controller "
+                    f"(deterministic mode from {self.controller_source}); set MLX2_AST_CONTROLLER_MODE=measured")
             trace_path = os.environ.get("MLX2_AST_TILE_BUDGET_TRACE")
             trace = _tile_budget_trace_sink(trace_path) if trace_path else None
             det_cost = self.controller_cost if self.controller_mode == "deterministic" else None
@@ -3016,6 +3043,7 @@ class ExternalDraftBatchGenerator:
         if getattr(self, "controller_mode", "measured") == "deterministic":
             self.scheduler_stats["external_ast_controller_mode"] = "deterministic"
             self.scheduler_stats["external_ast_controller_cost"] = dict(self.controller_cost)
+            self.scheduler_stats["external_ast_controller_source"] = self.controller_source
             if not self.lanes:
                 self._det_reset_learned_state()     # the request starts from the same controller state
         if (not self.lanes and getattr(self, "acceptance_estimator", None) is not None
@@ -4215,7 +4243,8 @@ class ExternalDraftBatchGenerator:
         if getattr(self, "controller_mode", "measured") == "deterministic" and isinstance(receipt, dict):
             # Per-response label (AGENTS.md: report the route state truthfully; experimental and unqualified).
             receipt["controller_mode"] = {"mode": "deterministic", "qualified": False,
-                                          "cost_table": dict(self.controller_cost)}
+                                          "cost_table": dict(self.controller_cost),
+                                          "source": getattr(self, "controller_source", "env")}
         authority = getattr(
             self, "cost_per_commit_handoff_authority", "explicit_policy"
         )

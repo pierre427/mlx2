@@ -138,7 +138,68 @@ def test_controller_settings_refuse_a_missing_or_bad_table(monkeypatch):
     with pytest.raises(ValueError, match="must be one of"):
         ES.controller_settings()
     monkeypatch.setenv("MLX2_AST_CONTROLLER_MODE", "measured")
-    assert ES.controller_settings() == ("measured", None)
+    assert ES.controller_settings() == ("measured", None, "env")
+
+
+def test_adapter_default_and_env_precedence(monkeypatch):
+    """An adapter default applies when the env mode is unset; a set env mode wins (``measured`` opts out)."""
+    from mlx2.adapters.hy_v4_flash import AST_CONTROLLER_DEFAULT
+
+    monkeypatch.delenv("MLX2_AST_CONTROLLER_MODE", raising=False)
+    monkeypatch.delenv("MLX2_AST_CONTROLLER_COST", raising=False)
+    assert ES.controller_settings() == ("measured", None, "builtin")
+    assert ES.controller_settings(AST_CONTROLLER_DEFAULT) == (
+        "deterministic", AST_CONTROLLER_DEFAULT[1], "adapter_default")
+    monkeypatch.setenv("MLX2_AST_CONTROLLER_MODE", "measured")
+    assert ES.controller_settings(AST_CONTROLLER_DEFAULT) == ("measured", None, "env")
+    monkeypatch.setenv("MLX2_AST_CONTROLLER_MODE", "deterministic")
+    assert ES.controller_settings(AST_CONTROLLER_DEFAULT)[1] == AST_CONTROLLER_DEFAULT[1]  # adapter table
+    monkeypatch.setenv("MLX2_AST_CONTROLLER_COST", json.dumps(NEVER_PARK))
+    assert ES.controller_settings(AST_CONTROLLER_DEFAULT) == ("deterministic", NEVER_PARK, "env")
+    monkeypatch.delenv("MLX2_AST_CONTROLLER_MODE")
+    monkeypatch.delenv("MLX2_AST_CONTROLLER_COST")
+    with pytest.raises(ValueError, match="adapter controller_default"):
+        ES.controller_settings(("deterministic", {"a_ms": 1}))
+    with pytest.raises(ValueError, match="adapter controller_default mode"):
+        ES.controller_settings(("sometimes", None))
+
+
+class _EveryCheckpoint(dict):
+    """AST_CONTROLLER_DEFAULTS stand-in: the tiny random checkpoint gets the fitted table."""
+
+    def get(self, key, default=None):
+        from mlx2.adapters.hy_v4_flash import AST_CONTROLLER_DEFAULT
+        return AST_CONTROLLER_DEFAULT
+
+
+def test_hy4_controller_default_needs_a_fitted_checkpoint(tmp_path, tiny, monkeypatch):
+    """A checkpoint without a fitted table (here the tiny one) keeps the measured controller."""
+    monkeypatch.delenv("MLX2_AST_CONTROLLER_MODE", raising=False)
+    _, _, ad, stats = _widths_per_request(tmp_path, tiny, monkeypatch, seed=3, n=12)
+    try:
+        assert "external_ast_controller_mode" not in stats
+        assert ad._ast_controller_default_receipt()["default_mode"] is None
+    finally:
+        ad.close()
+
+
+def test_hy4_dfly2_route_is_deterministic_by_default(tmp_path, tiny, monkeypatch):
+    """No env: the Hy4 adapter's default puts the DFly2 tree route in deterministic mode, labelled as defaulted."""
+    from mlx2.adapters import hy_v4_flash as A
+
+    monkeypatch.delenv("MLX2_AST_CONTROLLER_MODE", raising=False)
+    monkeypatch.delenv("MLX2_AST_CONTROLLER_COST", raising=False)
+    monkeypatch.setattr(A, "AST_CONTROLLER_DEFAULTS", _EveryCheckpoint())
+    w1, t1, ad1, s1 = _widths_per_request(tmp_path, tiny, monkeypatch, seed=11)
+    w2, t2, ad2, _ = _widths_per_request(tmp_path, tiny, monkeypatch, seed=97)
+    try:
+        assert s1.get("external_ast_controller_mode") == "deterministic"
+        assert s1.get("external_ast_controller_source") == "adapter_default"
+        assert w1[0] and w1[0] == w1[1] == w2[0] == w2[1], (w1, w2)
+        assert t1[0] == t2[0] == _greedy(ad1.model, PROMPTS[0], 40)
+    finally:
+        ad1.close()
+        ad2.close()
 
 
 def test_measured_mode_is_clock_sensitive_on_the_same_route(tmp_path, tiny, monkeypatch):
@@ -173,3 +234,19 @@ def test_deterministic_mode_drives_the_tile_budget_without_the_clock(tmp_path, t
     finally:
         ad1.close()
         ad2.close()
+
+
+def test_deterministic_mode_refuses_a_measured_tile_budget_cost(tmp_path, tiny, monkeypatch):
+    from mlx2.adapters import hy_v4_flash as A
+
+    monkeypatch.delenv("MLX2_AST_CONTROLLER_MODE", raising=False)
+    monkeypatch.setattr(A, "AST_CONTROLLER_DEFAULTS", _EveryCheckpoint())
+    monkeypatch.setenv("MLX2_AST_TILE_BUDGET_COST", "robust")
+    (tmp_path / "r").mkdir()
+    adapter = _adapter(tmp_path / "r", tiny, {"draft_model": "embedded_dfly", "num_draft": 3})
+    try:
+        assert adapter._ast_controller_default_receipt()["default_mode"] is None   # set on batch creation
+        with pytest.raises(ValueError, match="needs the measured controller"):
+            adapter.create_external_batch(completion_batch_size=1, prefill_step_size=4)
+    finally:
+        adapter.close()

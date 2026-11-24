@@ -10,6 +10,9 @@ opt-out and a receipt that says ``defaulted``:
 * ``sliding_attention_blocks`` 512 on Hy4-flash; ``0`` opts out;
 * ``prefill_step_cap`` 2048 on Hy4-flash; ``0`` opts out.
 
+2026-11-24 (Pierre): ``prefill_step_fixed`` 2048 on Hy4-flash (the server's
+prefill step instead of the prompt-length autoscale); ``0`` opts out.
+
 The tiny artifact's fingerprint is mocked to the target's, and the
 calculator default points at a tiny-geometry manifest built for that
 fingerprint, so the default path (admission, install, receipts, APCv2
@@ -141,8 +144,11 @@ def test_no_policy_applies_every_default(artifact, tiny_default):
         band = d["sliding_attention_blocks"]
         assert band["defaulted"] is True and band["rows"] == 512 and band["selected"] is True
         cap = d["prefill_step_cap"]
-        assert cap["defaulted"] is True and cap["cap"] == 2048
+        assert cap["defaulted"] is True and cap["cap"] == 2048 and cap["engaged"] is False
         assert adapter.prefill_step_autoscale_cap() == 2048
+        fixed = d["prefill_step_fixed"]
+        assert fixed["defaulted"] is True and fixed["step"] == 2048 and fixed["source"] == "adapter_default"
+        assert adapter.prefill_step_default() == 2048
         assert adapter.sliding_attention_blocks == 512
         assert adapter.model.sliding_attention_blocks == 512
         # APCv2: the band's own namespace, and the tile set joins the numerics contract.
@@ -201,7 +207,7 @@ def test_per_request_toggle_still_disables_the_default(artifact, tiny_default):
 
 def test_each_opt_out(artifact, tiny_default):
     adapter = _adapter(artifact, {"amoeba_det_tiles": False, "sliding_attention_blocks": 0,
-                                  "prefill_step_cap": 0})
+                                  "prefill_step_cap": 0, "prefill_step_fixed": 0})
     try:
         d = _diag(adapter)
         det = d["amoeba_det_tiles"]
@@ -214,19 +220,26 @@ def test_each_opt_out(artifact, tiny_default):
         cap = d["prefill_step_cap"]
         assert cap["cap"] is None and cap["defaulted"] is False and cap["source"] == "policy_opt_out"
         assert adapter.prefill_step_autoscale_cap() is None
+        fixed = d["prefill_step_fixed"]
+        assert fixed["step"] is None and fixed["defaulted"] is False and fixed["source"] == "policy_opt_out"
+        assert adapter.prefill_step_default() is None             # the server's prompt-length autoscale
         assert adapter.execution_numerics_contract() is None
     finally:
         adapter.close()
 
 
 def test_explicit_values_are_not_defaulted(artifact, tiny_default):
-    adapter = _adapter(artifact, {"sliding_attention_blocks": 1024, "prefill_step_cap": 4096})
+    adapter = _adapter(artifact, {"sliding_attention_blocks": 1024, "prefill_step_cap": 4096,
+                                  "prefill_step_fixed": 1024})
     try:
         d = _diag(adapter)
         assert d["sliding_attention_blocks"]["rows"] == 1024
         assert d["sliding_attention_blocks"]["defaulted"] is False
         assert adapter.layout.endswith("+swa-band1024-v1+sparse-prefill-v1")
         assert d["prefill_step_cap"] == {**d["prefill_step_cap"], "cap": 4096, "defaulted": False}
+        assert d["prefill_step_fixed"] == {**d["prefill_step_fixed"], "step": 1024, "defaulted": False,
+                                           "source": "policy"}
+        assert adapter.prefill_step_default() == 1024
         assert d["amoeba_det_tiles"]["defaulted"] is True  # untouched key keeps its default
     finally:
         adapter.close()
@@ -236,8 +249,10 @@ def test_opt_out_values_parse_and_bad_values_refuse():
     model, _, _ = A._parse_policy({"amoeba_det_tiles": False, "prefill_step_cap": 0,
                                    "sliding_attention_blocks": 0})
     assert model == {"amoeba_det_tiles": False, "prefill_step_cap": 0, "sliding_attention_blocks": 0}
+    assert A._parse_policy({"prefill_step_fixed": 0})[0] == {"prefill_step_fixed": 0}
     for bad in ({"amoeba_det_tiles": True}, {"amoeba_det_tiles": ""}, {"prefill_step_cap": -1},
-                {"prefill_step_cap": 2.0}):
+                {"prefill_step_cap": 2.0}, {"prefill_step_fixed": -1}, {"prefill_step_fixed": 2048.0},
+                {"prefill_step_fixed": True}):
         with pytest.raises(ValueError):
             A._parse_policy(bad)
 
@@ -319,10 +334,11 @@ def test_band_default_skips_when_the_window_is_wider(monkeypatch, artifact):
     assert stub.policy_defaults["sliding_attention_blocks"]["source"] == "default_skipped"
     assert "1024" in stub.policy_defaults["sliding_attention_blocks"]["skipped"]
     assert policy["prefill_step_cap"] == 2048
+    assert policy["prefill_step_fixed"] == 2048
 
 
 def test_band_and_cap_defaults_are_route_neutral_keys():
-    assert {"sliding_attention_blocks", "prefill_step_cap", "amoeba_det_tiles"} <= \
+    assert {"sliding_attention_blocks", "prefill_step_cap", "prefill_step_fixed", "amoeba_det_tiles"} <= \
         A.HYV4FlashAdapter.route_neutral_policy_keys
     assert FIT["engram_table_format"] == "bf16"  # the tiny manifest's fit numerics
 
@@ -359,3 +375,16 @@ def test_default_tile_set_is_reported_as_defaulted(artifact, tiny_default):
         assert adapter.amoeba_det_tiles is not None and adapter.amoeba_det_tiles_defaulted is True
     finally:
         adapter.close()
+
+
+def test_every_fixed_prefill_step_binds_the_apcv2_namespace():
+    """States persisted under the old autoscale, the 2048 default and a 1024 opt-in never share a namespace."""
+    from mlx2.serving import prefill_step_namespace_term
+
+    stub = A.HYV4FlashAdapter.__new__(A.HYV4FlashAdapter)
+    for step in (2048, 1024):
+        stub._prefill_step_fixed = step
+        assert prefill_step_namespace_term(stub, step, autoscale=False) == {
+            "schema": "mlx2.prefill-step.v1", "prefill_step": step}
+    stub._prefill_step_fixed = None
+    assert prefill_step_namespace_term(stub, 512, autoscale=True) is None

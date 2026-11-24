@@ -623,7 +623,9 @@ HY4_NEUTRAL = {"engram_table_format", "engram_precision", "engram_cache_rows", "
                "sliding_attention_blocks", "sparse_prefill_attention",
                "hc_seam_fused", "mla_fused_input_proj", "engram_fused_proj", "indexer_fused_scores",
                "engram_gate_rounding", "moe_expert_read_once",
-               "prefill_head_trim", "prefill_tail_skip", "moe_sorted_weighted_sum"}
+               "prefill_head_trim", "prefill_tail_skip", "moe_sorted_weighted_sum",
+               # Model-level installs on both routes: union prefill (audit H4), exact 16-bit planes (H5).
+               "sparse_prefill_union_rows", "resident_bf16", "prefill_step_fixed"}
 
 
 @pytest.mark.parametrize("policy", [
@@ -661,7 +663,7 @@ def test_hy4_neutral_keys_parse_identically_on_ordinary_and_dfly2():
     neutral = {"engram_table_format": "iq4_nl", "engram_precision": "vllm",
                "engram_cache_rows": 4096, "engram_hash": "device", "vision": False,
                "moe_fused_gate_up": True, "amoeba_det_tiles": "/m/tiles/calculator/manifest.json",
-               "sparse_prefill_attention": True}
+               "sparse_prefill_attention": True, "sparse_prefill_union_rows": 64, "resident_bf16": True}
     ordinary, external, kind = _parse_policy(dict(neutral), "/m/Hy4")
     assert ordinary == neutral and not external and kind is None
     dfly, external, kind = _parse_policy({**neutral, "draft_model": "embedded_dfly"}, "/m/Hy4")
