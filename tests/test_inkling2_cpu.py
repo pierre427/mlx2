@@ -381,7 +381,9 @@ def test_policy_parsing():
          "prefill_tiled_attention": False, "attn_decode_kernel": False,
          "verify_deferred_commit": False, "visit_length_check": False,
          "prefill_handover": False,
-         "prefill_wide_chunk": False, "prefill_transient_pricing": False}, {})
+         "prefill_wide_chunk": False, "prefill_transient_pricing": False,
+         "pass_messages": False, "stage_a_kernel": False, "gate_merge": False,
+         "attn_output_kernel": False, "embed_kernel": False}, {})
     assert validate_policy({"inkling2_fused_projections": True})[0]["fused_projections"] is True
     assert validate_policy({"draft_model": "x"})[1] == {"draft_model": "x"}
     with pytest.raises(TypeError):
@@ -416,7 +418,10 @@ def test_fused_projection_toggle_round_trip():
                                    "attn_decode_kernel": False,
                                    "verify_deferred_commit": False,
                                    "visit_length_check": False,
-                                   "prefill_handover": False}
+                                   "prefill_handover": False,
+                                   "pass_messages": False, "stage_a_kernel": False,
+                                   "gate_merge": False, "attn_output_kernel": False,
+                                   "embed_kernel": False}
 
 
 @pytest.mark.parametrize("rows", [1, 2])
@@ -920,3 +925,19 @@ def test_splitk_ring_direct_is_the_default():
 
     assert splitk.RING_DIRECT is True
     assert splitk.VECTOR_LOADS is False
+
+
+def test_kernel_policy_round_trips_through_configure_kernels(_cpu):
+    """Scripts re-apply ``model.configure_kernels(**{**dict(model.kernel_policy),
+    arm: True})`` (inkling2_attn_decode_check.py, inkling2_moe_decode_kernel_ab.py):
+    every kernel_policy key must stay a configure_kernels keyword, and feeding the
+    defaults back must leave the policy unchanged."""
+    import inspect
+
+    model = _tiny_model()
+    model.configure_kernels()
+    policy = dict(model.kernel_policy)
+    params = set(inspect.signature(model.configure_kernels).parameters)
+    assert set(policy) <= params, sorted(set(policy) - params)
+    model.configure_kernels(**policy)
+    assert dict(model.kernel_policy) == policy

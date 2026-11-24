@@ -306,6 +306,17 @@ _MERGE_SOURCE = r"""
     }
 """
 
+# inkling2_gate_merge: the merge's store with Attention._gate's arithmetic
+# (MLX's Sigmoid and Multiply functors, compiled from the installed headers).
+_GATED_STORE = r"""
+    const size_t row = ((size_t)(b * L + q_pos) * HQ + h) * D;
+    for (int i = 0; i < D4; ++i) {
+        const float o = float(T(ov[i] * inv));
+        const float g = float(gate[row + int(lane) * D4 + i]);
+        out[row + int(lane) * D4 + i] = T(Multiply()(o, Sigmoid()(g)));
+    }
+"""
+
 # L == 1, G <= 6: register streaming, no threadgroup K/V staging and no
 # barriers inside the key loop; each simdgroup walks every NSG-th key and
 # reads each K/V vector once for all G query heads.
@@ -566,11 +577,76 @@ def gqa_splitk_attention(q, k, v, rel, sinks, *, offset, left_padding, window, s
                          ring=None):
     """Short-block attention with Inkling's relative bias, window and sink.
 
+    ``partials`` then ``merge`` (see ``partials`` for the arguments).
+    Returns [B, H, L, D] in q's dtype. GPU only; check ``decline_reason``
+    first."""
+    parts = partials(q, k, v, rel, sinks, offset=offset, left_padding=left_padding,
+                     window=window, scale=scale, ring=ring)
+    if parts[0] == "out":
+        return parts[1]
+    return merge(q, *parts[1:])
+
+
+def merge(q, po, pm, pl, ns, sink):
+    """The split partials merged with the sink: [B, H, L, D] in q's dtype."""
+    b, hq, length, dim = q.shape
+    kernel = _kernel("merge", ["part_o", "part_m", "part_l", "sink"], ["out"], _MERGE_SOURCE)
+    return kernel(
+        inputs=[po, pm, pl, sink],
+        template=[("T", q.dtype), ("D", dim), ("HQ", hq), ("L", length), ("NS", ns)],
+        grid=(b * hq * length * 32, 1, 1),
+        threadgroup=(32, 1, 1),
+        output_shapes=[(b, hq, length, dim)],
+        output_dtypes=[q.dtype],
+    )[0]
+
+
+_gated_kernel = None
+_PLAIN_STORE = """    device T* dst = out + (size_t)idx * D;
+    for (int i = 0; i < D4; ++i) {
+        dst[int(lane) * D4 + i] = T(ov[i] * inv);
+    }
+"""
+
+
+def merge_gated(q, po, pm, pl, ns, sink, gate):
+    """``inkling2_gate_merge``: ``merge`` with the output gate applied, in
+    the gate's layout ([B, L, H * D]): each value is the merge's rounded
+    output times MLX's own ``Sigmoid`` of the FP32 gate, rounded once more,
+    as ``Attention._gate`` computes it after the merge. GPU only."""
+    global _gated_kernel
+    from . import library_kernels
+
+    header, why = library_kernels.library("elementwise")
+    if header is None:
+        raise RuntimeError(why)
+    if _gated_kernel is None:
+        if _MERGE_SOURCE.count(_PLAIN_STORE) != 1:
+            raise RuntimeError("split-K merge store changed")
+        _gated_kernel = mx.fast.metal_kernel(
+            name="inkling2_splitk_merge_gated",
+            input_names=["part_o", "part_m", "part_l", "sink", "gate"], output_names=["out"],
+            header=header, source=_MERGE_SOURCE.replace(_PLAIN_STORE, _GATED_STORE),
+            ensure_row_contiguous=False)
+    b, hq, length, dim = q.shape
+    return _gated_kernel(
+        inputs=[po, pm, pl, sink, mx.contiguous(gate)],
+        template=[("T", q.dtype), ("D", dim), ("HQ", hq), ("L", length), ("NS", ns)],
+        grid=(b * hq * length * 32, 1, 1),
+        threadgroup=(32, 1, 1),
+        output_shapes=[(b, length, hq * dim)],
+        output_dtypes=[q.dtype],
+    )[0]
+
+
+def partials(q, k, v, rel, sinks, *, offset, left_padding, window, scale, ring=None):
+    """``("out", out)`` when one split writes the result directly, else
+    ``("split", po, pm, pl, ns, sink)`` for ``merge``.
+
     Same arguments as ``flash_relative_attention``: q [B, H, L, D]; k, v
     [B, Hk, S, D] (any strides); rel [B, L, H, E], the per-query bias at
     distances below E; sinks [B, L, H]; queries at key positions
-    ``offset + i``. Returns [B, H, L, D] in q's dtype. GPU only; check
-    ``decline_reason`` first.
+    ``offset + i``. GPU only; check ``decline_reason`` first.
 
     ``ring=(base, size)`` reads a ring buffer in place: k, v are the
     physical [B, Hk, W, D] buffers and logical key j (0 <= j < size, in
@@ -596,18 +672,6 @@ def gqa_splitk_attention(q, k, v, rel, sinks, *, offset, left_padding, window, s
     n_keys = min(size, offset + length)
     if window:
         n_keys = min(n_keys, window + length - 1)
-    merge = _kernel("merge", ["part_o", "part_m", "part_l", "sink"], ["out"], _MERGE_SOURCE)
-
-    def merged(po, pm, pl, ns):
-        return merge(
-            inputs=[po, pm, pl, sink],
-            template=[("T", q.dtype), ("D", dim), ("HQ", hq), ("L", length), ("NS", ns)],
-            grid=(b * hq * length * 32, 1, 1),
-            threadgroup=(32, 1, 1),
-            output_shapes=[(b, hq, length, dim)],
-            output_dtypes=[q.dtype],
-        )[0]
-
     if length == 1 and g <= _DIRECT_MAX_GROUP and n_keys >= _DIRECT_MIN_KEYS:
         direct = _kernel("direct", ["q", "k", "v", "rel", "dims", "scale"],
                          ["out_o", "out_m", "out_l"], _DIRECT_SOURCE)
@@ -625,7 +689,7 @@ def gqa_splitk_attention(q, k, v, rel, sinks, *, offset, left_padding, window, s
             output_shapes=[(b, hq, 1, ns, dim), (b, hq, 1, ns), (b, hq, 1, ns)],
             output_dtypes=[mx.float32, mx.float32, mx.float32],
         )
-        return merged(po, pm, pl, ns)
+        return "split", po, pm, pl, ns, sink
 
     part = _kernel("part", ["q", "k", "v", "rel", "sink", "dims", "scale"],
                    ["out_o", "out_m", "out_l"], _PART_SOURCE)
@@ -643,7 +707,7 @@ def gqa_splitk_attention(q, k, v, rel, sinks, *, offset, left_padding, window, s
     ]
     nt = nsg * 32
     if ns == 1:
-        return part(
+        return "out", part(
             inputs=[q, k, v, rel, sink, dims, sc], template=template,
             grid=(nt, hkv * nqt, b), threadgroup=(nt, 1, 1),
             output_shapes=[(b, hq, length, dim), (1,), (1,)],
@@ -655,7 +719,7 @@ def gqa_splitk_attention(q, k, v, rel, sinks, *, offset, left_padding, window, s
         output_shapes=[(b, hq, length, ns, dim), (b, hq, length, ns), (b, hq, length, ns)],
         output_dtypes=[mx.float32, mx.float32, mx.float32],
     )
-    return merged(po, pm, pl, ns)
+    return "split", po, pm, pl, ns, sink
 
 
 def reference_attention(q, k, v, rel, sinks, *, offset, left_padding, window, scale,

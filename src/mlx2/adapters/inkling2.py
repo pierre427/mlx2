@@ -528,6 +528,34 @@ KERNEL_OPTIONS = {
     # bit-identical (CPU test; GPU pending). Counter: prefill_handover_calls.
     # Default off.
     "inkling2_prefill_handover": "prefill_handover",
+    # MTPLX launch-count ingest (2026-11-23; mechanisms from
+    # youssofal/MTPLX@3890be55, Apache-2.0, reimplemented; provenance/
+    # inkling2-mtplx-launch.json). Default off, unqualified, GPU A/B pending.
+    # Each one is bitwise by construction against the path it replaces, and
+    # proves it: the first call of every shape evaluates both and compares
+    # them bit for bit (runtime/models/inkling2/library_kernels.py
+    # run_proved); the proving call returns the composed result, a refused
+    # shape keeps the composed path. So outputs equal the option-off route
+    # whether or not the launch engages; the counters say whether it did
+    # (kernel_receipt: calls / proved / refused / declined:<why>).
+    # A loop pass's 12 message reads as one scores product, one softmax and
+    # one mix (runtime/models/inkling2/pass_messages.py; any device).
+    "inkling2_pass_messages": "pass_messages",
+    # A visit's six input projections in one launch of MLX's own product
+    # code (GEMVKernel for 1 row, GemvWide for 2..8 BF16 rows, compiled from
+    # the installed headers; stage_a.py). GPU only.
+    "inkling2_stage_a_kernel": "stage_a_kernel",
+    # The attention output gate inside the split-K merge launch (MLX's own
+    # Sigmoid functor; attn_output.py, splitk.merge_gated). Needs
+    # inkling2_verify_splitk. GPU only. Not on visits that
+    # inkling2_attn_decode_kernel takes (it calls the split-K kernel itself).
+    "inkling2_gate_merge": "gate_merge",
+    # o_proj + the attention short conv + the residual add in one launch
+    # (attn_output.py). Needs inkling2_fuse_sconv and
+    # inkling2_fuse_sconv_kernel (the path it is proven against). GPU only.
+    "inkling2_attn_output_kernel": "attn_output_kernel",
+    # Token embedding gather + embed norm in one launch (frame_kernels.py).
+    "inkling2_embed_kernel": "embed_kernel",
 }
 # Defaults for KERNEL_OPTIONS keys a policy leaves unset (everything else is
 # False). None for the NAX gather means "auto", resolved at load.
@@ -733,6 +761,12 @@ def validate_policy(value):
         raise ValueError("Inkling 2 inkling2_head_kernel_wide requires inkling2_head_kernel")
     if kernels["attn_decode_kernel"] and not kernels["verify_splitk"]:
         raise ValueError("Inkling 2 inkling2_attn_decode_kernel requires inkling2_verify_splitk")
+    if kernels["gate_merge"] and not kernels["verify_splitk"]:
+        raise ValueError("Inkling 2 inkling2_gate_merge requires inkling2_verify_splitk")
+    if kernels["attn_output_kernel"] and not (kernels["fuse_sconv"]
+                                              and kernels["fuse_sconv_kernel"]):
+        raise ValueError("Inkling 2 inkling2_attn_output_kernel requires inkling2_fuse_sconv "
+                         "and inkling2_fuse_sconv_kernel")
     if kernels["compile_decode_blocks"] and not kernels["moe_fused"]:
         raise ValueError("Inkling 2 inkling2_compile_decode_blocks requires inkling2_moe_fused")
     if kernels["moe_decode_kernel"] and not kernels["moe_fused"]:

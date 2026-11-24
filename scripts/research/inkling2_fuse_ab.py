@@ -180,7 +180,9 @@ COUNTERS = ("prefill_tiled_calls", "prefill_tiled_declines", "prefill_mask_with_
             "prefill_mask_bf16_budget_calls", "head_kernel_calls", "head_kernel_wide_calls",
             "compiled_moe_calls", "compiled_moe_traces", "flash_prefill_calls",
             "verify_splitk_calls", "fuse_counts",
-            "prefill_handover_calls")
+            "prefill_handover_calls",
+            # 2026-11-23 MTPLX launch set (calls / proved / refused / declined:*).
+            "pass_messages", "stage_a", "gate_merge", "attn_output", "embed_kernel")
 
 
 def counters(model):

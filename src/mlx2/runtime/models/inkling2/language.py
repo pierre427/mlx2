@@ -480,6 +480,12 @@ def _prefill_route():
     return prefill_route
 
 
+def _attn_output():
+    from . import attn_output
+
+    return attn_output
+
+
 def _banded_mask_reference(_attn, *args, **kwargs):
     return banded_additive_mask(*args, **kwargs)
 
@@ -666,6 +672,17 @@ class Attention(nn.Module):
 
     def _project_inputs(self, x, key_input, value_input):
         """(q, r, gate, sink, k, v) projections, fused when configured."""
+        if self.__dict__.get("_stage_a"):
+            # inkling2_stage_a_kernel (default off): the six products in one
+            # launch of MLX's own product code; None = declined (counted).
+            from . import stage_a
+
+            out = stage_a.project(self, x, key_input, value_input)
+            if out is not None:
+                return out
+        return self._project_inputs_composed(x, key_input, value_input)
+
+    def _project_inputs_composed(self, x, key_input, value_input):
         bounds = getattr(self, "_fused_bounds", None)
         if bounds is None:
             return (self.q_proj(x), self.r_proj(x), self.gate_proj(x), self.sink_proj(x),
@@ -992,6 +1009,13 @@ class Attention(nn.Module):
                     _count_ring(self, "calls")
                     k, v = dview or (kv.keys, kv.values)
                     ring_arg = ((ring_phys[0] + ring_start) % k.shape[2], size)
+                if self.__dict__.get("_gate_merge"):
+                    # inkling2_gate_merge (default off): the output gate in
+                    # the split-K merge launch (proven bitwise per shape).
+                    return _attn_output().splitk_finish(
+                        self, q, k, v, r @ rel_proj, sink, gate, b, length, x.dtype,
+                        offset=offset, left_padding=left_padding, window=self.sliding,
+                        scale=self.scale, ring=ring_arg)
                 # Reads the fetched K/V in place: no sink column, no mask.
                 out = splitk.gqa_splitk_attention(
                     q, k, v, r @ rel_proj, sink, offset=offset, left_padding=left_padding,
@@ -1127,12 +1151,21 @@ class Attention(nn.Module):
         return self._finish(out, gate, b, length, x.dtype)
 
     def _finish(self, out, gate, b, length, dtype):
+        return self._output(self._gate(out, gate, b, length, dtype))
+
+    def _gate(self, out, gate, b, length, dtype):
         out = out.transpose(0, 2, 1, 3).reshape(b, length, -1)
         if _fuse.on(self, "fuse_attention"):
             _fuse.count(self, "gate_finish")
-            return self.o_proj(_fuse.gate_finish(out, gate, _fuse.dtype_ref(dtype)))
-        out = (out.astype(mx.float32) * mx.sigmoid(gate.astype(mx.float32))).astype(dtype)
-        return self.o_proj(out)
+            return _fuse.gate_finish(out, gate, _fuse.dtype_ref(dtype))
+        return (out.astype(mx.float32) * mx.sigmoid(gate.astype(mx.float32))).astype(dtype)
+
+    def _output(self, gated):
+        if self.__dict__.get("_defer_o_proj"):
+            # inkling2_attn_output_kernel: the decoder layer runs o_proj with
+            # its short convolution and residual (attn_output.residual).
+            return (gated,)
+        return self.o_proj(gated)
 
 
 def visit_length_check(model, cache):
@@ -1582,7 +1615,17 @@ class DecoderLayer(nn.Module):
             parts = [_fuse.rms(self, norm, part).astype(x.dtype) for norm, part in zip(norms, parts)]
             attn = self.self_attn(*parts, cache=cache, conv_mask=mask)
         fused_sconv = _fuse.on(self, "fuse_sconv")
-        if fused_sconv:
+        residual = None
+        if type(attn) is tuple:
+            # inkling2_attn_output_kernel (default off): o_proj, the attention
+            # short conv and the residual in one launch; declined, it returns
+            # the o_proj output for the branches below.
+            residual, attn = _attn_output().residual(self, attn[0], conv, mask, x)
+            if residual is not None and self.is_block_boundary:
+                blocks.append(x)
+        if residual is not None:
+            pass
+        elif fused_sconv:
             if self.is_block_boundary:
                 residual = self.attn_sconv(attn, conv, mask, tail="attn_boundary")
                 blocks.append(x)
@@ -1637,6 +1680,13 @@ class TextModel(nn.Module):
         self.norm = nn.RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def embed(self, inputs):
+        if self.__dict__.get("_embed_kernel"):
+            # inkling2_embed_kernel (default off): gather + norm, one launch.
+            from . import frame_kernels
+
+            out = frame_kernels.embed(self, inputs)
+            if out is not None:
+                return out
         return self.embed_norm(self.embed_tokens(inputs))
 
     def set_num_passes(self, passes):
@@ -1700,6 +1750,7 @@ class TextModel(nn.Module):
         bank = None
         prelude = prelude_blocks = None
         kernel_messages = _fuse.on(self, "fuse_residual_kernel") and mx.default_device() == mx.gpu
+        pass_rows = None  # inkling2_pass_messages: this pass's messages, read at once
         loop = self.loop
         handover = _prefill_route().handover_every(self, x)  # inkling2_prefill_handover
         for visit, index in enumerate(self.layer_indices):
@@ -1717,8 +1768,15 @@ class TextModel(nn.Module):
                     else:
                         bank = bank_states
                     x, blocks = prelude, list(prelude_blocks)
+                    if self.__dict__.get("_pass_messages"):
+                        from . import pass_messages
+
+                        pass_rows = pass_messages.rows(self, bank, self.message_queries,
+                                                       x.shape[-1])
             messages = None
-            if bank is not None and index < loop.core_end:
+            if pass_rows is not None and index < loop.core_end:
+                messages = pass_rows[index - loop.core_start]
+            elif bank is not None and index < loop.core_end:
                 query = self.message_queries[index - loop.core_start]
                 if isinstance(bank, list):
                     # inkling2_fuse_residual_kernel: the same normed softmax
@@ -1860,7 +1918,9 @@ class Model(nn.Module):
                           head_kernel_wide=False, prefill_tiled_attention=False,
                           attn_decode_kernel=False, verify_deferred_commit=False,
                           visit_length_check=False, moe_panel_kernel=False,
-                          moe_nax_mxfp8=False, prefill_handover=False):
+                          moe_nax_mxfp8=False, prefill_handover=False, pass_messages=False,
+                          stage_a_kernel=False, gate_merge=False, attn_output_kernel=False,
+                          embed_kernel=False):
         """Adapter-owned opt-in execution switches (all default off).
 
         ``loop_passes`` None keeps the trained count.  ``moe_weighted_sum``
@@ -1898,6 +1958,11 @@ class Model(nn.Module):
             raise ValueError("Inkling 2 fuse_message_kernel requires fuse_controllers")
         if attn_decode_kernel and not verify_splitk:
             raise ValueError("Inkling 2 attn_decode_kernel requires verify_splitk")
+        if gate_merge and not verify_splitk:
+            raise ValueError("Inkling 2 gate_merge requires verify_splitk")
+        if attn_output_kernel and not (fuse_sconv and fuse_sconv_kernel):
+            raise ValueError("Inkling 2 attn_output_kernel requires fuse_sconv and "
+                             "fuse_sconv_kernel")
         if moe_act_quant:
             # Every layer's activation format before anything changes, so a
             # refusal leaves the model as it was.
@@ -1932,6 +1997,8 @@ class Model(nn.Module):
         self.model.set_num_passes(
             self.config.loop_config.num_passes if loop_passes is None else loop_passes)
         object.__setattr__(self.model, "_moe_nax_scope", bool(moe_nax_gather))
+        object.__setattr__(self.model, "_pass_messages", bool(pass_messages))
+        object.__setattr__(self.model, "_embed_kernel", bool(embed_kernel))
         formats = [layer.mlp.set_act_quant(moe_act_quant) for layer in self.model.layers]
         object.__setattr__(self, "_act_quant_formats", formats)
         built = False
@@ -1957,6 +2024,11 @@ class Model(nn.Module):
             # four conv histories (decoder layer) commit only kept rows.
             object.__setattr__(layer.self_attn, "_deferred_commit", bool(verify_deferred_commit))
             object.__setattr__(layer, "_deferred_commit", bool(verify_deferred_commit))
+            # The MTPLX launch-count set (default off; each proven bitwise
+            # per shape on first use, see library_kernels).
+            object.__setattr__(layer.self_attn, "_stage_a", bool(stage_a_kernel))
+            object.__setattr__(layer.self_attn, "_gate_merge", bool(gate_merge))
+            object.__setattr__(layer.self_attn, "_defer_o_proj", bool(attn_output_kernel))
             if fused_projections:
                 layer.self_attn.fuse_projections()
             elif getattr(layer.self_attn, "_fused_bounds", None) is not None:
@@ -2013,7 +2085,10 @@ class Model(nn.Module):
              "prefill_tiled_attention": bool(prefill_tiled_attention),
              "attn_decode_kernel": bool(attn_decode_kernel),
              "verify_deferred_commit": bool(verify_deferred_commit),
-             "visit_length_check": bool(visit_length_check)},
+             "visit_length_check": bool(visit_length_check),
+             "pass_messages": bool(pass_messages), "stage_a_kernel": bool(stage_a_kernel),
+             "gate_merge": bool(gate_merge), "attn_output_kernel": bool(attn_output_kernel),
+             "embed_kernel": bool(embed_kernel)},
         )
         _prefill_route().configure(self, prefill_handover=prefill_handover)
         if head_kernel:
@@ -2126,6 +2201,20 @@ class Model(nn.Module):
             "selected": bool(getattr(self, "kernel_policy", {}).get("visit_length_check")),
             **dict(sorted(self.model.__dict__.get("visit_length_counts", {}).items())),
         }
+        # The MTPLX launch-count set: launches used (calls), shapes proven
+        # bitwise (proved) or refused, and declines by reason.
+        layers = self.model.layers
+        for name, attr, modules in (
+                ("pass_messages", "pass_messages_counts", [self.model]),
+                ("stage_a", "stage_a_counts", [layer.self_attn for layer in layers]),
+                ("gate_merge", "gate_merge_counts", [layer.self_attn for layer in layers]),
+                ("attn_output", "attn_output_counts", layers),
+                ("embed_kernel", "embed_kernel_counts", [self.model])):
+            total = {}
+            for module in modules:
+                for key, value in module.__dict__.get(attr, {}).items():
+                    total[key] = total.get(key, 0) + value
+            out[name] = dict(sorted(total.items()))
         act = {}
         for layer in self.model.layers:
             for key, value in layer.mlp.__dict__.get("act_quant_counts", {}).items():

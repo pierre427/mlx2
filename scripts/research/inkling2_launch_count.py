@@ -7,9 +7,22 @@ Slice, ExpandDims, Squeeze, Flatten, Unflatten, AsStrided). A ``Compiled``
 node is one fused launch.
 
 Usage: PYTHONPATH=src python scripts/research/inkling2_launch_count.py
-       [--rows N] [--option name=value ...] [--json]
+       [--rows N] [--length L] [--option name=value ...] [--json]
 Each ``--option`` is passed to ``Model.configure_kernels``; ``--all-fuse``
-turns on every ``fuse_*`` switch.
+turns on every ``fuse_*`` switch. ``--length L`` counts an L-row step (a
+DSpark verify block) instead of one token.
+
+Option on/off probe (``--compare a,b,...``; 2026-11-23, the MTPLX launch
+set): for each named ``configure_kernels`` switch, two fresh models on the
+same base (``--base defaults``: the adapter's KERNEL_DEFAULTS, the shipped
+route; ``--base none``: every switch off), the switch off and on. Each arm
+evaluates ``--warm-steps`` decode steps first, on the counting device, so
+the switches that prove a launch shape on first use (library_kernels) have
+proven it before the counted step; the counted step is then built lazily and
+its graph counted. Reports kernels per step and per row for off and on, the
+difference, and the on arm's engagement counters (kernel_receipt()). On the
+CPU the GPU-only launches decline (``declined:not_gpu``), so the GPU smoke
+runs it with ``--device gpu --prefill-gpu --warm-steps 1`` (Metal).
 """
 
 from __future__ import annotations
@@ -65,8 +78,10 @@ def cache_arrays(cache):
     return out
 
 
-def decode_step(model, rows=1, prefill=64, seed=0, device=None, prefill_gpu=False):
-    """``(logits, cache)`` of one lazy one-token decode step.
+def decode_step(model, rows=1, prefill=64, seed=0, device=None, prefill_gpu=False, length=1,
+                warm_steps=0):
+    """``(logits, cache)`` of one lazy ``length``-token decode step, after
+    ``warm_steps`` evaluated steps of the same length on the counting device.
 
     The prefill always runs on the CPU.  ``device="gpu"`` only *builds* the
     decode graph on the GPU stream (nothing is evaluated there), so the
@@ -76,14 +91,58 @@ def decode_step(model, rows=1, prefill=64, seed=0, device=None, prefill_gpu=Fals
     import mlx.core as mx
 
     mx.random.seed(seed + 1)
-    tokens = mx.random.randint(0, 500, (rows, prefill + 1))
+    tokens = mx.random.randint(0, 500, (rows, prefill + (warm_steps + 1) * length))
     cache = model.make_cache()
     with mx.stream(mx.gpu if prefill_gpu else mx.cpu):
         mx.eval(model(tokens[:, :prefill], cache=cache), cache_arrays(cache))
+    step = mx.gpu if device == "gpu" else mx.cpu
+    at = prefill
+    for _ in range(warm_steps):
+        with mx.stream(step):
+            mx.eval(model(tokens[:, at:at + length], cache=cache), cache_arrays(cache))
+        at += length
     if device == "gpu":
         with mx.stream(mx.gpu):
-            return model(tokens[:, prefill:], cache=cache), cache
-    return model(tokens[:, prefill:], cache=cache), cache
+            return model(tokens[:, at:at + length], cache=cache), cache
+    return model(tokens[:, at:at + length], cache=cache), cache
+
+
+RECEIPT_KEYS = ("pass_messages", "stage_a", "gate_merge", "attn_output", "embed_kernel",
+                "attn_decode", "verify_splitk_calls")
+
+
+def base_options(model, base):
+    if base == "none":
+        return {}
+    from mlx2.adapters.inkling2 import KERNEL_DEFAULTS
+    import inspect
+
+    params = inspect.signature(model.configure_kernels).parameters
+    return {k: (True if v is None else v) for k, v in KERNEL_DEFAULTS.items()
+            if k in params and not k.startswith("moe_")}
+
+
+def compare(build, names, *, base, rows, length, device, prefill_gpu, warm_steps):
+    """Kernels per step with each switch off and on (fresh models per arm)."""
+    out = {}
+    for name in names:
+        arms = {}
+        for on in (False, True):
+            model = build()
+            options = {**base_options(model, base), name: on}
+            model.configure_kernels(**options)
+            logits, cache = decode_step(model, rows=rows, device=device,
+                                        prefill_gpu=prefill_gpu, length=length,
+                                        warm_steps=warm_steps)
+            counted = count_graph(logits, *cache_arrays(cache))
+            receipt = model.kernel_receipt()
+            arms["on" if on else "off"] = {
+                "kernels": counted["kernels"],
+                "kernels_per_row": round(counted["kernels"] / (rows * length), 1),
+                "counters": {k: receipt.get(k) for k in RECEIPT_KEYS if receipt.get(k)}}
+        arms["delta"] = arms["on"]["kernels"] - arms["off"]["kernels"]
+        out[name] = arms
+    return out
 
 
 MODULES = ("Attention", "MessageController", "AttentionResidual", "SparseMoE",
@@ -151,6 +210,16 @@ def main():
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--rows", type=int, default=1)
+    parser.add_argument("--length", type=int, default=1,
+                        help="tokens per counted step (a DSpark verify block is 8)")
+    parser.add_argument("--warm-steps", type=int, default=0,
+                        help="evaluated steps before the counted one (first-use proofs)")
+    parser.add_argument("--prefill-gpu", action="store_true",
+                        help="evaluate the prefill on the GPU (BF16 experts need it)")
+    parser.add_argument("--compare", default="",
+                        help="comma-separated configure_kernels switches: off vs on")
+    parser.add_argument("--base", choices=("defaults", "none"), default="defaults",
+                        help="--compare base: adapter KERNEL_DEFAULTS or all off")
     parser.add_argument("--option", action="append", default=[])
     parser.add_argument("--all-fuse", action="store_true")
     parser.add_argument("--json", action="store_true")
@@ -162,14 +231,36 @@ def main():
     mx.set_default_device(mx.cpu)
     from test_inkling2_cpu import _tiny_model
 
-    model = _tiny_model()
-    if args.bf16:
-        from mlx.utils import tree_flatten
+    def build():
+        model = _tiny_model()
+        if args.bf16:
+            from mlx.utils import tree_flatten
 
-        # CPU GatherMM is FP32-only: the routed experts stay FP32.
-        model.load_weights([(k, v if ".switch_mlp." in k else v.astype(mx.bfloat16))
-                            for k, v in tree_flatten(model.parameters())])
-        mx.eval(model.parameters())
+            # CPU GatherMM is FP32-only: the routed experts stay FP32
+            # unless the prefill runs on the GPU.
+            model.load_weights([(k, v if ".switch_mlp." in k and not args.prefill_gpu
+                                 else v.astype(mx.bfloat16))
+                                for k, v in tree_flatten(model.parameters())])
+            mx.eval(model.parameters())
+        return model
+
+    if args.compare:
+        names = [n.strip() for n in args.compare.split(",") if n.strip()]
+        result = {"rows": args.rows, "length": args.length, "device": args.device,
+                  "bf16": args.bf16, "base": args.base, "warm_steps": args.warm_steps,
+                  "compare": compare(build, names, base=args.base, rows=args.rows,
+                                     length=args.length, device=args.device,
+                                     prefill_gpu=args.prefill_gpu,
+                                     warm_steps=args.warm_steps)}
+        if args.json:
+            print(json.dumps(result, indent=1))
+        else:
+            for name, arms in result["compare"].items():
+                print(f"{name}: off {arms['off']['kernels']} on {arms['on']['kernels']} "
+                      f"(delta {arms['delta']}; per row {arms['off']['kernels_per_row']} -> "
+                      f"{arms['on']['kernels_per_row']}) counters {arms['on']['counters']}")
+        return
+    model = build()
     options = {}
     for item in args.option:
         key, value = item.split("=", 1)
@@ -181,7 +272,9 @@ def main():
         options.update({name: True for name in params if name.startswith("fuse_")})
     if options:
         model.configure_kernels(**options)
-    out, cache = decode_step(model, rows=args.rows, device=args.device)
+    out, cache = decode_step(model, rows=args.rows, device=args.device,
+                             prefill_gpu=args.prefill_gpu, length=args.length,
+                             warm_steps=args.warm_steps)
     result = {"rows": args.rows, "device": args.device, "bf16": args.bf16, "options": options,
               **count_graph(out, *cache_arrays(cache))}
     if args.by_module:
