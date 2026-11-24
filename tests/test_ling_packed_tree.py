@@ -232,6 +232,14 @@ def test_merged_convolution_preserves_independent_mixed_dtype_branches(mixed):
     ({'merged_conv': True}, set()),
     ({'fused_norm': True}, {'ling_fused.py', 'qwen4_fused_gdn_prefill.py', 'served_exp.py'}),
     ({'fused_mla_decode': True}, {'kimi_linear_mla_fused.py', 'glm53_sparse_attention.py'}),
+    # Full adapter policies (Ling-3.2-air night test 2026-11-24: the AST arm died at
+    # startup because the executor refused the decode-only keys).
+    ({'merged_conv': False, 'fused_norm': False, 'fused_mla_decode': False,
+      'moe_nax': False, 'kda_fused': True, 'routed_moe_decode': False},
+     {'ling_kda_fused.py', 'ling_fused.py', 'qwen4_fused_gdn.py', 'served_exp.py', 'gated_delta.py'}),
+    ({'moe_nax': True, 'routed_moe_decode': True},
+     {'moe_nax_gather.py', 'switch_layers.py', 'ling_routed_decode.py',
+      'deepseek_v41_routed_decode.py', 'qwen4_routed_decode.py'}),
 ])
 def test_tree_hashes_only_bound_helpers_and_detects_exact_byte_changes(policy, helpers, tmp_path):
     import os
@@ -294,3 +302,31 @@ def test_tree_reuses_ancestor_index_array_across_channels_and_layers(monkeypatch
         np.testing.assert_array_equal(np.asarray(windows), expected)
     assert len(made) == 1
     assert tree._convolution_indices[4].shape == (4, 4)
+
+
+def test_tree_with_full_policy_kda_fused_bound_matches_serial_and_refuses_drift():
+    """Ling-3.2-air binds kda_fused by default: the packed tree must build from
+    that policy, match the serial oracle (the B1 decode body declines tree rows),
+    and refuse a later flip of the module flag."""
+    mx.random.seed(71)
+    model = tiny_model()
+    model.eval()
+    kda = [layer.attention for layer in model.layers if hasattr(layer.attention, 'ling_kda_fused')]
+    assert kda
+    for attention in kda:
+        attention.ling_kda_fused = True
+    cache = model.make_cache()
+    mx.eval(model(mx.array([[9, 8, 7]]), cache))
+    serial_cache, packed_cache = copy.deepcopy(cache), copy.deepcopy(cache)
+    tokens, parents = [1, 2, 3, 4], [-1, 0, 0, 1]
+    expected, expected_taps, _ = tree_forward(model, tokens, parents, serial_cache, [0, 1], "oracle")
+    policy = {'merged_conv': False, 'fused_norm': False, 'fused_mla_decode': False,
+              'moe_nax': False, 'kda_fused': True, 'routed_moe_decode': False}
+    provider = LingTreeExecutor(optimizations=policy)
+    actual, actual_taps, _ = provider.forward(model, tokens, parents, packed_cache, [0, 1], cached=False)
+    mx.eval(expected, actual, expected_taps, actual_taps)
+    assert_close(actual, expected)
+    assert_close(actual_taps, expected_taps)
+    kda[0].ling_kda_fused = False
+    with pytest.raises(RuntimeError, match='optimization binding changed'):
+        provider.forward(model, tokens, parents, copy.deepcopy(cache), [0, 1], cached=False)

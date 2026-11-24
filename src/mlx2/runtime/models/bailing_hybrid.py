@@ -268,41 +268,20 @@ class MultiLatentAttention(nn.Module):
         k_pe = self.rope(k_pe, offset=offset) if tree is None else tree.rope(self.rope, k_pe, offset)
 
         kv_latent = mx.expand_dims(kv_latent, axis=1)
-        if cache is not None:
+        segmented = tree is None and cache is not None and hasattr(cache, "row_views")
+        if cache is not None and not segmented:
             kv_latent, k_pe = cache.update_and_fetch(kv_latent, k_pe)
 
-        # Kimi's split kernel consumes the shared channels after position
-        # encoding. Ling supplies rotated Q/K here, preserving its RoPE law.
-        fused_output = None
-        if tree is None and length == 1:
-            fused_output = self.fused_latent_output(q_nope, q_pe, kv_latent, k_pe, mask)
-        pe_scores = (None if tree is not None or fused_output is not None
-                     else (q_pe * self.scale) @ k_pe.swapaxes(-1, -2))
-        if mask is not None and tree is None:
-            pe_scores = mx.where(
-                mask,
-                pe_scores,
-                mx.array(mx.finfo(pe_scores.dtype).min, pe_scores.dtype),
-            )
-
-        if fused_output is not None:
-            output = fused_output
+        if segmented:
+            # Segmented batch (true-batched self-MTP / multi-lane verify): the
+            # cache appends each lane's rows to that lane's own history and
+            # returns no dense K/V; every lane attends its own latent through
+            # the same branch a width-one call of its valid length takes.
+            output = self._attend_segmented_rows(q_nope, q_pe, kv_latent, k_pe, mask, cache)
         elif tree is not None:
             output = tree.mla(self, q_nope, q_pe, kv_latent, k_pe, cache, int(offset))
-        elif length == 1:
-            q_nope = self.embed_q(q_nope)
-            keys = values = kv_latent
         else:
-            keys = self.embed_q(kv_latent, transpose=False)
-            values = self.unembed_out(kv_latent)
-
-        if tree is None and fused_output is None:
-            output = scaled_dot_product_attention(
-                q_nope, keys, values, cache=cache, scale=self.scale, mask=pe_scores,
-            )
-            if length == 1:
-                output = self.unembed_out(output)
-            self.ling_calls["mla_reference"] += 1
+            output = self._attend_latent(q_nope, q_pe, kv_latent, k_pe, mask, cache)
 
         output = output.transpose(0, 2, 1, 3)
         if self.g_proj is not None:
@@ -319,6 +298,67 @@ class MultiLatentAttention(nn.Module):
 
         output = output.reshape(batch, length, -1)
         return self.dense(output)
+
+    def _attend_latent(self, q_nope, q_pe, kv_latent, k_pe, mask, cache):
+        """Reference latent attention over dense history -> [B, heads, L, v].
+
+        Kimi's split kernel consumes the shared channels after position
+        encoding. Ling supplies rotated Q/K here, preserving its RoPE law.
+        """
+        length = q_nope.shape[2]
+        if length == 1:
+            fused_output = self.fused_latent_output(q_nope, q_pe, kv_latent, k_pe, mask)
+            if fused_output is not None:
+                return fused_output
+        pe_scores = (q_pe * self.scale) @ k_pe.swapaxes(-1, -2)
+        if mask is not None:
+            pe_scores = mx.where(
+                mask,
+                pe_scores,
+                mx.array(mx.finfo(pe_scores.dtype).min, pe_scores.dtype),
+            )
+        if length == 1:
+            q_nope = self.embed_q(q_nope)
+            keys = values = kv_latent
+        else:
+            keys = self.embed_q(kv_latent, transpose=False)
+            values = self.unembed_out(kv_latent)
+        output = scaled_dot_product_attention(
+            q_nope, keys, values, cache=cache, scale=self.scale, mask=pe_scores,
+        )
+        if length == 1:
+            output = self.unembed_out(output)
+        self.ling_calls["mla_reference"] += 1
+        return output
+
+    def _attend_segmented_rows(self, q_nope, q_pe, kv_latent, k_pe, mask, cache):
+        from ..segmented_plain_kv import SegmentedBatchKVCache
+
+        # Refuse before the append, so an unsupported cache is left untouched.
+        if type(cache) is not SegmentedBatchKVCache:
+            raise NotImplementedError("segmented Ling MLA supports plain latent rows only")
+        if mask is not None and not isinstance(mask, mx.array):
+            raise ValueError("segmented Ling MLA requires an explicit array mask")
+        cache.update_and_fetch(kv_latent, k_pe)
+        batch, heads, length, _ = q_nope.shape
+        pieces = []
+        for index, valid, row_latent, row_pe, row_mask in cache.row_views(mask):
+            if not valid:
+                pieces.append(mx.zeros((1, heads, length, self.v_head_dim), dtype=q_nope.dtype))
+                continue
+            # A one-query row's slice of a plain segmented mask is all True:
+            # pass None, as KVCache.make_mask does at width one, so the fused
+            # decode kernel admits the same rows it would there.
+            piece = self._attend_latent(
+                q_nope[index:index + 1, :, :valid], q_pe[index:index + 1, :, :valid],
+                row_latent, row_pe, None if valid == 1 else row_mask, None,
+            )
+            if valid < length:
+                piece = mx.pad(piece, [(0, 0), (0, 0), (0, length - valid), (0, 0)])
+            pieces.append(piece)
+        cache.note_attention()
+        self.ling_calls["mla_segmented_rows"] += batch
+        return mx.concatenate(pieces, axis=0)
 
     def tail(self, x: mx.array, mask: mx.array | None = None, cache: KVCache | None = None):
         """Prompt-chunk tail: the latent/positional cache write over every row,

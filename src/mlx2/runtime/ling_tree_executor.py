@@ -21,6 +21,21 @@ _OPTIMIZATION_FLAGS = {
     "fused_norm": "ling_fused_norm",
     "fused_mla_decode": "ling_fused_mla",
 }
+# Policy keys outside the packed tree's own helpers: kda_fused (tree rows take
+# tree.kda first), moe_nax (prompt-chunk MoE, no forward_scope on the tree path)
+# and routed_moe_decode (one-token MoE; it could engage only on a one-token tree).
+# Admitted so a policy carrying them can build the executor, and bound into its
+# revision with their sources (the lists match Ling3FlashAdapter's).
+# Module attribute checked per layer (None: no per-module flag), and sources.
+_DECODE_ONLY_FLAGS = {
+    "kda_fused": (("attention", "ling_kda_fused"),
+                  ("models/ling_kda_fused.py", "models/ling_fused.py", "models/qwen4_fused_gdn.py",
+                   "models/served_exp.py", "models/gated_delta.py")),
+    "routed_moe_decode": (("mlp", "ling_routed_decode"),
+                          ("models/ling_routed_decode.py", "models/deepseek_v41_routed_decode.py",
+                           "models/qwen4_routed_decode.py", "models/switch_layers.py")),
+    "moe_nax": (None, ("models/moe_nax_gather.py", "models/switch_layers.py")),
+}
 
 
 class LingTreeTransaction:
@@ -59,10 +74,14 @@ class LingTreeExecutor(HybridTreeExecutor):
 
     def __init__(self, *, optimizations=None):
         selected = dict(optimizations or {})
-        if set(selected) - _OPTIMIZATION_FLAGS.keys() or any(type(value) is not bool for value in selected.values()):
+        known = _OPTIMIZATION_FLAGS.keys() | _DECODE_ONLY_FLAGS.keys()
+        if set(selected) - known or any(type(value) is not bool for value in selected.values()):
             raise ValueError("invalid Ling tree optimization binding")
         self._optimization_binding = tuple(
             (key, selected.get(key, False)) for key in _OPTIMIZATION_FLAGS
+        )
+        self._decode_only_binding = tuple(
+            (key, selected.get(key, False)) for key in _DECODE_ONLY_FLAGS
         )
         root = Path(__file__).parent
         self._sources = (Path(__file__), root / "models/ling_tree.py",
@@ -72,11 +91,15 @@ class LingTreeExecutor(HybridTreeExecutor):
                               root / "models/qwen4_fused_gdn_prefill.py", root / "models/served_exp.py")
         if selected.get("fused_mla_decode", False):
             self._sources += (root / "models/kimi_linear_mla_fused.py", root / "models/glm53_sparse_attention.py")
+        for key, enabled in self._decode_only_binding:
+            if enabled:
+                self._sources += tuple(root / path for path in _DECODE_ONLY_FLAGS[key][1]
+                                       if root / path not in self._sources)
         self.source_identity = tuple(
             (path.name, hashlib.sha256(path.read_bytes()).hexdigest()) for path in self._sources
         )
         self.source_revision_token = hashlib.sha256(
-            repr((self.source_identity, self._optimization_binding)).encode()
+            repr((self.source_identity, self._optimization_binding, self._decode_only_binding)).encode()
         ).hexdigest()
         self.dispatches = 0
         self.projection_rows = 0
@@ -99,6 +122,11 @@ class LingTreeExecutor(HybridTreeExecutor):
             for key, selected in self._optimization_binding:
                 flag = _OPTIMIZATION_FLAGS[key]
                 if hasattr(layer.attention, flag) and getattr(layer.attention, flag) is not selected:
+                    raise RuntimeError("Ling packed tree optimization binding changed")
+            for key, selected in self._decode_only_binding:
+                where = _DECODE_ONLY_FLAGS[key][0]
+                module = where and getattr(layer, where[0], None)
+                if module is not None and hasattr(module, where[1]) and getattr(module, where[1]) is not selected:
                     raise RuntimeError("Ling packed tree optimization binding changed")
         self.validate_revision()
         self.validate_cohort(len(caches), configured_limit)

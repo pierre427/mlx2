@@ -165,3 +165,105 @@ def test_v32_group_mask_uses_neg_inf():
     assert sorted(idx_v32[0].tolist()) == [0, 1]
     idx_old, _ = bh.group_expert_select(gates, bias, 2, 2, 1, 1.0, True, "sigmoid", False)
     assert sorted(idx_old[0].tolist()) == [2, 3]  # the pre-existing 0.0-fill law
+
+
+def _self_mtp_tokens(model, monkeypatch, *, self_mtp=True):
+    from mlx2.runtime.generate import BatchGenerator
+    from mlx2.runtime.sample_utils import LaneRNG
+    from mlx2.runtime.segmented_self_mtp import segmented_self_mtp_stats
+
+    segmented_self_mtp_stats(reset=True)
+    config = {"persistent": True, "num_draft": 2, "segment_aware_live_tip": True,
+              "segment_aware_cohort_size": 2, "rate_gate": False}
+    kwargs = {"self_mtp": config} if self_mtp else {}
+    gen = BatchGenerator(model, completion_batch_size=2, prefill_batch_size=2,
+                         prefill_step_size=4, **kwargs)
+    extra = {"self_mtp_configs": [{"sampling_temp": 0.0}] * 2} if self_mtp else {}
+    gen.insert([[3, 17, 5, 9, 22, 41, 7], [8, 8, 30, 2, 11]], max_tokens=[12, 12],
+               lane_rngs=[LaneRNG(0), LaneRNG(1)], **extra)
+    tokens = {}
+    for _ in range(60):
+        for response in gen.next()[1]:
+            tokens.setdefault(response.uid, []).append(response.token)
+    return tokens, segmented_self_mtp_stats()
+
+
+def test_segmented_self_mtp_true_batches_through_ling_mla(monkeypatch):
+    """Ling-3.2-air night test 2026-11-24: every native-MTP arm crashed in the
+    MTP head's gated MLA, which read dense K/V from a SegmentedBatchKVCache
+    (it returns (None, None); rows are read through row_views)."""
+    new_stream = mx.new_stream
+    monkeypatch.setattr(mx, "new_stream", lambda device: new_stream(mx.cpu))
+    model = _tiny()
+    tokens, stats = _self_mtp_tokens(model, monkeypatch)
+    assert stats["true_batched_requests"] > 0
+    assert stats["true_batched_engaged"] == stats["true_batched_requests"]
+    assert stats["segmented_attention_calls"] > 0
+    assert model.mtp.layers[0].attention.ling_calls["mla_segmented_rows"] > 0
+    monkeypatch.setattr(model, "mtp_segmented_true_batch", False, raising=False)
+    serial, serial_stats = _self_mtp_tokens(model, monkeypatch)
+    assert serial_stats["true_batched_engaged"] == 0
+    assert tokens == serial
+    ordinary, _ = _self_mtp_tokens(model, monkeypatch, self_mtp=False)
+    assert tokens == ordinary  # greedy speculation emits the ordinary stream
+
+
+@pytest.mark.parametrize("bases,valids,use_mask", [
+    ([5, 2, 7], [3, 3, 3], True),
+    ([5, 2, 7], [1, 3, 2], True),
+    ([5, 0, 7], [2, 0, 1], True),
+    ([4, 4], [1, 1], True),
+    ([4, 6], [3, 1], False),
+    ([0, 3], [2, 3], True),
+])
+def test_segmented_mla_rows_match_width_one_calls(bases, valids, use_mask):
+    """Uneven, empty and one-query rows over a SegmentedBatchKVCache match a
+    width-one KVCache call per row (projections run over the padded batch, so
+    allclose), and every row's cache advances by exactly its valid length."""
+    from mlx2.runtime.models.cache import KVCache
+    from mlx2.runtime.segmented_plain_kv import SegmentedBatchKVCache
+
+    model = _tiny()
+    attn = model.mtp.layers[0].attention
+    width = model.args.hidden_size
+    mx.random.seed(3)
+    rows, refs = [], []
+    for base in bases:
+        row, ref = KVCache(), KVCache()
+        if base:
+            x0 = mx.random.normal((1, base, width))
+            attn(x0, bh.create_attention_mask(x0, row, return_array=True), row)
+            attn(x0, bh.create_attention_mask(x0, ref, return_array=True), ref)
+        rows.append(row)
+        refs.append(ref)
+    seg = SegmentedBatchKVCache(rows)
+    step = max(valids)
+    x = mx.random.normal((len(bases), step, width))
+    seg.prepare(lengths=valids)
+    mask = seg.make_mask(step, return_array=True) if use_mask else None
+    out = attn(x, mask, seg)
+    seg.finalize()
+    for index, (ref, valid) in enumerate(zip(refs, valids)):
+        assert rows[index].offset == ref.offset + valid or valid == 0
+        if not valid:
+            assert rows[index].offset == bases[index]
+            continue
+        xi = x[index:index + 1, :valid]
+        expected = attn(xi, bh.create_attention_mask(xi, ref, return_array=True), ref)
+        assert mx.allclose(out[index:index + 1, :valid], expected, atol=1e-5)
+        assert rows[index].offset == ref.offset
+
+
+def test_segmented_mla_refuses_quantized_rows_before_append():
+    from mlx2.runtime.segmented_plain_kv import SegmentedBatchQuantizedKVCache
+
+    model = _tiny()
+    attn = model.mtp.layers[0].attention
+    fake = SegmentedBatchQuantizedKVCache.__new__(SegmentedBatchQuantizedKVCache)
+    fake.offset = 0
+    appended = []
+    fake.update_and_fetch = lambda *a: appended.append(a)
+    with pytest.raises(NotImplementedError, match="plain latent rows"):
+        attn._attend_segmented_rows(mx.zeros((1, 2, 1, 32)), mx.zeros((1, 2, 1, 16)),
+                                    mx.zeros((1, 1, 1, 32)), mx.zeros((1, 1, 1, 16)), None, fake)
+    assert appended == []
