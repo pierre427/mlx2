@@ -468,6 +468,12 @@ def _prefill_attention():
     return prefill_attention
 
 
+def _prefill_onelaunch():
+    from . import prefill_onelaunch
+
+    return prefill_onelaunch
+
+
 def _attn_decode():
     from . import attn_decode
 
@@ -895,6 +901,10 @@ class Attention(nn.Module):
         )
         q, k, v = (a.transpose(0, 2, 1, 3) for a in (q, k, v))
         ring, ring_start, ring_phys = None, 0, None
+        # Which in-place ring read set ring_phys ("splitk" or "onelaunch"),
+        # so a declined read's copy is counted by its own route; and a
+        # onelaunch decline decided while fetching (counted once, below).
+        ring_owner, onelaunch_decline = None, None
         # Deferred-commit visits read this chronological view where the
         # other paths read the ring's own buffers (``_deferred_update``).
         dview = None
@@ -909,6 +919,31 @@ class Attention(nn.Module):
             counts["uncached"] = counts.get("uncached", 0) + 1
         elif q8:
             k, v = self._fetch_q8(kv, k, v)
+        elif (
+            length > 1
+            and self.__dict__.get("_onelaunch_prefill")
+            and type(kv) in (RotatingKVCache, BatchRotatingKVCache)
+            and not self._ring_direct(kv, length)
+        ):
+            # inkling2_prefill_onelaunch_attention: the ring is read in place
+            # through its (rot, size) mapping; the chronological copy is made
+            # below only if the route declines. (Prompt chunks append through
+            # _update_concat, so the mapping is rotation 0 here in practice;
+            # see prefill_onelaunch's docstring.)
+            ring_owner = "onelaunch"
+            dview = self._deferred_update(kv, k, v)
+            if dview is not None:
+                ring_phys = (0, dview[0].shape[2])
+            else:
+                kv.update_and_fetch(k, v)
+                ring_phys = self._ring_layout(kv)
+                if ring_phys is None:
+                    # A layout the mapping cannot express (keep > 0): the
+                    # route declines and the composed path reads the copy.
+                    onelaunch_decline = "ring_unmapped"
+                    k, v = self._chronological(kv, None)
+            if ring_phys is not None:
+                k = v = None
         elif (
             fa
             and type(kv) is RotatingKVCache
@@ -927,6 +962,7 @@ class Attention(nn.Module):
             ring = kv
             k = v = None
         elif kv is not None and self._ring_direct(kv, length):
+            ring_owner = "splitk"
             dview = self._deferred_update(kv, k, v)
             if dview is not None:
                 # The view is chronological: physical row j is key j.
@@ -945,6 +981,12 @@ class Attention(nn.Module):
         if ring is None:
             size = k.shape[2] if ring_phys is None else ring_phys[1]
         left_padding = getattr(kv, "left_padding", None)
+        # The route's tile grid origin: the padding before any crop (batch
+        # caches keep it in the chronological frame, negative once real
+        # tokens rotated out) and the tokens a B1 cache already dropped.
+        align_padding, abs_base = left_padding, 0
+        if isinstance(getattr(kv, "offset", None), int):
+            abs_base = kv.offset - size
         if self.sliding and size > length + self.sliding - 1:
             # No query reaches keys older than its window: drop them before
             # the dense relative mask and SDPA (they would be masked anyway).
@@ -952,6 +994,7 @@ class Attention(nn.Module):
             if ring is None and ring_phys is None:
                 k, v = k[:, :, start:], v[:, :, start:]
             ring_start = start
+            abs_base += start
             size = size - start
             if left_padding is not None:
                 left_padding = mx.maximum(left_padding - start, 0)
@@ -975,6 +1018,8 @@ class Attention(nn.Module):
             r = (r.astype(mx.float32) * tau).astype(x.dtype)
         rel_proj = self.rel_proj.astype(x.dtype)
         if q8:
+            if length > 1 and self.__dict__.get("_onelaunch_prefill"):
+                _prefill_onelaunch().count(self, "declined:kv_q8")
             # The int8 K/V are read in place; nothing dequantizes the prefix.
             reason = _kv_q8.decline_reason(q[:, :, :1], k, v, n_heads=self.n_heads,
                                            n_kv=self.n_kv, head_dim=self.head_dim)
@@ -1022,9 +1067,40 @@ class Attention(nn.Module):
                     window=self.sliding, scale=self.scale, ring=ring_arg,
                 )
                 return self._finish(out, gate, b, length, x.dtype)
+        if length > 1 and self.__dict__.get("_onelaunch_prefill"):
+            # inkling2_prefill_onelaunch_attention: one launch per visit and
+            # chunk, K/V (or the ring's physical buffers) read in place, no
+            # mask, no sink row; None after a counted decline.
+            route = _prefill_onelaunch()
+            if onelaunch_decline is not None:
+                route.count(self, "declined:" + onelaunch_decline)
+            elif ring is not None:
+                route.count(self, "declined:fused_ring")
+            elif dview is not None:
+                route.count(self, "declined:deferred_view")
+            elif kv is not None and type(kv) not in self._SPLITK_CACHES:
+                route.count(self, "declined:cache_type")
+            else:
+                ring_arg = None
+                kk, vv = k, v
+                if ring_phys is not None:
+                    kk, vv = kv.keys, kv.values
+                    ring_arg = ((ring_phys[0] + ring_start) % kk.shape[2], size)
+                out = route.route(
+                    self, q, kk, vv, r @ rel_proj, sink, offset=offset,
+                    left_padding=left_padding, window=self.sliding, scale=self.scale,
+                    abs_base=abs_base, align_padding=align_padding, ring=ring_arg,
+                    # q is the head transpose of a fresh [B, L, H, D] array
+                    # (l2_clip / log-tau outputs): unit stride on D.
+                    q_unit_stride=True)
+                if out is not None:
+                    return self._finish(out, gate, b, length, x.dtype)
         if ring_phys is not None:
             # The kernel declined: the chronological copy the reference reads.
-            _count_ring(self, "copies")
+            if ring_owner == "onelaunch":
+                _prefill_onelaunch().count(self, "ring_copies")
+            else:
+                _count_ring(self, "copies")
             k, v = dview or self._chronological(kv, None)
             if ring_start:
                 k, v = k[:, :, ring_start:], v[:, :, ring_start:]
@@ -1920,7 +1996,7 @@ class Model(nn.Module):
                           visit_length_check=False, moe_panel_kernel=False,
                           moe_nax_mxfp8=False, prefill_handover=False, pass_messages=False,
                           stage_a_kernel=False, gate_merge=False, attn_output_kernel=False,
-                          embed_kernel=False):
+                          embed_kernel=False, prefill_onelaunch_attention=False):
         """Adapter-owned opt-in execution switches (all default off).
 
         ``loop_passes`` None keeps the trained count.  ``moe_weighted_sum``
@@ -1954,6 +2030,9 @@ class Model(nn.Module):
             raise ValueError("Inkling 2 head_kernel_wide requires head_kernel")
         if prefill_tiled_attention and flash_prefill:
             raise ValueError("Inkling 2 prefill_tiled_attention and flash_prefill are alternatives")
+        if prefill_onelaunch_attention and (prefill_tiled_attention or flash_prefill):
+            raise ValueError("Inkling 2 prefill_onelaunch_attention, prefill_tiled_attention and "
+                             "flash_prefill are alternatives")
         if fuse_message_kernel and not fuse_controllers:
             raise ValueError("Inkling 2 fuse_message_kernel requires fuse_controllers")
         if attn_decode_kernel and not verify_splitk:
@@ -2019,6 +2098,8 @@ class Model(nn.Module):
                                bool(prefill_mask_bf16_budget))
             object.__setattr__(layer.self_attn, "_mask_with_sink", bool(prefill_mask_with_sink))
             object.__setattr__(layer.self_attn, "_prefill_tiled", bool(prefill_tiled_attention))
+            object.__setattr__(layer.self_attn, "_onelaunch_prefill",
+                               bool(prefill_onelaunch_attention))
             object.__setattr__(layer.self_attn, "_attn_decode", bool(attn_decode_kernel))
             # inkling2_verify_deferred_commit: ring visits (attention) and the
             # four conv histories (decoder layer) commit only kept rows.
@@ -2088,7 +2169,8 @@ class Model(nn.Module):
              "visit_length_check": bool(visit_length_check),
              "pass_messages": bool(pass_messages), "stage_a_kernel": bool(stage_a_kernel),
              "gate_merge": bool(gate_merge), "attn_output_kernel": bool(attn_output_kernel),
-             "embed_kernel": bool(embed_kernel)},
+             "embed_kernel": bool(embed_kernel),
+             "prefill_onelaunch_attention": bool(prefill_onelaunch_attention)},
         )
         _prefill_route().configure(self, prefill_handover=prefill_handover)
         if head_kernel:
@@ -2171,6 +2253,14 @@ class Model(nn.Module):
                 fuse[key] = fuse.get(key, 0) + value
         out["fuse_counts"] = dict(sorted(fuse.items()))
         out.update(_prefill_route().receipt(self))
+        # inkling2_prefill_onelaunch_attention: calls by form and visit kind,
+        # rings read in place, declines by reason, first-use check failures.
+        out["prefill_onelaunch"] = {
+            "selected": bool(getattr(self, "kernel_policy", {}).get(
+                "prefill_onelaunch_attention")),
+            **_prefill_onelaunch().receipt([layer.self_attn for layer in self.model.layers])}
+        out["prefill_onelaunch_calls"] = out["prefill_onelaunch"]["calls"]
+        out["prefill_onelaunch_declines"] = dict(out["prefill_onelaunch"]["declines"])
         decode = {}
         for layer in self.model.layers:
             for key, value in layer.self_attn.__dict__.get("attn_decode_counts", {}).items():

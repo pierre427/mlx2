@@ -476,6 +476,28 @@ KERNEL_OPTIONS = {
     # tests and the GPU A/B are pending (omlx found MLX's masked SDPA faster
     # than its flash kernel for full attention on M5 NAX hosts).
     "inkling2_prefill_tiled_attention": "prefill_tiled_attention",
+    # Prompt attention (rows > 1, sliding and global visits) in one Metal
+    # launch per visit and chunk (runtime/models/inkling2/prefill_onelaunch.py,
+    # clean-room implementation 2026-11-23 of the one-launch spec; no MTPLX
+    # code): Q/K/V, bias profiles and sinks read in place through their
+    # strides, ring caches read through their (rot, size) mapping, no mask,
+    # bias plane or sink row (memory: the output only). FP32 operands,
+    # probabilities and online softmax from the sink; key tiles aligned to
+    # each sequence's own token frame, so a row's output is bitwise
+    # independent of the chunk width, its place in the chunk and left
+    # padding. Two forms of the same function: Metal 4 tensor ops on M5-class
+    # GPUs (macOS 26.2+), simdgroup 8x8 FP32 MMA elsewhere
+    # (MLX2_INKLING2_ONELAUNCH_FORM=auto|simd|tensor|off). Each (form, dtype,
+    # window kind) passes a float64 self-check on first use or the route
+    # declines (first_use). Blocks under 32 rows still go to
+    # inkling2_verify_splitk first; kv_q8 global visits, fused-ring and
+    # deferred-commit views and unmapped rings decline. All declines counted
+    # (kernel_receipt()["prefill_onelaunch"]). Near-exact against the composed
+    # path (different reduction order, more accurate than it on synthetic
+    # inputs). Alternative to inkling2_prefill_tiled_attention and
+    # inkling2_flash_prefill. Default off: Metal tests, model-path check and
+    # the A/B are pending.
+    "inkling2_prefill_onelaunch_attention": "prefill_onelaunch_attention",
     # One-token decode front end of every attention visit in one Metal launch
     # (runtime/models/inkling2/attn_decode.py, original, 2026-11-22): the k/v
     # short convolutions and next conv states, the q/k/r L2 clips, the value
@@ -754,6 +776,11 @@ def validate_policy(value):
         raise ValueError("Inkling 2 inkling2_fuse_dconv_kernel requires inkling2_fuse_sconv")
     if kernels["fuse_message_kernel"] and not kernels["fuse_controllers"]:
         raise ValueError("Inkling 2 inkling2_fuse_message_kernel requires inkling2_fuse_controllers")
+    if kernels["prefill_onelaunch_attention"] and (kernels["prefill_tiled_attention"]
+                                                   or kernels["flash_prefill"]):
+        raise ValueError("Inkling 2 inkling2_prefill_onelaunch_attention, "
+                         "inkling2_prefill_tiled_attention and inkling2_flash_prefill "
+                         "are alternatives")
     if kernels["prefill_tiled_attention"] and kernels["flash_prefill"]:
         raise ValueError("Inkling 2 inkling2_prefill_tiled_attention and inkling2_flash_prefill "
                          "are alternatives")
@@ -1194,6 +1221,8 @@ class Inkling2Adapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             names += ("inkling2/prefill_route.py",)
         if policy.get("attn_decode_kernel"):
             names += ("inkling2/attn_decode.py",)
+        if policy.get("prefill_onelaunch_attention"):
+            names += ("inkling2/prefill_onelaunch.py",)
         contract = {
             "operation": numerics_operation(policy),
             "kernel_policy": dict(getattr(self, "kernel_policy", {})),
