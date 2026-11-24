@@ -518,6 +518,14 @@ def _granite_swa(path: Path, config: dict) -> AdapterResolution:
     return AdapterResolution(module.GraniteSWAAdapter, module.DESCRIPTOR, artifact)
 
 
+def _nemotron36_academia(path: Path, config: dict) -> AdapterResolution:
+    module = importlib.import_module(".nemotron36_academia", __package__)
+    artifact = module.inspect_artifact(path)
+    return AdapterResolution(
+        module.Nemotron36AcademiaAdapter, module.descriptor_for(artifact["config"]), artifact
+    )
+
+
 def _flint(path: Path, config: dict) -> AdapterResolution:
     module = importlib.import_module(".flint", __package__)
     artifact = module.inspect_artifact(path)
@@ -665,6 +673,7 @@ _RESOLVERS: dict[str, Callable[[Path, dict], AdapterResolution]] = {
     "gpt_oss": _gpt_oss,
     "gpt_oss_puzzle": _gpt_oss,
     "granitemoe_swa": _granite_swa,
+    "nemotron3_6_academia": _nemotron36_academia,
     "flint": _flint,
     "maxwell_moe": _maxwell_moe,
     "glm53_gguf": _glm53_gguf,

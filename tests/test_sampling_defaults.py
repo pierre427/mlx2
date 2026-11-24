@@ -312,6 +312,9 @@ def test_every_target_adapter_declares_cited_vendor_defaults():
         # Kimi-K3.1's resolver refuses serving (layer-stream prefill only),
         # so no sampling profile applies.
         "kimi_k31",
+        # Nemotron 3.6 Academia has no released checkpoint or
+        # generation_config.json yet (2026-11-23); revisit when one ships.
+        "nemotron3_6_academia",
     }
     assert set(_RESOLVERS) == set(EXPECTED) | no_vendor_profile
     for model_type, profiles in EXPECTED.items():
