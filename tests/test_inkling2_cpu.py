@@ -379,7 +379,9 @@ def test_policy_parsing():
          "prefill_mask_bf16_budget": False,
          "prefill_mask_with_sink": False, "head_kernel_wide": False,
          "prefill_tiled_attention": False, "attn_decode_kernel": False,
-         "verify_deferred_commit": False, "visit_length_check": False}, {})
+         "verify_deferred_commit": False, "visit_length_check": False,
+         "prefill_handover": False,
+         "prefill_wide_chunk": False, "prefill_transient_pricing": False}, {})
     assert validate_policy({"inkling2_fused_projections": True})[0]["fused_projections"] is True
     assert validate_policy({"draft_model": "x"})[1] == {"draft_model": "x"}
     with pytest.raises(TypeError):
@@ -413,7 +415,8 @@ def test_fused_projection_toggle_round_trip():
                                    "prefill_tiled_attention": False,
                                    "attn_decode_kernel": False,
                                    "verify_deferred_commit": False,
-                                   "visit_length_check": False}
+                                   "visit_length_check": False,
+                                   "prefill_handover": False}
 
 
 @pytest.mark.parametrize("rows", [1, 2])

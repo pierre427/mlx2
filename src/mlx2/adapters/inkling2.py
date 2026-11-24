@@ -521,6 +521,13 @@ KERNEL_OPTIONS = {
     # closed instead of decoding from mixed state. Host integers only; no
     # output change. Counters: kernel_counters["visit_length_check"].
     "inkling2_visit_length_check": "visit_length_check",
+    # MTPLX ingest 2026-11-23 (candidate 12; runtime/models/inkling2/
+    # prefill_route.py, original code): mx.async_eval of the residual stream
+    # every 4 visits inside a prompt forward (>= 64 rows), so the GPU starts
+    # the chunk while Python builds the rest. Same graph and kernels:
+    # bit-identical (CPU test; GPU pending). Counter: prefill_handover_calls.
+    # Default off.
+    "inkling2_prefill_handover": "prefill_handover",
 }
 # Defaults for KERNEL_OPTIONS keys a policy leaves unset (everything else is
 # False). None for the NAX gather means "auto", resolved at load.
@@ -607,6 +614,27 @@ PREDRAFT_OPTION = "inkling2_dspark_predraft"
 # cost_depth: draft depth per round from a verify cost table (true: timed at
 # load; or an object with verify_ms/draft_ms), through the existing cohort
 # adaptive_verification policy; see runtime/drafters/inkling2_dspark_cost.py.
+# MTPLX ingest 2026-11-23, candidate 9 (adapters/inkling2_prefill_plan.py,
+# original code): prefill chunks of up to 2,048 rows for chunk starts below
+# 18,432 keys (never crossing it) and 512 rows past it, a deterministic
+# function of the chunk's absolute depth fixed at load (no run-time memory
+# input), so a read resumed from a restored prefix runs the cold read's
+# chunks whenever a checkpoint cut the cold read there (as on the 512 route).
+# The schedule is part of the APCv2 namespace. Declines at load (step 512,
+# 512 namespace) when free GPU memory is below 12 GiB. Admission charges the
+# largest chunk the schedule runs; nothing is narrowed at run time. Ordinary
+# route only (the DSpark prefill slicer has no schedule hook yet: refused). Implies
+# inkling2_prefill_transient_pricing. Default off; the width changes GEMM/MoE
+# tiles, so logits differ from the 512-row route.
+PREFILL_WIDE_OPTION = "inkling2_prefill_wide_chunk"
+# MTPLX ingest 2026-11-23, candidate 11 (Inkling2CacheBudget.transient_terms):
+# admission charges each prefill chunk's working memory, derived from the
+# shapes (residual states, one visit's projections, the mask slices and
+# index planes, the routed experts, the global K/V growth copy). Not purely
+# additive at the default width (it adds bytes to every arriving lane's
+# requirement, so a host near its limit can defer or refuse a lane it admits
+# today), hence default off.
+PREFILL_PRICING_OPTION = "inkling2_prefill_transient_pricing"
 DSPARK_OPTIONS = {"inkling2_dspark_kv_headroom": "kv_headroom",
                   "inkling2_dspark_fold_q8": "fold_q8",
                   "inkling2_dspark_cost_depth": "cost_depth"}
@@ -670,6 +698,16 @@ def validate_policy(value):
     if type(predraft) is not bool:
         raise TypeError(f"Inkling 2 {PREDRAFT_OPTION} must be a boolean")
     kernels["dspark_predraft"] = predraft
+    wide = value.pop(PREFILL_WIDE_OPTION, False)
+    if type(wide) is not bool:
+        raise TypeError(f"Inkling 2 {PREFILL_WIDE_OPTION} must be a boolean")
+    pricing = value.pop(PREFILL_PRICING_OPTION, None)
+    if pricing is not None and type(pricing) is not bool:
+        raise TypeError(f"Inkling 2 {PREFILL_PRICING_OPTION} must be a boolean")
+    if wide and pricing is False:
+        raise ValueError(f"Inkling 2 {PREFILL_WIDE_OPTION} requires {PREFILL_PRICING_OPTION}")
+    kernels["prefill_wide_chunk"] = wide
+    kernels["prefill_transient_pricing"] = bool(wide if pricing is None else pricing)
     mask_mb = value.pop(PREFILL_MASK_OPTION, None)
     if mask_mb is not None and type(mask_mb) is not int:
         raise TypeError(f"Inkling 2 {PREFILL_MASK_OPTION} must be an integer")
@@ -881,6 +919,9 @@ class Inkling2Adapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             # pre-draft, and headroom writes into the pre-draft's cache copy.
             raise ValueError(f"Inkling 2 {PREDRAFT_OPTION} is not yet combined with "
                              "inkling2_dspark_cost_depth or inkling2_dspark_kv_headroom")
+        if self.kernel_policy["prefill_wide_chunk"] and external:
+            raise ValueError(f"Inkling 2 {PREFILL_WIDE_OPTION} is ordinary-route only (the DSpark "
+                             "prefill slicer has no adapter width plan)")
         if self.kernel_policy["dspark_prefill_reclaim"] is None:
             self.kernel_policy["dspark_prefill_reclaim"] = bool(external)
         if external and external.get("draft_model") not in DSPARK_DRAFT_NAMES:
@@ -940,7 +981,12 @@ class Inkling2Adapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
         self.hard_no_thinking = self.kernel_policy.pop("hard_no_thinking")
         self.dspark_prefill_reclaim = self.kernel_policy.pop("dspark_prefill_reclaim")
         self.dspark_predraft = self.kernel_policy.pop("dspark_predraft")
+        self.prefill_wide_chunk = self.kernel_policy.pop("prefill_wide_chunk")
+        self.prefill_transient_pricing = self.kernel_policy.pop("prefill_transient_pricing")
         self.model.configure_kernels(**self.kernel_policy)
+        self.prefill_schedule = None
+        if self.prefill_wide_chunk:
+            self._install_prefill_schedule()
         self.layout = self.model.apc_v2_layout
         tokenizer = AutoTokenizer.from_pretrained(path, local_files_only=True, trust_remote_code=False)
         self.pretokenizer_receipt = repair_loaded_tokenizer(tokenizer, path)
@@ -1009,6 +1055,38 @@ class Inkling2Adapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
 
     def bind_prefill_step(self, prefill_step):
         self._prefill_step = int(prefill_step)
+        schedule = getattr(self, "prefill_schedule", None)
+        if schedule is not None and schedule.engaged:
+            # prefill_wide_chunks counts lanes in forwards of the resolved step.
+            from ..runtime.models.inkling2 import prefill_route
+
+            step = int(prefill_step)
+            prefill_route.set_wide_rows(self.model, step if step > schedule.narrow else None)
+
+    def _install_prefill_schedule(self, headroom_bytes=None):
+        """inkling2_prefill_wide_chunk: decide the route once at load and, if
+        it engages, declare the width schedule on the model (the generic
+        ``_mlx2_prefill_rows_at`` hook)."""
+        from ..runtime.models.inkling2 import prefill_route
+        from .inkling2_prefill_plan import WIDE_ROWS, WidePrefillSchedule, gpu_headroom_bytes
+
+        if headroom_bytes is None:
+            headroom_bytes = gpu_headroom_bytes()
+        schedule = WidePrefillSchedule(headroom_bytes=headroom_bytes)
+        self.prefill_schedule = schedule
+        if schedule.engaged:
+            object.__setattr__(self.model, "_mlx2_prefill_rows_at", schedule.rows_at)
+            prefill_route.set_wide_rows(self.model, getattr(self, "_prefill_step", WIDE_ROWS))
+        return schedule
+
+    def _wide_schedule(self):
+        schedule = getattr(self, "prefill_schedule", None)
+        return schedule if schedule is not None and schedule.engaged else None
+
+    def prefill_schedule_identity(self, prefill_step):
+        """The width schedule's APCv2 namespace term (None: fixed step)."""
+        schedule = self._wide_schedule()
+        return None if schedule is None else schedule.identity(prefill_step)
 
     def cache_budget(self, *, mtp):
         """Per-lane cache bound (adapters/inkling2_memory.py) for lane admission
@@ -1020,18 +1098,29 @@ class Inkling2Adapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
         qualification/runs/inkling2-gpu-20261122/3c69f31b2-dsjunc). It also
         replaces the generic unmeasured lane envelope on both routes and turns
         on the route-default rolling prefill checkpoints."""
-        from .inkling2_memory import Inkling2CacheBudget
-
         if mtp:
             raise ValueError("Inkling 2 has no native MTP route")
         draft = None
         if getattr(self, "draft_model", None) is not None:
             draft = self.config["mtp_config"]
+        # The transient is the largest chunk the schedule runs at this depth
+        # (Inkling2CacheBudget.prefill_transient_bytes); never narrowed.
+        return self._lane_budget(
+            prefill_rows=getattr(self, "_prefill_step", self.prefill_step_default()), draft=draft)
+
+    def _lane_budget(self, *, prefill_rows, draft=None):
+        from .inkling2_memory import Inkling2CacheBudget
+
+        policy = getattr(self, "kernel_policy", {})
         return Inkling2CacheBudget.from_config(
             self.model.config, visits=self.model.model.layer_indices, draft=draft,
-            prefill_rows=getattr(self, "_prefill_step", self.prefill_step_default()),
+            prefill_rows=prefill_rows,
             num_draft=self._external_num_draft() if draft is not None else 0,
-            kv_q8=bool(getattr(self, "kernel_policy", {}).get("kv_q8")),
+            kv_q8=bool(policy.get("kv_q8")),
+            transient_pricing=bool(getattr(self, "prefill_transient_pricing", False)),
+            mask_budget_mb=policy.get("prefill_mask_mb"),
+            schedule=(None if self._wide_schedule() is None
+                      else (self.prefill_schedule.crossover, self.prefill_schedule.narrow)),
         )
 
     def execution_numerics_contract(self):
@@ -1067,6 +1156,8 @@ class Inkling2Adapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             names += ("inkling2/kv_q8.py", "inkling2/splitk.py")
         if any(policy.get(k) for k in ("prefill_mask_with_sink", "prefill_tiled_attention")):
             names += ("inkling2/prefill_attention.py",)
+        if policy.get("prefill_handover"):
+            names += ("inkling2/prefill_route.py",)
         if policy.get("attn_decode_kernel"):
             names += ("inkling2/attn_decode.py",)
         contract = {
@@ -1150,8 +1241,18 @@ class Inkling2Adapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             kwargs.setdefault("adaptive_verification", self.dspark_cost_depth)
         return super().create_external_batch(**kwargs)
 
-    @staticmethod
-    def prefill_step_default():
+    def prefill_step_default(self):
+        """512 rows; 2,048 (the schedule's widest chunk) when
+        inkling2_prefill_wide_chunk engaged at load."""
+        if self._wide_schedule() is not None:
+            from .inkling2_prefill_plan import WIDE_ROWS
+
+            return WIDE_ROWS
+        return 512
+
+    def prefill_step_reference(self):
+        """The step today's APCv2 keys are built at; any other step, and the
+        wide schedule, bind the namespace (serving.prefill_step_namespace_term)."""
         return 512
 
     # ----- prompts and output -----
@@ -1276,6 +1377,9 @@ class Inkling2Adapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             "kernel_policy": dict(getattr(self, "kernel_policy", {})),
             "moe_nax_gather_auto": bool(getattr(self, "moe_nax_gather_auto", False)),
             "kernel_counters": (self.model.kernel_receipt() if getattr(self, "model", None) else None),
+            "prefill_schedule": (self.prefill_schedule.receipt()
+                                 if getattr(self, "prefill_schedule", None) else {"selected": False}),
+            "prefill_transient_pricing": bool(getattr(self, "prefill_transient_pricing", False)),
             "loop": (self.model.loop_receipt() if getattr(self, "model", None) else None),
             "hard_no_thinking": bool(getattr(self, "hard_no_thinking", False)),
             "experts": getattr(self, "expert_receipt", None),

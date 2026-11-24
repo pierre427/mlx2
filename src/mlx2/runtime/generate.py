@@ -8146,13 +8146,30 @@ class BatchGenerator:
     # Smallest chunk the depth bound shrinks to (omlx#4149 uses 128 too).
     PREFILL_DEPTH_FLOOR = 128
 
+    def _model_rows_at(self, step: int, depth: int) -> int:
+        """An adapter-declared width schedule (``_mlx2_prefill_rows_at``).
+
+        A deterministic function of the absolute depth a chunk starts at and
+        the load-time route, never of load, so a restored prefix resumes on
+        the boundaries a cold read of the same prompt uses. Identity when the
+        model declares none."""
+        hook = _declared_model_callback(getattr(self, "model", None), "_mlx2_prefill_rows_at")
+        if hook is None:
+            return step
+        rows = hook(step=int(step), depth=int(depth))
+        if type(rows) is not int or not 1 <= rows <= int(step):
+            raise ValueError("adapter prefill rows must fit the step")
+        return rows
+
     def _depth_bounded_step(self, step: int, depth: int) -> int:
         """``step`` shrunk for a lane already ``depth`` tokens deep.
 
-        Identity unless a ``prefill_depth_budget`` is set and this chunk would
+        First the model's declared width schedule (``_model_rows_at``), then
+        identity unless a ``prefill_depth_budget`` is set and this chunk would
         exceed it; ``prefill_depth_bounded_chunks`` counts the chunks it
         shrank, so an enabled bound that never engaged is visible.
         """
+        step = self._model_rows_at(step, depth)
         budget = getattr(self, "prefill_depth_budget", None)
         if budget is None:
             return step
@@ -8213,6 +8230,14 @@ class BatchGenerator:
     def _planned_prefill_rows(self, step: int, covered: int, available: int,
                               next_checkpoint=None) -> int:
         """Rows the idle plan runs from ``covered``: step, depth, segment, cut."""
+        # The model's declared width schedule, as ``_model_rows_at`` applies it
+        # on execution (inlined: this method is also run standalone).
+        hook = _declared_model_callback(getattr(self, "model", None), "_mlx2_prefill_rows_at")
+        if hook is not None:
+            rows = hook(step=int(step), depth=int(covered))
+            if type(rows) is not int or not 1 <= rows <= int(step):
+                raise ValueError("adapter prefill rows must fit the step")
+            step = rows
         budget = getattr(self, "prefill_depth_budget", None)
         if budget is not None:
             step = depth_bounded_prefill_rows(
@@ -8268,6 +8293,9 @@ class BatchGenerator:
             return False
         if getattr(self, "prefill_plan_exact", False):
             # An overflow lane would share the forward with the long prompt.
+            return False
+        if _declared_model_callback(getattr(self, "model", None), "_mlx2_prefill_rows_at"):
+            # The one-chunk test below does not model a declared width schedule.
             return False
         if len(self._prompt_batch) != self.prefill_batch_size:
             return False

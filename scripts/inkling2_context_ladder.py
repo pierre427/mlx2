@@ -105,7 +105,12 @@ KNOB_NAMES = {"inkling2_hard_no_thinking": "hard_no_thinking", "inkling2_sink_sd
               "inkling2_prefill_mask_mb": "prefill_mask_mb", "inkling2_sink_slot": "sink_slot",
               "inkling2_fuse_controllers": "fuse_controllers", "inkling2_fuse_residual": "fuse_residual",
               "inkling2_fuse_sconv": "fuse_sconv", "inkling2_fuse_attention": "fuse_attention",
-              "inkling2_verify_splitk": "verify_splitk"}
+              "inkling2_verify_splitk": "verify_splitk",
+              "inkling2_prefill_handover": "prefill_handover"}
+# MTPLX ingest, prefill items (2026-11-23): each arm is the adapter defaults
+# plus its options, compared with default_b1 (the option-off arm), so the
+# tok/s, TTFT and first-divergence windows isolate the option.
+MTPLX_PREFILL = {"inkling2_prefill_handover": True, "inkling2_prefill_wide_chunk": True}
 # Everything exact or near-tie classified so far, composed (2026-11-22, main
 # 82c964317): MoE fast paths (default) + sink SDPA (one-token decode) + sink
 # slot (multi-row calls) + the four exact launch-count fusions.
@@ -175,11 +180,20 @@ PHASES = (
      "policy": {**DSPARK_POLICY, "num_draft": 24, "prompt_copy_round": {"max_tokens": 24},
                 "device_round": {"lazy_draft": True, "decide": True}},
      "cells": "full"},
+    {"name": "handover_b1", "route": "ordinary", "width": 1, "reference": "default_b1",
+     "policy": {"inkling2_prefill_handover": True}, "cells": "full",
+     "counter": "prefill_handover_calls", "from_defaults": True},
+    {"name": "wide_chunk_b1", "route": "ordinary", "width": 1, "reference": "default_b1",
+     "policy": {"inkling2_prefill_wide_chunk": True}, "cells": "full",
+     "counter": "prefill_wide_chunks", "from_defaults": True},
+    {"name": "mtplx_prefill_b1", "route": "ordinary", "width": 1, "reference": "default_b1",
+     "policy": dict(MTPLX_PREFILL), "cells": "full", "counter": "prefill_wide_chunks",
+     "from_defaults": True},
 )
 # Every arm except default_b1 starts from the reference path: the adapter
 # defaults changed on 2026-11-22, and the historical arms mean "reference plus
 # these knobs".
-PHASES = tuple(p if p["name"] == "default_b1" or p.get("refusal")
+PHASES = tuple(p if p["name"] == "default_b1" or p.get("refusal") or p.get("from_defaults")
                else {**p, "policy": {**REFERENCE_POLICY, **p["policy"]}} for p in PHASES)
 QUESTION = ("\n\nQuestion: What is the access code for the north archive vault? Give the code "
             "on the first line, then summarize the reference material above in about 120 words.")

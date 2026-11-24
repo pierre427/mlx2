@@ -13,6 +13,10 @@ while a prefill chunk is in flight). The short-conv cache holds the last
 FP32. On the DSpark route the drafter adds its own three-layer KV (one global
 layer, the rest sliding) and the last target feature.
 
+``prefill_transient_bytes`` (``inkling2_prefill_transient_pricing``, default
+off; 2026-11-23, MTPLX ingest candidate 11) prices one prefill chunk's working
+memory beyond the lane cache from the shapes: see ``transient_terms``.
+
 Checked against the real checkpoint's APCv2 copy-on-write receipts
 (qualification/runs/inkling2-gpu-20261122/16eed37f5-dsgsm8k, ~650-token
 GSM8K prompts): ring 122 MB, global KV 29 MB, short conv 3.8 MB and draft
@@ -55,6 +59,27 @@ class Inkling2CacheBudget:
     verify_rows: int = 0
     allocation_step: int = 256
     transcript_bytes_per_token: int = 16
+    # Prefill transient pricing (inkling2_prefill_transient_pricing; 0 = off,
+    # the chunk is charged nothing as before). Shapes it is derived from:
+    transient_pricing: int = 0
+    heads: int = 0
+    d_rel: int = 0
+    rel_extent: int = 0
+    intermediate_size: int = 0
+    routed_experts: int = 0
+    experts_per_token: int = 0
+    residual_block: int = 0
+    # The composed attention's mask slice budget (inkling2_prefill_mask_mb;
+    # language._MASK_BUDGET_BYTES), counted at 4 bytes per element.
+    mask_budget_bytes: int = 64 << 20
+    # 0 for a prompt attention that builds no mask, bias or index planes
+    # (none ships yet; the composed path builds them).
+    mask_planes: int = 1
+    # inkling2_prefill_wide_chunk: chunks wider than ``schedule_narrow_rows``
+    # run only below ``schedule_crossover`` keys and never cross it; past it a
+    # chunk is ``schedule_narrow_rows`` wide (0: a fixed step).
+    schedule_crossover: int = 0
+    schedule_narrow_rows: int = 0
 
     @staticmethod
     def _count(value):
@@ -64,7 +89,8 @@ class Inkling2CacheBudget:
 
     @classmethod
     def from_config(cls, text, *, visits=None, prefill_rows=2048, draft=None, num_draft=0,
-                    kv_q8=False):
+                    kv_q8=False, transient_pricing=False, mask_budget_mb=None,
+                    mask_planes=True, schedule=None):
         """``text``: the Inkling 2 ``TextConfig``; ``draft``: the DSpark
         drafter's ``mtp_config`` dict when the DSpark route is selected."""
         visits = text.layer_indices if visits is None else visits
@@ -78,7 +104,20 @@ class Inkling2CacheBudget:
             hidden_size=int(text.hidden_size),
             sliding_window=int(text.sliding_window_size),
             conv_kernel=int(text.sconv_kernel_size),
+            transient_pricing=int(bool(transient_pricing)),
+            heads=int(text.num_attention_heads),
+            d_rel=int(text.d_rel),
+            rel_extent=int(text.rel_extent),
+            intermediate_size=int(text.intermediate_size),
+            routed_experts=int(text.n_routed_experts),
+            experts_per_token=int(text.num_experts_per_tok),
+            residual_block=int(text.n_layers_per_attn_res_block),
+            mask_planes=int(bool(mask_planes)),
         )
+        if mask_budget_mb is not None:
+            fields["mask_budget_bytes"] = int(mask_budget_mb) << 20
+        if schedule is not None:
+            fields["schedule_crossover"], fields["schedule_narrow_rows"] = map(int, schedule)
         if kv_q8:
             from ..runtime.models.inkling2 import kv_q8 as _kv_q8
 
@@ -155,6 +194,87 @@ class Inkling2CacheBudget:
                 + self.draft_feature_width * 4
             )
         return int(total)
+
+    def transient_terms(self, context_tokens, chunk_rows):
+        """One prefill chunk's working memory beyond the lane cache, by term
+        (bytes), for ``chunk_rows`` rows ending at ``context_tokens`` keys.
+
+        A shape bound for the route as it runs (B = 1 lane; intermediates
+        counted at FP32 where the code may widen them):
+
+        * ``residual``: the attention-residual block states a forward keeps
+          (one per ``residual_block`` visits, plus the partial, the prelude
+          copies and the loop's message bank), [rows, hidden] each.
+        * ``attention``: one visit's projections (q, gate, k, v, r, sink) with
+          their FP32 clip copies, and the output with the FP32 gate product.
+        * ``mask``: the dense relative-bias mask slices (the gathered bias, the
+          select, the sink concatenation and the per-slice bias table), each
+          slice bounded by the mask budget, plus the forward-memoized index
+          planes (int32 gather index, two bool bands: 6 bytes per row per
+          key) of the global and the sliding visits. Zero for a mask-free
+          attention (``mask_planes`` 0; none ships yet).
+        * ``moe``: one visit's routed experts (router logits, the sorted
+          inputs, gate/up, the activation, the down product, the combine).
+        * ``growth``: a global visit's K/V buffer while the cache grows it
+          (old and new alive during the copy).
+
+        The vocabulary head is not evaluated during chunked prefill (the
+        engine evaluates the cache state only), so it is not charged."""
+        n, rows = self._count(context_tokens), self._count(chunk_rows)
+        keys = max(n, 1)
+        hidden, heads, dim = self.hidden_size, self.heads, self.head_dim
+        visits = self.global_visits + self.sliding_visits
+        states = visits // max(1, self.residual_block) + 4
+        residual = states * rows * hidden * 4
+        project_cols = 2 * heads * dim + 2 * self.kv_heads * dim + heads * self.d_rel + heads
+        attention = rows * (project_cols * (2 + 4) + heads * dim * (2 + 4 + 4))
+        mask = 0
+        if self.mask_planes:
+            budget_elems = max(1, self.mask_budget_bytes // 4)
+            local_keys = min(keys, self.sliding_window + rows - 1) + 1
+            visible = ([keys + 1] * bool(self.global_visits)
+                       + [local_keys] * bool(self.sliding_visits))
+            widest = max(visible) if visible else 0
+            slice_rows = min(rows, max(1, budget_elems // max(1, heads * widest)))
+            slice_elems = heads * slice_rows * widest
+            table = heads * slice_rows * max(1, self.rel_extent) * 2
+            mask = 4 * slice_elems * 2 + table + sum(6 * rows * width for width in visible)
+        top = self.experts_per_token
+        moe = rows * (
+            self.routed_experts * 4 * 2
+            + top * hidden * 2
+            + top * 2 * self.intermediate_size * 4
+            + top * self.intermediate_size * 4
+            + top * hidden * 4
+            + hidden * 4
+        )
+        growth = 0
+        if self.global_visits:
+            row = self.global_row_bytes or self.head_dim * self.item_bytes
+            growth = 2 * 2 * self._capacity(n) * self.kv_heads * row
+        return {"residual": residual, "attention": attention, "mask": mask, "moe": moe,
+                "growth": growth}
+
+    def prefill_transient_bytes(self, context_tokens, chunk_rows):
+        """The chunk transient admission charges (0 unless pricing is on).
+
+        Under a width schedule, the largest chunk the prompt can actually run:
+        the max over the schedule's cases, a ``chunk_rows`` chunk ending at
+        most at the crossover and a narrow chunk at the full depth."""
+        n, rows = self._count(context_tokens), self._count(chunk_rows)
+        if not self.transient_pricing:
+            return 0
+
+        def cost(keys, width):
+            return int(sum(self.transient_terms(keys, width).values()))
+
+        narrow = self.schedule_narrow_rows
+        if not self.schedule_crossover or rows <= narrow:
+            return cost(n, rows)
+        charge = cost(min(n, self.schedule_crossover), rows)
+        if n > self.schedule_crossover:
+            charge = max(charge, cost(n, narrow))
+        return charge
 
     def as_dict(self):
         return dict(

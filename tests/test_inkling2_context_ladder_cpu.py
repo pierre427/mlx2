@@ -130,7 +130,9 @@ STUB = textwrap.dedent('''\
              "inkling2_prefill_mask_mb": "prefill_mask_mb", "inkling2_sink_slot": "sink_slot",
              "inkling2_fuse_controllers": "fuse_controllers", "inkling2_fuse_residual": "fuse_residual",
              "inkling2_fuse_sconv": "fuse_sconv", "inkling2_fuse_attention": "fuse_attention",
-             "inkling2_verify_splitk": "verify_splitk"}}
+             "inkling2_verify_splitk": "verify_splitk",
+             "inkling2_prefill_handover": "prefill_handover"}}
+    wide = bool(policy.get("inkling2_prefill_wide_chunk"))
     effective = {{**defaults, **policy}}
     kernel_policy = {{names[k]: effective.get(k, False if k != "inkling2_prefill_mask_mb" else None)
                      for k in names}}
@@ -154,7 +156,9 @@ STUB = textwrap.dedent('''\
                                               "kernel_counters": {{
                                                   "sink_sdpa_calls": calls[0] if sink and not kernel_policy["verify_splitk"] else 0,
                                                   "sink_slot_calls": calls[0] if kernel_policy["sink_slot"] and not kernel_policy["verify_splitk"] else 0,
-                                                  "verify_splitk_calls": calls[0] if kernel_policy["verify_splitk"] else 0}},
+                                                  "verify_splitk_calls": calls[0] if kernel_policy["verify_splitk"] else 0,
+                                                  "prefill_handover_calls": calls[0] if kernel_policy["prefill_handover"] else 0,
+                                                  "prefill_wide_chunks": calls[0] if wide else 0}},
                                               "dspark": {{"prefill_reclaim": spec}}}},
                                "metal_peak_bytes": 2**31, "process_physical_footprint_bytes": 2**32}})
 

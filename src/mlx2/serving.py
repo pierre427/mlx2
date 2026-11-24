@@ -1773,6 +1773,13 @@ def prefill_step_namespace_term(adapter, prefill_step, *, autoscale):
     ``prefill_step_default()``.  Any other executed step is bound, so states
     persisted at one step are never replayed at another.
     """
+    schedule = getattr(adapter, "prefill_schedule_identity", None)
+    identity = schedule(int(prefill_step)) if callable(schedule) else None
+    if identity is not None:
+        # An adapter width schedule (chunk widths by depth) is part of the
+        # numerics: never shared with a fixed step of the same maximum.
+        return {"schema": "mlx2.prefill-step.v1", "prefill_step": int(prefill_step),
+                "schedule": identity}
     if autoscale:
         return None
     step = int(prefill_step)

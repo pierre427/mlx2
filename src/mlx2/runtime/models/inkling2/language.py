@@ -474,6 +474,12 @@ def _attn_decode():
     return attn_decode
 
 
+def _prefill_route():
+    from . import prefill_route
+
+    return prefill_route
+
+
 def _banded_mask_reference(_attn, *args, **kwargs):
     return banded_additive_mask(*args, **kwargs)
 
@@ -1695,6 +1701,7 @@ class TextModel(nn.Module):
         prelude = prelude_blocks = None
         kernel_messages = _fuse.on(self, "fuse_residual_kernel") and mx.default_device() == mx.gpu
         loop = self.loop
+        handover = _prefill_route().handover_every(self, x)  # inkling2_prefill_handover
         for visit, index in enumerate(self.layer_indices):
             if loop is not None and index == loop.core_start:
                 if visit == index:
@@ -1730,6 +1737,8 @@ class TextModel(nn.Module):
             if capture is not None and visit in capture:
                 capture[visit] = x
             x = self.layers[index](x, blocks, caches[visit], messages)
+            if handover and (visit + 1) % handover == 0 and visit + 1 < visits:
+                _prefill_route().hand_over(self, x)
         return self.final_input(blocks, x)[..., 0, :]
 
 
@@ -1851,7 +1860,7 @@ class Model(nn.Module):
                           head_kernel_wide=False, prefill_tiled_attention=False,
                           attn_decode_kernel=False, verify_deferred_commit=False,
                           visit_length_check=False, moe_panel_kernel=False,
-                          moe_nax_mxfp8=False):
+                          moe_nax_mxfp8=False, prefill_handover=False):
         """Adapter-owned opt-in execution switches (all default off).
 
         ``loop_passes`` None keeps the trained count.  ``moe_weighted_sum``
@@ -2006,6 +2015,7 @@ class Model(nn.Module):
              "verify_deferred_commit": bool(verify_deferred_commit),
              "visit_length_check": bool(visit_length_check)},
         )
+        _prefill_route().configure(self, prefill_handover=prefill_handover)
         if head_kernel:
             # The FP32 head copy is only needed by the reference path.
             self._head_fp32 = None
@@ -2085,6 +2095,7 @@ class Model(nn.Module):
             for key, value in module.__dict__.get("fuse_counts", {}).items():
                 fuse[key] = fuse.get(key, 0) + value
         out["fuse_counts"] = dict(sorted(fuse.items()))
+        out.update(_prefill_route().receipt(self))
         decode = {}
         for layer in self.model.layers:
             for key, value in layer.self_attn.__dict__.get("attn_decode_counts", {}).items():
