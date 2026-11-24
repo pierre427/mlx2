@@ -122,7 +122,11 @@ if HEAD_MODE not in ("fp32", "bf16"):
 STATS = {"dense_calls": 0, "sparse_gather_calls": 0, "sparse_masked_calls": 0,
          "sparse_union_calls": 0, "union_blocks": 0, "union_subchunks": 0,
          "sparse_rows": 0, "mtp_steps": 0, "kernel_calls": 0, "kernel_fallbacks": 0,
-         "last_kernel_fallback": None, "head_kernel_calls": 0, "index_kernel_calls": 0}
+         "last_kernel_fallback": None, "head_kernel_calls": 0, "index_kernel_calls": 0,
+         # MLX2_MAXWELL_FUSED_QKV: calls of the fused q/k/v/indexer-key table, and
+         # of those the 2..FUSED_QKV_EXACT_ROWS-row calls by row-exact path
+         # (matvec strip under its canary, or one call per row).
+         "fused_qkv_calls": 0, "fused_qkv_row_exact_strip": 0, "fused_qkv_row_exact_per_row": 0}
 _KERNEL_OK: set = set()
 _KERNEL_DISABLED: set = set()
 
@@ -159,6 +163,14 @@ def maxwell_stats(reset: bool = False) -> dict:
                               "canonical_pick": CANONICAL_PICK, "row_exact_verify": ROW_EXACT_VERIFY,
                               "gather_rows": SPARSE_GATHER_ROWS,
                               "sparse_prefill": SPARSE_PREFILL})
+    from . import gemv_rows_exact
+
+    try:
+        out["levers"]["gemv_rows_kernel"] = gemv_rows_exact.kernel_mode()
+    except ValueError:  # an invalid setting fails at its first use, not in a stats read
+        out["levers"]["gemv_rows_kernel"] = "invalid"
+    out["gemv_rows_kernel_calls"] = gemv_rows_exact.STATS["kernel_calls"]
+    out["gemv_rows_stock_fallbacks"] = gemv_rows_exact.STATS["stock_fallbacks"]
     if ROW_EXACT_VERIFY != "off":
         from . import maxwell_row_exact
 
@@ -435,13 +447,23 @@ class Attention(nn.Module):
                 # the fused table flipped a greedy token against MTP off, and
                 # with separate q/k/v (or MTP off) it did not
                 # (qualification/runs/maxwell-attr-16k-night-20261123).
+                from .. import row_exact_verify as REV
                 from ..row_exact import ops as row_exact_ops
 
                 strip = x.reshape(1, rows, x.shape[-1])
-                y = row_exact_ops.dense_linear(self.qkv_proj, strip, stage="maxwell_fused_qkv")
+                outer, record = REV.current(), REV.Window(rows)
+                with REV.window(record):
+                    y = row_exact_ops.dense_linear(self.qkv_proj, strip, stage="maxwell_fused_qkv")
+                routes = record.stages.get("maxwell_fused_qkv", {})
+                if outer is not None:
+                    for route, count in routes.items():
+                        outer.note("maxwell_fused_qkv", route, count)
+                STATS["fused_qkv_row_exact_strip" if "matvec_rows" in routes
+                      else "fused_qkv_row_exact_per_row"] += 1
                 y = y.reshape(*x.shape[:-1], y.shape[-1])
             else:
                 y = self.qkv_proj(x)
+            STATS["fused_qkv_calls"] += 1
             cuts, acc = [], 0
             for size in self._split[:-1]:
                 acc += size

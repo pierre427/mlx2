@@ -31,6 +31,9 @@ MAX_ROWS = 16
 _LOCK = threading.Lock()
 _KERNEL = None
 _VERDICTS: dict = {}
+# Process-wide: strips served by the kernel, and strips handed back to the
+# stock per-row form (a failed first-use check or an earlier mismatch).
+STATS = {"kernel_calls": 0, "stock_fallbacks": 0}
 
 _SOURCE = r"""
   constexpr int TN = 4;
@@ -213,6 +216,7 @@ def checked_gemv_rows(weight, x, stock):
     key = (tuple(weight.shape), str(weight.dtype), int(x.shape[1]))
     verdict = _VERDICTS.get(key)
     if verdict is False:
+        STATS["stock_fallbacks"] += 1
         return None
     y = gemv_rows(weight, x)
     if verdict is None:
@@ -222,16 +226,19 @@ def checked_gemv_rows(weight, x, stock):
         mx.eval(same)
         _VERDICTS[key] = bool(same)
         if not _VERDICTS[key]:
+            STATS["stock_fallbacks"] += 1
             return None
+    STATS["kernel_calls"] += 1
     return y
 
 
 def status() -> dict:
     return {
         "mode": kernel_mode(),
+        **STATS,
         "verdicts": {f"{k[0]}:{k[1]}:R{k[2]}": v for k, v in _VERDICTS.items()},
     }
 
 
-__all__ = ["MAX_ROWS", "checked_gemv_rows", "decline_reason", "gemv_rows", "kernel_mode",
+__all__ = ["MAX_ROWS", "STATS", "checked_gemv_rows", "decline_reason", "gemv_rows", "kernel_mode",
            "status", "tile"]

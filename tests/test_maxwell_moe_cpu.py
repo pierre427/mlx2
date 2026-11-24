@@ -704,6 +704,45 @@ def test_fused_qkv_verify_width_rows_keep_one_row_arithmetic(shape):
             assert mx.allclose(flat, ref, atol=1e-5).item(), i
 
 
+@pytest.mark.parametrize("fused", [False, True])
+def test_fused_qkv_counters_engage_only_when_fused(fused):
+    from mlx2.prometheus import PrometheusBuilder, _add_execution
+    from mlx2.runtime.models import maxwell_moe as M
+    mx.random.seed(12)
+    model = Model(ModelArgs.from_dict(TINY))
+    if fused:
+        model.fuse_projections()
+    M.maxwell_stats(reset=True)
+    model(mx.array([[1, 2, 3, 4, 5, 6]]))              # prefill-width call
+    model(mx.array([[7, 8, 9]]))                       # verify-width call
+    layers = len(model.layers)
+    stats = M.maxwell_stats(reset=True)
+    if fused:
+        assert stats["fused_qkv_calls"] == 2 * layers
+        assert stats["fused_qkv_row_exact_strip"] + stats["fused_qkv_row_exact_per_row"] == 2 * layers
+    else:
+        assert stats["fused_qkv_calls"] == stats["fused_qkv_row_exact_strip"] == 0
+        assert stats["fused_qkv_row_exact_per_row"] == 0
+    builder = PrometheusBuilder()
+    _add_execution(builder, {"maxwell_attention": stats})
+    text = builder.render()
+    assert f"mlx2_maxwell_fused_qkv_calls_total {stats['fused_qkv_calls']}" in text
+    assert (f'mlx2_maxwell_fused_qkv_row_exact_calls_total{{path="strip"}} '
+            f"{stats['fused_qkv_row_exact_strip']}") in text
+    # The one-weight-read kernel is GPU-only: on CPU it never engages.
+    assert stats["gemv_rows_kernel_calls"] == 0
+    assert 'mlx2_maxwell_gemv_rows_calls_total{path="kernel"} 0' in text
+    assert 'mlx2_maxwell_lever_info{lever="gemv_rows_kernel",value="loop"} 1' in text
+
+
+def test_gemv_rows_kernel_lever_reported(monkeypatch):
+    from mlx2.runtime.models import maxwell_moe as M
+    monkeypatch.setenv("MLX2_GEMV_ROWS_KERNEL", "fused")
+    assert M.maxwell_stats()["levers"]["gemv_rows_kernel"] == "fused"
+    monkeypatch.setenv("MLX2_GEMV_ROWS_KERNEL", "bogus")
+    assert M.maxwell_stats()["levers"]["gemv_rows_kernel"] == "invalid"
+
+
 def test_quantization_override_inherits_defaults_and_validates_group_size():
     from mlx2.adapters.maxwell_moe import _quantization
     q = {"bits": 4, "group_size": 64, "lm_head": {"group_size": 32}}

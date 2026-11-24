@@ -1690,7 +1690,7 @@ _MAXWELL_ROUTES = (("dense", "dense_calls"), ("gather", "sparse_gather_calls"),
 _MAXWELL_LEVERS = {"compile": {"True", "False"}, "mhc_kernel": {"True", "False"},
                    "index_kernel": {"True", "False"},
                    "head": {"fp32", "bf16"}, "fused_qkv": {"True", "False"},
-                   "sparse_prefill": {"union", "masked"}}
+                   "sparse_prefill": {"union", "masked"}, "gemv_rows_kernel": {"loop", "fused"}}
 
 
 def _add_maxwell(builder: PrometheusBuilder, execution: Mapping[str, Any]) -> None:
@@ -1725,6 +1725,19 @@ def _add_maxwell(builder: PrometheusBuilder, execution: Mapping[str, Any]) -> No
     builder.counter("mlx2_maxwell_head_kernel_calls_total",
                     "Vocabulary-head calls served by the bf16-weight fp32-math GEMV kernel.",
                     count("head_kernel_calls"))
+    builder.counter("mlx2_maxwell_fused_qkv_calls_total",
+                    "Attention input projections served by the opt-in fused q/k/v/indexer-key table.",
+                    count("fused_qkv_calls"))
+    for path, key in (("strip", "fused_qkv_row_exact_strip"), ("per_row", "fused_qkv_row_exact_per_row")):
+        builder.counter("mlx2_maxwell_fused_qkv_row_exact_calls_total",
+                        "Verify-width fused-table calls given the one-row law, by path (canary-gated "
+                        "matvec strip, or one call per row).",
+                        count(key), {"path": path})
+    for path, key in (("kernel", "gemv_rows_kernel_calls"), ("stock", "gemv_rows_stock_fallbacks")):
+        builder.counter("mlx2_maxwell_gemv_rows_calls_total",
+                        "Row-exact dense strips by path: the opt-in one-weight-read gemv_rows kernel "
+                        "(MLX2_GEMV_ROWS_KERNEL=fused) or the stock per-row fallback after a failed check.",
+                        count(key), {"path": path})
     levers = stats.get("levers")
     if isinstance(levers, Mapping):
         for lever, allowed in _MAXWELL_LEVERS.items():

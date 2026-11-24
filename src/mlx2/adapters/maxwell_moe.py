@@ -492,7 +492,9 @@ class MaxwellMoeAdapter:
             "native_mtp": {"implemented": has_mtp, "artifact_bound": has_mtp, "num_draft": self._num_draft,
                            "trained_depth": 1, "deeper_depths": "chained extrapolation, verified exact",
                            "default_preferred": False, "row_exact_verify": M.ROW_EXACT_VERIFY,
-                           "row_exact_scope": "b1-lanes" if M.ROW_EXACT_VERIFY != "off" else None, **unq},
+                           "row_exact_scope": "b1-lanes" if M.ROW_EXACT_VERIFY != "off" else None,
+                           "fused_qkv_verify": (f"one_row_law_up_to_{M.FUSED_QKV_EXACT_ROWS}_rows"
+                                                if M.FUSED_QKV else None), **unq},
             "tools": {"implemented": True, "format": "qwen3-coder-xml", **unq},
             "external_draft": {"implemented": False, "reason": "no revision-bound draft artifact"},
         }
