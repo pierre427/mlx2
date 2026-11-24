@@ -738,6 +738,33 @@ def _verify_trace(row, lane, inputs, logits, *, parents=None, kind="chain"):
         "shape": list(logits.shape)}) + "\n")
 
 
+# Controller mode (opt-in, unqualified; 2026-11-23 Hy4 DFly2 cold-replay drift). "measured" (default) keeps the
+# wall-clock tile budget and cost-per-commit handoff. "deterministic" (MLX2_AST_CONTROLLER_MODE=deterministic, with
+# MLX2_AST_CONTROLLER_COST='{"a_ms": A, "b_ms": B, "ordinary_ms": O}') prices every round from that fixed table
+# (speculative round A + B x verify rows, ordinary step O) instead of measured time, resets the tile budget's learned
+# state when a request is admitted to an idle engine, and seeds no cross-request cost prior: decisions depend only
+# on the request's own tokens and acceptance, so the same prefix gives the same verify widths at width one.
+CONTROLLER_MODES = ("measured", "deterministic")
+
+
+def controller_settings():
+    mode = os.environ.get("MLX2_AST_CONTROLLER_MODE", "measured") or "measured"
+    if mode not in CONTROLLER_MODES:
+        raise ValueError(f"MLX2_AST_CONTROLLER_MODE must be one of {CONTROLLER_MODES}")
+    if mode == "measured":
+        return mode, None
+    raw = os.environ.get("MLX2_AST_CONTROLLER_COST")
+    if not raw:
+        raise ValueError("MLX2_AST_CONTROLLER_MODE=deterministic needs MLX2_AST_CONTROLLER_COST "
+                         '(\'{"a_ms": ..., "b_ms": ..., "ordinary_ms": ...}\')')
+    cost = json.loads(raw)
+    if set(cost) != {"a_ms", "b_ms", "ordinary_ms"} or not all(
+            isinstance(v, (int, float)) and v >= 0 for v in cost.values()) or not cost["a_ms"] > 0 \
+            or not cost["ordinary_ms"] > 0:
+        raise ValueError("MLX2_AST_CONTROLLER_COST needs a_ms > 0, b_ms >= 0 and ordinary_ms > 0")
+    return mode, {k: float(v) for k, v in cost.items()}
+
+
 _PROFILE_PATH = os.environ.get("MLX2_EXTERNAL_ROUND_PROFILE") or None
 _PROFILE = None
 _PROFILE_POLLS = 0
@@ -1629,6 +1656,8 @@ class ExternalDraftBatchGenerator:
         self.tree_node_budget_by_lanes = tree_node_budget_by_lanes
         # Measured tile size within the knob maximum (default on for the
         # tree route; ``ast_adaptive_rows: false`` keeps the knob budget).
+        self.controller_mode, self.controller_cost = controller_settings()
+        self._det_round_rows = None
         self.tile_budget = None
         if dynamic_singleton_tree and self._ast_adaptive_rows is not False:
             from .ast_tile_budget import COST_MODES, TileBudgetController
@@ -1637,16 +1666,18 @@ class ExternalDraftBatchGenerator:
             # scope); "ewma" keeps the measured default.  Unknown values fail
             # closed rather than serving a silently different chooser.
             cost_mode = os.environ.get("MLX2_AST_TILE_BUDGET_COST", "ewma") or "ewma"
-            if cost_mode not in COST_MODES:
+            if cost_mode not in COST_MODES or cost_mode == "model":   # "model" comes with the deterministic mode
                 raise ValueError(
                     f"MLX2_AST_TILE_BUDGET_COST must be one of {COST_MODES}"
                 )
             trace_path = os.environ.get("MLX2_AST_TILE_BUDGET_TRACE")
             trace = _tile_budget_trace_sink(trace_path) if trace_path else None
+            det_cost = self.controller_cost if self.controller_mode == "deterministic" else None
             self.tile_budget = TileBudgetController(
                 counterfactual=getattr(draft_model, "tree_budget_prefix_invariant", True),
-                cost_mode=cost_mode,
+                cost_mode="model" if det_cost is not None else cost_mode,
                 trace=trace,
+                cost_model=None if det_cost is None else (det_cost["a_ms"] / 1e3, det_cost["b_ms"] / 1e3),
             )
             # Robust mode: the last cost-eligible tree round, completed at the
             # next tree round start (see ``_close_tile_period``).
@@ -2970,6 +3001,11 @@ class ExternalDraftBatchGenerator:
                 for pending in pending_lanes:
                     pending.ast_memo_layout_revision = None
                 break
+        if getattr(self, "controller_mode", "measured") == "deterministic":
+            self.scheduler_stats["external_ast_controller_mode"] = "deterministic"
+            self.scheduler_stats["external_ast_controller_cost"] = dict(self.controller_cost)
+            if not self.lanes:
+                self._det_reset_learned_state()     # the request starts from the same controller state
         self.lanes.update((lane.uid, lane) for lane in pending_lanes)
         self.next_uid += len(pending_lanes)
         self.scheduler_stats["paired_cache_resumes"] += resumed
@@ -4155,6 +4191,10 @@ class ExternalDraftBatchGenerator:
             if lane.cost_handoff_receipt is None
             else snapshot_receipt(lane.cost_handoff_receipt)
         )
+        if getattr(self, "controller_mode", "measured") == "deterministic" and isinstance(receipt, dict):
+            # Per-response label (AGENTS.md: report the route state truthfully; experimental and unqualified).
+            receipt["controller_mode"] = {"mode": "deterministic", "qualified": False,
+                                          "cost_table": dict(self.controller_cost)}
         authority = getattr(
             self, "cost_per_commit_handoff_authority", "explicit_policy"
         )
@@ -6744,7 +6784,7 @@ class ExternalDraftBatchGenerator:
                     pass
                 else:
                     self.mx.eval(logits, features)
-                if planning_started is not None:
+                if planning_started is not None and not self._det_mode():
                     ast_planner.observe_launch(
                         launch_plan, time.perf_counter() - planning_started
                     )
@@ -8188,6 +8228,7 @@ class ExternalDraftBatchGenerator:
     def _verify(self, cohort, blocks, logits):
         """Accept phase over the target logits of one verify forward."""
         vocab = int(logits.shape[-1])
+        self._det_round_rows = int(logits.shape[1]) if logits.ndim >= 3 else self._det_round_rows
         if _VERIFY_TRACE_PATH is not None:
             _VERIFY_TRACE_STATE["forward"] += 1
         decisions = []
@@ -12202,6 +12243,41 @@ class ExternalDraftBatchGenerator:
             )
             lane.tail = lane.tail[:, :0]
 
+    def _det_mode(self):
+        return getattr(self, "controller_mode", "measured") == "deterministic"
+
+    def _det_seconds(self, rows, *, launches=1, ordinary=False):
+        """Deterministic mode: the cost table's seconds for a round (never a measured time)."""
+        cost = self.controller_cost
+        if ordinary:
+            return cost["ordinary_ms"] * max(1, int(launches)) / 1e3
+        return (cost["a_ms"] * max(1, int(launches)) + cost["b_ms"] * max(1, int(rows))) / 1e3
+
+    def _det_reset_learned_state(self):
+        """Deterministic mode, a request admitted to an idle engine: every cross-request learned controller state
+        returns to its initial value, so the request decides only from its own tokens and acceptance."""
+        if getattr(self, "tile_budget", None) is not None:
+            self.tile_budget.reset()
+        if getattr(self, "tree_calibration", None) is not None:
+            from .ast_tree_calibration import DepthCalibration
+
+            self.tree_calibration = DepthCalibration(self._ast_tree_calibration_mode)
+        if getattr(self, "acceptance_estimator", None) is not None:
+            from .acceptance_estimator import OnlineAcceptanceEstimator
+
+            self.acceptance_estimator = OnlineAcceptanceEstimator(
+                self.num_draft, refit_interval=self.adaptive_policy.refit_interval,
+                separation_reset=self.adaptive_policy.separation_reset,
+                reject_cooldown=self.adaptive_policy.reject_cooldown,
+            )
+        for name in ("_adaptive_tree_decisions", "_width_park_priors"):
+            if isinstance(getattr(self, name, None), dict):
+                getattr(self, name).clear()
+        if hasattr(self, "_ast_cost_prior"):
+            self._ast_cost_prior = None
+        self._det_round_rows = None
+        _bump(self.scheduler_stats, "external_ast_controller_resets")
+
     def _observe_cost_handoff_round(
         self,
         cohort,
@@ -12222,6 +12298,13 @@ class ExternalDraftBatchGenerator:
             max(time.perf_counter_ns() - started_ns, 1)
             if _elapsed_ns is None else _elapsed_ns
         )
+        if self._det_mode() and _elapsed_ns is None and _elapsed_by_uid is None:
+            # Priced once, at the round itself: per-lane rows from the round's verify forward (consumed, so no
+            # later round or request reuses it); a path that records none uses the chain's full width.
+            rows = self._det_round_rows or (1 + int(getattr(self, "num_draft", 1) or 1))
+            self._det_round_rows = None
+            elapsed_ns = max(1, int(round(1e9 * self._det_seconds(rows, ordinary=ordinary_probe))))
+            _bump(self.scheduler_stats, "external_ast_controller_modelled_rounds")
         phase = getattr(self, "_cost_service_phase", None)
         if phase is not None:
             # A memory-limited cohort can run one ready lane per poll. Its
@@ -12523,12 +12606,16 @@ class ExternalDraftBatchGenerator:
             return
         if getattr(self, "_ast_cost_prior", None) is None or len(cohort) != 1:
             return
+        if getattr(self, "controller_mode", "measured") == "deterministic":
+            return                                  # no cross-request cost prior in deterministic mode
         state = cohort[0].cost_handoff_state
         if state is not None and state.session_prior_eligible:
             state.seed_reversible_park(self._ast_cost_prior)
 
     def _update_ast_cost_prior(self, decision, *, execution_width):
         """Retain token-free B1 slow-route feedback for this generator binding."""
+        if getattr(self, "controller_mode", "measured") == "deterministic":
+            return
         if not getattr(self, "ast_cost_self_configure", False) or execution_width != 1:
             return
         event = decision.get("event")
@@ -14142,6 +14229,7 @@ class ExternalDraftBatchGenerator:
             logits, features, transaction = self._target_tree_forward_many(
                 cohort, inputs, parents
             )
+            self._det_round_rows = max(len(row_inputs) for row_inputs in inputs)
             if _VERIFY_TRACE_PATH is not None:
                 _VERIFY_TRACE_STATE["forward"] += 1
                 for row, lane in enumerate(cohort):
@@ -14272,7 +14360,9 @@ class ExternalDraftBatchGenerator:
                     for nodes in physical_nodes:
                         self.tile_budget.observe_cost(len(cohort), nodes, seconds)
                 if calibration is not None:
-                    calibration.observe_rate(sum(len(d.emitted) for d in decisions), seconds)
+                    calibration.observe_rate(
+                        sum(len(d.emitted) for d in decisions),
+                        self._det_seconds(sum(int(n) + 1 for n in physical_nodes)) if self._det_mode() else seconds)
                     self.scheduler_stats["external_tree_calibration"] = calibration.receipt()
                 self.scheduler_stats["external_tree_tile_budget"] = self.tile_budget.receipt()
                 self.scheduler_stats["external_tree_tile_cost_scope"] = (
@@ -14488,6 +14578,8 @@ class ExternalDraftBatchGenerator:
         if seconds is not None and not any(
             getattr(lane, "external_rounds", 0) < 2 for lane in cohort
         ):
+            if self._det_mode():   # defensive: today's only caller passes seconds=None (the round prices it)
+                seconds = self._det_seconds(sum(len(block.tokens) + 1 for block in blocks))
             calibration.observe_rate(committed, seconds)
         self.scheduler_stats["external_tree_calibration"] = calibration.receipt()
 
@@ -15565,8 +15657,9 @@ class ExternalDraftBatchGenerator:
             launches = receipt.get("launches", 0) - previous[2].get("launches", 0)
             if tuner is None or plan is None or launches <= 0:
                 continue
+            rows_used = receipt.get("target_rows", 0) - previous[2].get("target_rows", 0)
             tuner.observe(
-                plan, seconds=seconds,
+                plan, seconds=(self._det_seconds(rows_used, launches=launches) if self._det_mode() else seconds),
                 emitted=lane.generated - previous[0],
                 accepted=lane.accepted - previous[1],
                 unique_rows=receipt.get("target_rows", 0)
@@ -15644,7 +15737,8 @@ class ExternalDraftBatchGenerator:
             prices = {}
             for lane in cohort:
                 delay = waiting.pop(lane.uid, 0)
-                prices[lane.uid] = phase_ns + delay if lane.uid in ready else elapsed
+                prices[lane.uid] = (elapsed if self._det_mode()      # its own modelled round price
+                                    else phase_ns + delay if lane.uid in ready else elapsed)
                 if lane.uid in ready:
                     self.scheduler_stats["external_cost_multilane_timing_scope"] = (
                         "ready_lane_decode_service"
@@ -15655,7 +15749,7 @@ class ExternalDraftBatchGenerator:
                 cohort,
                 [lane.generated - count for lane, count in
                  zip(cohort, committed, strict=True)],
-                0, _elapsed_ns=phase_ns, _elapsed_by_uid=prices, **options,
+                0, _elapsed_ns=elapsed if self._det_mode() else phase_ns, _elapsed_by_uid=prices, **options,
             )
 
     def _decode_phase_work(self, ordered):

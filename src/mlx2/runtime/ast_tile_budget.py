@@ -49,7 +49,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 
 CANDIDATES = (3, 5, 7, 9, 11, 15, 23, 31)
-COST_MODES = ("ewma", "robust")
+# "model" (opt-in, deterministic controller mode, 2026-11-23): round cost is the fixed ``a + b * rows`` of the
+# ``cost_model`` given at construction (rows = lanes x (nodes + 1)), never a measured time, and no cost probe runs:
+# the choice depends only on the counterfactual acceptance history, so the same token history gives the same sizes.
+COST_MODES = ("ewma", "robust", "model")
 COST_SCOPES = ("period", "commit")
 
 
@@ -75,13 +78,21 @@ class TileBudgetController:
 
     def __init__(self, *, warmup=6, probe=3, refresh=48, alpha=0.25, margin=1.08,
                  counterfactual=True, cost_mode="ewma", cost_skip=2, cost_window=32,
-                 min_cost_samples=2, cost_warmup_rounds=24, trace=None):
+                 min_cost_samples=2, cost_warmup_rounds=24, trace=None, cost_model=None):
         self.warmup, self.probe, self.refresh = int(warmup), int(probe), int(refresh)
         self.alpha, self.margin = float(alpha), float(margin)
         self.counterfactual = bool(counterfactual)
         if cost_mode not in COST_MODES:
             raise ValueError(f"cost_mode must be one of {COST_MODES}")
         self.cost_mode = cost_mode
+        if (cost_mode == "model") != (cost_model is not None):
+            raise ValueError('cost_model (a_seconds, b_seconds_per_row) goes with cost_mode "model" only')
+        if cost_model is not None:
+            a, b = (float(v) for v in cost_model)
+            if not (a > 0 and b >= 0):
+                raise ValueError("cost_model needs a > 0 seconds and b >= 0 seconds per row")
+            cost_model = (a, b)
+        self.cost_model = cost_model
         self.cost_skip, self.cost_window = int(cost_skip), int(cost_window)
         self.min_cost_samples = int(min_cost_samples)
         self.cost_warmup_rounds = int(cost_warmup_rounds)
@@ -98,6 +109,15 @@ class TileBudgetController:
 
     def _state(self, width):
         return self._widths.setdefault(int(width), _Width())
+
+    def reset(self):
+        """Forget every learned acceptance and cost (deterministic mode: a request on an idle engine)."""
+        self._widths = {}
+        self.decisions = {}
+
+    def _model_fit(self, width):
+        a, b = self.cost_model
+        return a, b * int(width)                       # seconds = a + (b * lanes) * (nodes + 1)
 
     def choose(self, width, maximum):
         """Proposal nodes for one lane of a round at ``width`` lanes."""
@@ -119,7 +139,11 @@ class TileBudgetController:
         robust = self.cost_mode == "robust"
         if robust and state.rounds < self.cost_warmup_rounds:
             return maximum                  # costs are not sampled yet
-        if not self.counterfactual:
+        if self.cost_mode == "model":
+            # Costs are known (no cost probe, no measured fit). Without the prefix counterfactual this also skips
+            # the yield probes, so only the maximum gathers samples and the choice stays at the maximum.
+            pass
+        elif not self.counterfactual:
             # Rebuilt grafts cannot infer smaller-budget yields from a large
             # tree. Measure each candidate before comparing its expected rate.
             epoch = state.rounds // self.refresh
@@ -157,7 +181,7 @@ class TileBudgetController:
                 elif epoch > state.probe_epoch:
                     state.probe_epoch = epoch
                     return probe
-        fit = self._fit(state)
+        fit = self._model_fit(width) if self.cost_mode == "model" else self._fit(state)
         if fit is None:
             return maximum
         a, b = fit
@@ -210,6 +234,8 @@ class TileBudgetController:
     def _costs(self, state):
         if self.cost_mode == "ewma":
             return state.cost
+        if self.cost_mode == "model":
+            return {}
         scope = self._fit_scope(state)
         return {} if scope is None else self._scope_costs(state, scope)
 
@@ -228,6 +254,8 @@ class TileBudgetController:
     def cost_curve(self, width):
         """``(a, b)`` of the fitted round seconds ``a + b * rows``, or None."""
 
+        if self.cost_mode == "model":
+            return self._model_fit(width)
         state = self._widths.get(int(width))
         return None if state is None else self._fit(state)
 
@@ -260,8 +288,8 @@ class TileBudgetController:
         if scope not in COST_SCOPES:
             raise ValueError(f"scope must be one of {COST_SCOPES}")
         state = self._state(width)
-        if seconds is None or not seconds > 0:
-            return
+        if self.cost_mode == "model" or seconds is None or not seconds > 0:
+            return                              # model mode: measured time never enters the state
         nodes = int(nodes)
         if self.trace is not None:
             self.trace((int(width), state.rounds, nodes, round(seconds * 1e3, 3), state.chosen))
@@ -309,8 +337,8 @@ class TileBudgetController:
         self._widths = {width: self._copy(state) for width, state in widths.items()}
         self.decisions = dict(decisions)
 
-    def _fit_receipt(self, state):
-        fit = self._fit(state)
+    def _fit_receipt(self, state, width=1):
+        fit = self._model_fit(width) if self.cost_mode == "model" else self._fit(state)
         if fit is None:
             return None
         return {"intercept_ms": round(fit[0] * 1e3, 4), "slope_ms_per_row": round(fit[1] * 1e3, 4)}
@@ -330,7 +358,7 @@ class TileBudgetController:
                 "maximum_nodes": state.maximum,
                 "tile_rows": None if state.maximum is None else state.maximum + 1,
                 "verified_nodes": {str(n): c for n, c in sorted(state.verified.items())},
-                "fit": self._fit_receipt(state),
+                "fit": self._fit_receipt(state, width),
                 "rounds": state.rounds,
                 "chosen": state.chosen,
                 "cost_ms": {str(n): round(s * 1e3, 3) for n, s in sorted(self._costs(state).items())},
