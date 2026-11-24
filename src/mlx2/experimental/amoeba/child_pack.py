@@ -14,6 +14,10 @@ layout the packer does not know (a fused gate_up, missing projections) refuses i
 box. Layers are written one at a time (OUT/L<i>.npz; 2026-11-22: an 88K-block Hy4-flash box is ~100 GB as
 float16, more than the host's memory headroom and the free disk) with the index OUT/box_weights.json; the
 attention, norms and embeddings stay the donor's (referenced by fingerprint, never copied).
+The donor loads lazily by default (Host resident=False): a layer's projections are read from their shards
+when it is packed and released after it is written, so the pack holds about one layer, not the model (an
+eager ~85 GB Hy4-flash load tripped the memory watchdog on five box_bundle loads, 2026-11-22). --resident
+keeps the old eager load. --layers packs a subset (a smoke check; the index records partial_layers).
 
     python -m mlx2.experimental.amoeba.child_pack --model M --mask NPZ[:key] --out DIR [--cpu]
 """
@@ -118,6 +122,8 @@ def main(argv=None):
     ap.add_argument("--cpu", action="store_true")
     ap.add_argument("--memory-gb", type=float, default=56)
     ap.add_argument("--watchdog-gb", type=float, default=80)
+    ap.add_argument("--resident", action="store_true", help="load the whole donor eagerly (the old path)")
+    ap.add_argument("--layers", default=None, help="comma list of layers to pack (smoke check; partial box)")
     a = ap.parse_args(argv)
     target = Path(a.out)
     if target.exists() and (not target.is_dir() or any(target.iterdir())):
@@ -139,7 +145,15 @@ def _pack(a, out):
     if a.cpu:
         mx.set_default_device(mx.cpu)
     from research.amoeba.carve.host import Host
-    host = Host(a.model, log=lambda *m: print(time.strftime("%H:%M:%S"), *m, flush=True), moe_units=a.moe_units)
+    host = Host(a.model, log=lambda *m: print(time.strftime("%H:%M:%S"), *m, flush=True), moe_units=a.moe_units,
+                resident=a.resident)
+    shards = list(getattr(host.model, "lazy_shards", None) or []) if not host.resident else []
+    stamps = {p: _stamp(p) for p in shards}
+    only = None if a.layers is None else {int(x) for x in a.layers.split(",") if x.strip()}
+    if only is not None:
+        sites = {s.layer for s in host.sites if s.kind is not None}
+        if not only or not only <= sites:
+            raise SystemExit(f"pack: --layers {sorted(only)} must name layers with unit sites ({sorted(sites)})")
     path, _, key = a.mask.partition(":")
     z = np.load(path)
     mask = z[key or z.files[0]] > 0
@@ -147,6 +161,8 @@ def _pack(a, out):
         raise SystemExit(f"pack: mask {mask.shape} != donor [L, max width] {(host.L, max(host.widths))}")
     layers, total_bytes = {}, 0
     for s in host.sites:
+        if only is not None and s.layer not in only:
+            continue
         units = np.nonzero(mask[s.layer, :s.n])[0]
         if not len(units) or s.kind is None:
             continue
@@ -167,6 +183,7 @@ def _pack(a, out):
         if s.kind == "dense":
             m = s.parent
             gl, ul, dl = (_proj(m, n, where) for n in ("gate_proj", "up_proj", "down_proj"))
+            used = (gl, ul, dl)
             for name, lin in (("gate", gl), ("up", ul)):
                 q = quant_slice(lin, rows=units)
                 if q is not None:
@@ -178,6 +195,7 @@ def _pack(a, out):
             from research.amoeba.carve import units as U
             sw = U._switch(s.module, s.kind)
             gp, up, dp = (_proj(sw, n, where) for n in ("gate_proj", "up_proj", "down_proj"))
+            used = (gp, up, dp)
             B = getattr(s, "B", 1)
             g, u, dn = [], [], []
             if s.units == "neuron":
@@ -210,11 +228,22 @@ def _pack(a, out):
         layers[str(s.layer)] = {"kind": s.kind, "units": int(len(units)), "layout": layout, "file": f_out.name,
                                 "formats": fmt}
         del arrays
+        if not host.resident:
+            _release(*used)
+            if shards:
+                from mlx2.runtime.ubc_evict import ubc_evict_paths
+                ubc_evict_paths(shards)              # drop the layer's page-cache mirror too (clean pages)
         mx.clear_cache()
         print(time.strftime("%H:%M:%S"), f"packed layer {s.layer}: {len(units)} units, "
               f"{f_out.stat().st_size / 2**30:.2f} GiB, formats {sorted({v['format'] for v in fmt.values()})}",
               flush=True)
-    rep = {"schema": "mlx2.amoeba-box-weights.v1", "checkpoint": host.checkpoint, "fingerprint": host.fingerprint,
+    changed = [p for p, st in stamps.items() if _stamp(p) != st]
+    if changed:
+        # A lazy pack reads shards for its whole run: a shard rewritten in place meanwhile is not the donor the
+        # index names by fingerprint.
+        raise SystemExit(f"pack: donor shards changed during the pack: {changed}")
+    rep = {"schema": "mlx2.amoeba-box-weights.v1", "load": "resident" if host.resident else "lazy",
+           **({"partial_layers": sorted(only)} if only is not None else {}), "checkpoint": host.checkpoint, "fingerprint": host.fingerprint,
            "mask": a.mask, "moe_units": a.moe_units, "bytes": total_bytes,
            "dtype": "stored affine rows where exact (packed words + scales + biases), else float16 (dequantized); "
                     "per projection in layers[*].formats; bfloat16 scales/biases are stored as their uint16 bits",
@@ -223,6 +252,21 @@ def _pack(a, out):
            "not_copied": "attention, norms, embeddings, the core: the donor checkpoint's (by fingerprint)"}
     (out / "box_weights.json").write_text(json.dumps(rep, indent=1))
     print(f"packed {rep['units']} units over {len(layers)} layers", flush=True)
+
+
+def _stamp(path):
+    import os
+    st = os.stat(path)
+    return st.st_size, st.st_mtime_ns, st.st_ctime_ns, st.st_ino     # ctime: not settable by a copy tool
+
+
+def _release(*modules):
+    """Drop a packed layer's projection arrays so a lazy donor never holds more than the layer in hand."""
+    import mlx.core as mx
+    for m in modules:
+        for k, v in list(m.items()):
+            if isinstance(v, mx.array):
+                m[k] = mx.zeros((0,), dtype=v.dtype)
 
 
 if __name__ == "__main__":

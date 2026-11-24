@@ -482,3 +482,28 @@ def test_engram_format_resolution_keeps_bf16_and_picks_an_only_format():
     # Two non-bf16 formats: no guess; the default then fails closed at load.
     assert A.resolve_engram_table_format({}, ["affine4_g32", "fp8_e4m3_row"]) == ("bf16", "default")
     assert A.resolve_engram_table_format({"engram_table_format": "iq4_nl"}, ["iq4_nl"]) == ("iq4_nl", "policy")
+
+
+def test_sweep_family_layer_walk_matches_the_adapter_load_on_a_pack(pack):
+    """The Hy4 sweep family on a pack (q2_0 routed banks under switch_mlp names, IQ4_NL Engram tables): its
+    layer-by-layer walk (research/amoeba/carve/layer_major.py's calls) gives the adapter load_model's logits."""
+    from mlx2.adapters import hy_v4_flash as A
+    from research.amoeba.carve.layer_major import HyV4FlashLayerCalls
+    from research.amoeba.sweep.hy_v4_flash import HyV4FlashFamily
+
+    root, _, _ = pack
+    loaded, _, readers = A.load_model(root, A.inspect_artifact(root), engram_table_format="iq4_nl")
+    fam = HyV4FlashFamily(root, configure_env=False, engram_table_format="iq4_nl")
+    try:
+        ids = mx.array([[5, 7, 9, 11, 13, 4, 6, 8, 10, 12, 14, 16]])
+        calls = HyV4FlashLayerCalls(fam)
+        carry = fam.embed(ids)
+        for l in range(fam.L):
+            layer = fam._load_layer(l)
+            carry = calls.call(l, layer, carry, calls.inputs(l, carry))
+            fam.release_layer(l)
+        np.testing.assert_allclose(np.array(fam.final_logits(carry)), np.array(loaded(ids)), rtol=1e-4, atol=1e-4)
+    finally:
+        fam.close()
+        for r in readers.values():
+            r.close()

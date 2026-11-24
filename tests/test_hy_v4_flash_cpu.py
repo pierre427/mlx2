@@ -1403,3 +1403,85 @@ def test_dfly_tree_lanes_batch_like_single_lanes(tiny, topology, max_nodes):
                               forbidden_token_ids=banned,
                               target_caches=[lane.cache for lane in lanes])
     assert both == single
+
+
+def test_lazy_load_reads_no_weights_and_matches_eager(tmp_path, tiny, monkeypatch):
+    """lazy_load (research loaders: the aMoEba box pack): the adapter evaluates no weight planes at load, records
+    its shards for page-cache eviction, and the lazily loaded model's logits equal the eager load's."""
+    from mlx.utils import tree_flatten
+
+    from mlx2.adapters import hy_v4_flash as A
+
+    config, W, _, _ = tiny
+    path = _tiny_artifact(tmp_path, config, W)
+    policy = A.HYV4FlashAdapter.LAZY_LOAD_POLICY
+    real_eval, evaluated = mx.eval, []
+
+    def counting_eval(*args):
+        evaluated.append(sum(v.size for _, v in tree_flatten(list(args)) if isinstance(v, mx.array)))
+        return real_eval(*args)
+
+    monkeypatch.setattr(mx, "eval", counting_eval)
+    mx.clear_cache()
+    mx.reset_peak_memory()
+    base = mx.get_active_memory()
+    lazy = A.HYV4FlashAdapter(str(path), execution_policy=policy)
+    lazy_peak = mx.get_peak_memory() - base          # bytes actually read by any route (eval, item, numpy, forward)
+    lazy_elems, evaluated[:] = sum(evaluated), []
+    eager = A.HYV4FlashAdapter(str(path), execution_policy={k: v for k, v in policy.items() if k != "lazy_load"})
+    eager_elems = sum(evaluated)
+    monkeypatch.setattr(mx, "eval", real_eval)
+    try:
+        assert lazy.model.lazy_shards and eager.model.lazy_shards == []
+        params = sum(v.size for _, v in tree_flatten(eager.model.parameters()))
+        assert eager_elems >= params and lazy_elems < params / 10, (lazy_elems, eager_elems, params)
+        nbytes = sum(v.nbytes for _, v in tree_flatten(eager.model.parameters()))
+        assert lazy_peak < nbytes / 4, (lazy_peak, nbytes)
+        ids = mx.array([TOKENS[:12]])
+        np.testing.assert_array_equal(np.array(lazy.model(ids)), np.array(eager.model(ids)))
+    finally:
+        lazy.close()
+        eager.close()
+
+
+def test_lazy_load_refuses_options_that_read_weights_at_load():
+    from mlx2.adapters import hy_v4_flash as A
+
+    for extra in ({"resident_bf16": True}, {"engram_fused_proj": True}, {"amoeba_mask": "x"},
+                  {"moe_fused_gate_up": True}):
+        with pytest.raises(ValueError, match="lazy_load"):
+            A._parse_policy({"lazy_load": True, **extra})
+    A._parse_policy({"lazy_load": True, "vision": False, "prefill_head_trim": False})
+
+
+def test_layer_major_removal_scorer_matches_the_resident_scorer(tmp_path, tiny):
+    """research/amoeba/carve/layer_major.py: KL(full || full - box) computed layer-major through the sweep family,
+    with the carve's own unit sites installed per layer, equals the resident removal Scorer's on the same windows
+    (full depth), and the K-layer parity record against a resident K-layer model is near zero."""
+    from mlx2.experimental.amoeba.child_removal import Scorer
+    from research.amoeba.carve import layer_major as LM
+    from research.amoeba.carve.host import Host
+    from research.amoeba.sweep.hy_v4_flash import HyV4FlashFamily
+
+    config, W, _, _ = tiny
+    path = _tiny_artifact(tmp_path, config, W)
+    host = Host(str(path), log=lambda *m: None, moe_units="neuron")
+    rng = np.random.default_rng(0)
+    Wd = max(host.widths)
+    keeps = {name: (rng.random((host.L, Wd)) > p) for name, p in (("box", 0.3), ("random", 0.6))}
+    wins = [(None, TOKENS[o:o + 12], 2) for o in (0, 3, 6)] + [(None, TOKENS[:16], 1)]
+    want = Scorer(host, bs=2).kl_many(wins, keeps)
+    fam = HyV4FlashFamily(path, configure_env=False)
+    try:
+        sc = LM.LayerMajorScorer(fam, LM.HyV4FlashLayerCalls(fam), host.widths, moe_units="neuron", bs=2,
+                                 carry_gb=1e-6, log=lambda *m: None)       # tiny budget: one batch per chunk
+        got = sc.kl_many(wins, keeps)
+        for name in keeps:
+            assert want[name].min() > 0
+            np.testing.assert_allclose(got[name], want[name], rtol=2e-3, atol=2e-5)
+        assert sc.passes > 1
+        rec = LM.parity(sc, wins[:2], keeps, layers=2, log=lambda *m: None)
+        assert rec["full_logits_max_rel"] < 1e-3 and rec["full_top1_agreement"] == 1.0
+        assert all(v["max_abs_dkl"] < 1e-4 for v in rec["arms"].values())
+    finally:
+        fam.close()

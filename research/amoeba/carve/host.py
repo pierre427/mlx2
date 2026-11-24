@@ -285,9 +285,11 @@ def find_inner(model):
 
 class Host:
     def __init__(self, path=None, log=print, policy=None, model=None, tokenizer=None, fingerprint=None,
-                 checkpoint=None, moe_units="expert"):
+                 checkpoint=None, moe_units="expert", resident=True):
         """Load ``path`` through ``inspect_model`` (or wrap a given ``model``/``tokenizer``, for tests).
-        ``moe_units``: "expert" (whole routed experts) or "neuron" ((expert, neuron) units; units.py)."""
+        ``moe_units``: "expert" (whole routed experts) or "neuron" ((expert, neuron) units; units.py).
+        ``resident=False``: load lazily (the adapter's ``lazy_load`` policy) and neither materialise nor
+        wire the weights; for a caller that reads one layer at a time and releases it (the box pack)."""
         import mlx.core as mx
         t0 = time.time()
         self.log = log
@@ -295,8 +297,16 @@ class Host:
         if model is None:
             from mlx2.adapters.registry import inspect_model
             self.path = Path(path)
+            adapter_type = inspect_model(self.path).adapter_type
+            lazy = getattr(adapter_type, "LAZY_LOAD_POLICY", None)
+            if not resident and lazy is None:
+                # Only adapters that declare LAZY_LOAD_POLICY load lazily; any other loads (and wires) as before.
+                log(f"{adapter_type.__name__} declares no lazy load; loading resident")
+                resident = True
+            if not resident:
+                policy = {**(policy or {}), **lazy}
             kw = {"execution_policy": policy} if policy else {}
-            self.adapter = inspect_model(self.path).adapter_type(str(self.path), **kw)
+            self.adapter = adapter_type(str(self.path), **kw)
             model, tokenizer = self.adapter.model, self.adapter.tokenizer
             fingerprint = self.adapter.identity["fingerprint"]
             self.adapter_name = type(self.adapter).__name__
@@ -340,8 +350,10 @@ class Host:
         self.paths = {}
         self.model.freeze()
         self.model.eval()
-        mx.eval(self.model.parameters())
-        log(f"loaded {self.checkpoint} via {self.adapter_name or 'given model'}: {self.L} layers, sites "
+        self.resident = resident
+        if resident:
+            mx.eval(self.model.parameters())
+        log(f"loaded{'' if resident else ' (lazy: weights read on use)'} {self.checkpoint} via {self.adapter_name or 'given model'}: {self.L} layers, sites "
             f"{sorted({s.kind for s in self.sites if s.kind}, key=str)}, MoE units {moe_units}, units {sum(self.widths)}, d={self.d} "
             f"in {time.time() - t0:.0f}s, MLX active {mx.get_active_memory() / 2**30:.1f} GB")
         # Every resident host wires its evaluated weights when AMOEBA_CARVE_WIRED_GB asks (default off), so
@@ -350,7 +362,7 @@ class Host:
         # (2026-11-21).  Idempotent: a later explicit wire_weights call returns this receipt.
         import os as _os
         _spec = _os.environ.get("AMOEBA_CARVE_WIRED_GB", "").strip()
-        if _spec and _spec != "0" and mx.default_device() != mx.cpu:
+        if resident and _spec and _spec != "0" and mx.default_device() != mx.cpu:
             from . import ops as _ops
             self.wired = _ops.wire_weights(_ops.wired_arg(_spec), lambda m: log(m))
 

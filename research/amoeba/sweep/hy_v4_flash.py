@@ -41,8 +41,9 @@ added to the streams before layers 1, 11, 21, 31.
 Refused (SystemExit or ValueError, never zero-filled): an artifact the adapter's ``inspect_artifact`` refuses (any
 indexed shard missing, e.g. a download in progress; unimplemented topology; FP8 checkpoints); a tensor the index
 names that its shard does not hold; image / video tokens; a sequence over ``max_position_embeddings``; the grouped-
-expert research kernels (``MLX2_MOE_GROUPED_EXPERTS``, they bypass the activation the neuron units read); an Engram
-table format other than bf16; a payload the layer did not produce.
+expert research kernels (``MLX2_MOE_GROUPED_EXPERTS``, they bypass the activation the neuron units read); a payload
+the layer did not produce. Engram tables are bf16 by default; ``engram_table_format`` reads another format the adapter
+serves (e.g. a pack's iq4_nl tables) through the reader's own decode, without the map pass's pre-read.
 """
 from __future__ import annotations
 
@@ -185,7 +186,7 @@ class HyV4FlashFamily:
 
     def __init__(self, path=DEFAULT_MODEL, *, moe_units="neuron", engram_cache_rows=1 << 16, engram_preread_gb=8.0,
                  reference_gb=48.0,
-                 configure_env=True):
+                 configure_env=True, engram_table_format="bf16"):
         from mlx2.adapters import hy_v4_flash as A
         from mlx2.runtime.models import hy_v4_flash as H
         from mlx2.runtime.models import switch_grouped_experts as G
@@ -258,7 +259,12 @@ class HyV4FlashFamily:
             self.model.model.layers[i].engram_layer.lookup_table = self._read(self._ckpt_name(name))
         from mlx2.runtime.models.hy_v4_flash_engram import open_engram_tables
         self.readers = open_engram_tables(self.path, wm, a.engram_layers, cache_rows=int(engram_cache_rows),
-                                            table_format="bf16", formats=self.config.get("mlx2_engram_formats"))
+                                            table_format=engram_table_format,
+                                            formats=self.config.get("mlx2_engram_formats"),
+                                            gguf_tables=A.text_config(self.config).get("engram_gguf_tables"))
+        # Another table format (e.g. a pack's iq4_nl tables, the adapter's resolved default) reads through the
+        # reader's own decode, as the adapter serves it; prepare_layer's pre-read stays bf16-only (it skips others).
+        self.engram_table_format = engram_table_format
         try:
             self.model.bind_engram(self.readers)
         except BaseException:
@@ -288,20 +294,43 @@ class HyV4FlashFamily:
         return out.view(mx.bfloat16) if loc.dtype == "BF16" else out
 
     def _quantize(self, module, prefix, weights, only=None):
-        """The adapter's load_model predicate, on ``module`` (paths relative to it, ``prefix`` for overrides)."""
+        """The adapter's load_model quantization on ``module`` (paths relative to it, ``prefix`` for overrides):
+        overrides under mlx2 module names (``module_quantization``: a pack's ``switch_mlp`` keys name ``experts``),
+        q2_0 expert banks swapped for ``Q2ZeroSwitchLinear`` with widened planes (``install_q2_zero``), every other
+        quantized module by ``nn.quantize`` with the adapter's predicate."""
+        from types import SimpleNamespace
+
+        from mlx2.adapters import hy_v4_flash as A
         q = self.quant
         if q is None:
             return
+        A.check_quantization(q)
+        overrides = A.module_quantization(q)
+        q2 = {n: o for n, o in sorted(overrides.items()) if o.get("mode") == A.Q2_ZERO
+              and n.startswith(prefix) and (only is None or only(n[len(prefix):]))}
 
         def pred(name, m):
             if only is not None and not only(name):
                 return False
-            override = q.get(prefix + name)
+            override = overrides.get(prefix + name)
             if isinstance(override, dict):
-                return override
+                return False if override.get("mode") == A.Q2_ZERO else override
             return hasattr(m, "to_quantized") and f"{name}.scales" in weights
         nn.quantize(module, group_size=q["group_size"], bits=q["bits"], mode=q.get("mode", "affine"),
                     class_predicate=pred)
+        if not q2:
+            return
+        if not prefix:                                       # the whole model (reference): names are absolute
+            n = len(module.model.layers)                     # a K-layer reference holds only layers < K
+            A.install_q2_zero(module, weights, {k: v for k, v in q2.items() if int(k.split(".")[2]) < n})
+            return
+        # one decoder layer: install_q2_zero walks absolute "model.layers.<l>." names from a model root
+        l = int(prefix.split(".")[2])
+        root = SimpleNamespace(model=SimpleNamespace(layers={l: module}))
+        full = {prefix + k: v for k, v in weights.items()}
+        A.install_q2_zero(root, full, q2)
+        weights.clear()
+        weights.update({k[len(prefix):]: v for k, v in full.items()})
 
     def _layer_weights(self, l) -> dict:
         raw = {n: self._read(n) for n in self._names[l]}
@@ -532,8 +561,9 @@ class HyV4FlashFamily:
 
     def stream_receipt(self):
         return {"mode": "hy_v4_flash sweep family: whole decoder layers, routed experts included, by byte range",
-                "engram": "bf16 tables on SSD (adapter EngramTableRows); in the map pass each chunk's rows are pre-read "
-                          "once in file order (prepare_layer), in memory up to engram_preread_gb, else on scratch",
+                "engram": f"{self.engram_table_format} tables on SSD (adapter EngramTableRows); bf16 tables in the map "
+                          "pass pre-read each chunk's rows once in file order (prepare_layer), in memory up to "
+                          "engram_preread_gb, else on scratch",
                 "engram_preread_gb": self.preread_gb,
                 "resident": "embeddings, final norm, hc_head, LM head",
                 "quantization": self.quant, "moe_units": self.moe_units,

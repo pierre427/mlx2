@@ -671,7 +671,15 @@ MODEL_KEYS = frozenset({"engram_cache_rows", "engram_hash", "engram_precision",
                         "prefill_head_trim", "prefill_tail_skip", "moe_sorted_weighted_sum",
                         "hc_seam_fused", "mla_fused_input_proj", "engram_fused_proj",
                         "indexer_fused_scores", "engram_gate_rounding",
-                        "sparse_prefill_union_rows", "resident_bf16"})
+                        "sparse_prefill_union_rows", "resident_bf16", "lazy_load"})
+# ``lazy_load`` (research tools only, default false): load_model reads no
+# weight bytes; each tensor materialises from its shard on first use.  For a
+# caller that touches one layer at a time and drops it (the aMoEba box pack,
+# experimental/amoeba/child_pack.py): an eager ~85 GB load on a 128 GB host
+# left too few free pages and its own unwired buffers were compressed by
+# +26-30 GiB within seconds (2026-11-22, five box_bundle loads).  Not for
+# serving (the first forward would read the whole checkpoint unwired);
+# refused with amoeba_mask and moe_fused_gate_up.
 # ``amoeba_det_tiles`` (experimental, unqualified; default on only for the
 # checkpoints in DET_TILE_DEFAULT_MANIFESTS, opt-out ``false``): a deterministic
 # tile manifest of probe-gated calculators (amoeba_det_tiles
@@ -1021,6 +1029,15 @@ def _parse_policy(execution_policy, model_path=None) -> tuple[dict, dict, str | 
     unknown = set(policy) - MODEL_KEYS - AST_KEYS
     if unknown:
         raise ValueError(f"Hy4-flash execution policy keys are not declared: {sorted(unknown)}")
+    if not isinstance(policy.get("lazy_load", False), bool):
+        raise ValueError("Hy4-flash lazy_load must be a boolean")
+    if policy.get("lazy_load"):
+        # Options that evaluate or rewrite loaded planes at load time would read (and keep) the weights they cover.
+        eager = sorted(k for k in ("amoeba_mask", "moe_fused_gate_up", "resident_bf16", "ast_tensorfold_rows")
+                       if policy.get(k) not in (None, False, 0, [], ()))
+        eager += sorted(k for k, v in FUSION_DEFAULTS.items() if k in policy and policy[k] not in (False, None, v))
+        if eager:
+            raise ValueError(f"Hy4-flash lazy_load is for read-only research loads: not with {eager}")
     if policy.get("engram_precision", "transformers") not in ("transformers", "vllm"):
         raise ValueError("Hy4-flash engram_precision must be 'transformers' (default) or 'vllm'")
     if policy.get("engram_hash", ENGRAM_HASH_DEFAULT) not in ENGRAM_HASH_MODES:
@@ -1252,7 +1269,7 @@ def resolve_engram_hash(model) -> str:
 def load_model(path, artifact, *, keep_dfly=False, engram_cache_rows=1 << 16, memory_budget=None,
                engram_precision="transformers", engram_table_format="bf16", latent_kv="native",
                vision=True, engram_hash=ENGRAM_HASH_DEFAULT, moe_fused_gate_up=False,
-               dfly_quantization=None, amoeba_mask=None, fusions=None, resident_bf16=False):
+               dfly_quantization=None, amoeba_mask=None, fusions=None, resident_bf16=False, lazy=False):
     """``(model, drafter or None, engram readers)`` for an inspected artifact.
 
     ``amoeba_mask`` (a loaded ``NeuronMaskBundle``) closes its units in the
@@ -1311,7 +1328,14 @@ def load_model(path, artifact, *, keep_dfly=False, engram_cache_rows=1 << 16, me
             "quantization first (scripts/convert_hy_v4_flash_mlx.py)")
     shards = [path / name for name in files
               if any(k not in tables for k, v in artifact["weight_map"].items() if v == name)]
-    raw = load_shards_evicting(shards, sanitize=shard_filter)
+    if lazy and (amoeba_mask is not None or moe_fused_gate_up):
+        raise ValueError("Hy4-flash lazy load: amoeba_mask (page-out acts on resident banks) and "
+                         "moe_fused_gate_up (the box pack reads split gate/up planes) load eagerly")
+    # lazy: every tensor stays an unread mx.load view (no eval); the shard paths are kept on the model
+    # (``model.lazy_shards``) so a caller can evict their page-cache mirror as it goes.
+    lazy_shards: list = []
+    raw = (load_shards_evicting(shards, sanitize=shard_filter, keep_lazy=lambda name: True, deferred=lazy_shards)
+           if lazy else load_shards_evicting(shards, sanitize=shard_filter))
     dfly_raw = {k: raw.pop(k) for k in list(raw) if k.startswith("model.dfly_layers.")}
     vit_raw = {k: raw.pop(k) for k in list(raw) if k.startswith("vit.")}
     weights = model.sanitize(raw)
@@ -1383,9 +1407,11 @@ def load_model(path, artifact, *, keep_dfly=False, engram_cache_rows=1 << 16, me
             raise ValueError("Hy4-flash dfly_quantization needs the DFly2 drafter (keep_dfly)")
         dfly_raw.clear()
         model.eval()
-        mx.eval(model.parameters())
-        if drafter is not None:
-            mx.eval(drafter.parameters())
+        model.lazy_shards = lazy_shards
+        if not lazy:
+            mx.eval(model.parameters())
+            if drafter is not None:
+                mx.eval(drafter.parameters())
         mx.clear_cache()
     except BaseException:
         for reader in readers.values():
@@ -1422,6 +1448,8 @@ def install_q2_zero(model, weights: dict, banks: dict) -> None:
 
 class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
     descriptor = descriptor_for()
+    # Research loaders (carve Host resident=False) may pass these with lazy_load; other adapters refuse them.
+    LAZY_LOAD_POLICY = {"lazy_load": True, "vision": False, "prefill_head_trim": False}
 
     @staticmethod
     def amoeba_mask_sites_for(model_path):
@@ -1672,7 +1700,7 @@ class HYV4FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             moe_fused_gate_up=self.moe_fused_gate_up,
             dfly_quantization=external.get("draft_quantization"),
             amoeba_mask=self.amoeba_mask, fusions=fusion_policy(policy),
-            resident_bf16=policy.get("resident_bf16", False))
+            resident_bf16=policy.get("resident_bf16", False), lazy=policy.get("lazy_load", False))
         self._trunk_forwards_at_load = self.model.trunk_stats["forwards"]
         self.amoeba_pageout = None
         if self.amoeba_mask is not None and self.amoeba_mask_mode["mode"] == "pageout":

@@ -229,7 +229,7 @@ def keep_without(box, widths):
 
 def run(host, *, core, cuts, nontarget_val, nontarget_held, target_val, target_held, out, seq_len=128, windows_per_doc=2,
         window_seed=0, keep_prompt=32, val_margin=0.03, bar=0.05, specificity=2.0, floor=0.01, seed=0, bs=4,
-        identity=None, log=print, ledger=None, held_paths=None, ledger_override=None):
+        identity=None, log=print, ledger=None, held_paths=None, ledger_override=None, scorer=None):
     """The check on a loaded host (module docstring). ``cuts``: {name: [L, W] bool keep mask of core + box}.
     ``ledger``: the held ledger. With ``held_paths`` (the held files) the ledger is the one next to them
     (``default_ledger``); another ledger refuses unless ``ledger_override`` gives the reason, which is recorded.
@@ -253,7 +253,7 @@ def run(host, *, core, cuts, nontarget_val, nontarget_held, target_val, target_h
     if core.shape != (L, W):
         raise SystemExit(f"core mask shape {core.shape} != the host's [L, max width] {(L, W)}")
     total = int(sum(widths))
-    sc = Scorer(host, bs=bs)
+    sc = scorer or Scorer(host, bs=bs)
     data = {}
     for name, rows in (("nontarget_val", nontarget_val), ("target_val", target_val)):
         data[name] = windows(host, rows, seq_len, windows_per_doc, window_seed, keep_prompt)
@@ -351,6 +351,13 @@ def main(argv=None):
                     "needs --ledger-override)")
     ap.add_argument("--ledger-override", default="", metavar="REASON", help="why another ledger is used (recorded)")
     ap.add_argument("--cpu", action="store_true")
+    ap.add_argument("--layer-major", action="store_true",
+                    help="score layer-major through the model's sweep family (research/amoeba/carve/layer_major.py): "
+                         "one layer and the windows' carries resident, not the whole model; Hy4-flash only")
+    ap.add_argument("--carry-gb", type=float, default=24.0, help="layer-major: all arms' carries per chunk")
+    ap.add_argument("--parity-windows", type=int, default=8, help="layer-major: target val windows in the gate")
+    ap.add_argument("--parity-layers", type=int, default=12,
+                    help="layer-major: layers in the parity gate (12 reaches Hy4-flash's second Engram layer, 11)")
     a = ap.parse_args(argv)
     if a.bar > 0.05:
         raise SystemExit("--bar over +0.05 nats: the bar is never relaxed (Pierre 2026-11-16)")
@@ -358,18 +365,93 @@ def main(argv=None):
     if a.cpu:
         mx.set_default_device(mx.cpu)
     from research.amoeba.carve.host import Host
-    host = Host(a.model, moe_units=a.moe_units)
+    host = Host(a.model, moe_units=a.moe_units, resident=not a.layer_major)
     rows = {k: [r for f in getattr(a, k.replace("-", "_")) for r in _read_jsonl(f)]
             for k in ("nontarget-val", "nontarget-held", "target-val", "target-held")}
     cuts = {Path(c.partition(":")[0]).stem: _mask(c) for c in a.cut}
     ident = {"checkpoint": host.checkpoint, "fingerprint": host.fingerprint, "mlx2_commit": _commit(),
-             "started": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
+             "started": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+             "scorer": "layer_major" if a.layer_major else "resident"}
+    scorer = None
+    if a.layer_major:
+        scorer, ident["layer_major_parity"] = layer_major_scorer(host, a, core=_mask(a.core), cuts=cuts, rows=rows)
     run(host, core=_mask(a.core), cuts=cuts, nontarget_val=rows["nontarget-val"],
         nontarget_held=rows["nontarget-held"], target_val=rows["target-val"], target_held=rows["target-held"],
         out=a.out, seq_len=a.seq_len, windows_per_doc=a.windows, window_seed=a.window_seed,
         keep_prompt=a.keep_prompt, val_margin=a.val_margin, bar=a.bar, specificity=a.specificity, floor=a.floor,
         bs=a.bs, identity=ident, ledger=a.ledger or None, held_paths=list(a.nontarget_held) + list(a.target_held),
-        ledger_override=a.ledger_override or None)
+        ledger_override=a.ledger_override or None, scorer=scorer)
+    if scorer is not None:
+        scorer.f.close()
+
+
+# The layer-major parity gate: the sweep's exact criteria (parity_check) for the full arm's logits; every window's
+# KL within max(1e-3 nats, 2% of the resident KL) for both arms; and a non-vacuous gate: the box arm's mean resident
+# KL at least 1e-2 nats (ten times the absolute tolerance), so a walk that zeroed or skipped the mask cannot pass.
+LAYER_MAJOR_GATE = {"full_logits_max_rel": 1e-3, "full_top1_agreement": 1.0, "abs_dkl": 1e-3, "rel_dkl": 0.02,
+                    "min_box_kl": 1e-2}
+
+
+def gate_passes(rec, g=LAYER_MAJOR_GATE):
+    """(passes, reasons) for a parity record."""
+    why = []
+    rel = rec["full_logits_max_rel"]
+    if rel != rel or rel > g["full_logits_max_rel"]:
+        why.append(f"full logits rel {rel} > {g['full_logits_max_rel']}")
+    if (rec["full_top1_agreement"] or 0) < g["full_top1_agreement"]:
+        why.append(f"full top-1 {rec['full_top1_agreement']} < {g['full_top1_agreement']}")
+    for n, v in rec["arms"].items():
+        lm, res = np.array(v["per_window"]["layer_major"]), np.array(v["per_window"]["resident"])
+        bad = ~(np.abs(lm - res) <= np.maximum(g["abs_dkl"], g["rel_dkl"] * res))
+        if bad.any():
+            why.append(f"{n}: {int(bad.sum())} windows outside max({g['abs_dkl']}, {g['rel_dkl']} x KL)")
+    box = rec["arms"].get("box", {}).get("mean_kl_resident")
+    if box is None or not box >= g["min_box_kl"]:
+        why.append(f"box resident KL {box} < {g['min_box_kl']}: the gate would prove nothing")
+    return not why, why
+
+
+def layer_major_scorer(host, a, *, core, cuts, rows):
+    """(LayerMajorScorer, parity record) for --layer-major; refuses unless the parity gate passes. The run's own
+    cheap refusals come first (held.json present, val/held overlap, mask shapes). The gate scores the smallest cut's
+    box and random arms on the first --parity-windows TARGET val windows (where the box acts) over the first
+    --parity-layers layers, layer-major and through a resident model of those layers with the same carve sites."""
+    if host.adapter_name != "HYV4FlashAdapter":
+        raise SystemExit(f"--layer-major: no sweep-family layer calls for {host.adapter_name}")
+    out = Path(a.out)
+    if (out / "held.json").exists():
+        raise SystemExit(f"{out}/held.json exists: held is scored exactly once (use a fresh --out for a new round)")
+    check_disjoint(list(rows["nontarget-val"]) + list(rows["target-val"]),
+                   list(rows["nontarget-held"]) + list(rows["target-held"]))
+    L, W = len(host.widths), max(host.widths)
+    for name, m in [("core", core), *cuts.items()]:
+        if m.shape != (L, W):
+            raise SystemExit(f"{name}: mask shape {m.shape} != the host's [L, max width] {(L, W)}")
+        if name != "core" and (core & ~m).any():
+            raise SystemExit(f"cut {name} drops core units: a box cut must contain the core")
+    from research.amoeba.carve import layer_major as LM
+    if a.seq_len > LM.MAX_SEQ_LEN:
+        raise SystemExit(f"--layer-major: --seq-len {a.seq_len} > {LM.MAX_SEQ_LEN} (module docstring)")
+    from research.amoeba.sweep.hy_v4_flash import HyV4FlashFamily
+    fam = HyV4FlashFamily(a.model, engram_table_format=host.adapter.engram_table_format)  # the adapter's tables
+    sc = LM.LayerMajorScorer(fam, LM.HyV4FlashLayerCalls(fam), host.widths, moe_units=a.moe_units, bs=a.bs,
+                             carry_gb=a.carry_gb)
+    widths = list(host.widths)
+    name, cut = min(cuts.items(), key=lambda kv: int(kv[1].sum()))
+    box = cut & ~core
+    keeps = {"box": keep_without(box, widths), "random": keep_without(random_like(box, core, widths, 0), widths)}
+    wins = windows(host, rows["target-val"], a.seq_len, a.windows, a.window_seed, a.keep_prompt)[0][: a.parity_windows]
+    if not wins:
+        raise SystemExit("--layer-major: no val window for the parity gate")
+    rec = LM.parity(sc, wins, keeps, layers=a.parity_layers)
+    rec["cut"], rec["gate"] = name, LAYER_MAJOR_GATE
+    rec["passes"], rec["reasons"] = gate_passes(rec)
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "layer_major_parity.json").write_text(json.dumps(rec, indent=1))
+    if not rec["passes"]:
+        fam.close()
+        raise SystemExit(f"--layer-major parity failed (see {out}/layer_major_parity.json): {rec}")
+    return sc, rec
 
 
 def _commit():
