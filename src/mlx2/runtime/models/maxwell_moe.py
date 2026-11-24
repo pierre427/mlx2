@@ -87,6 +87,12 @@ COMPILE_SPANS = os.environ.get("MLX2_MAXWELL_COMPILE", "1") != "0"
 #   MLX2_MAXWELL_INDEX_KERNEL=1 bf16 indexer-key plane scored by a fused block-max
 #                              kernel for decode/verify rows (no fp32 plane)
 #   MLX2_MAXWELL_FUSED_QKV=1   one projection for q, k, v and the indexer key
+#   MLX2_MAXWELL_CANONICAL_PICK=1 remote-block pick with ties broken toward the
+#                              lowest block id and blocks gathered in ascending
+#                              order (default: argpartition, whose tie choice and
+#                              order depend on kernel and shape).  Same set as
+#                              torch.topk when there is no tie.  Off until a GPU
+#                              token/speed check (Pierre 2026-11-23: merge default off).
 MHC_KERNEL = os.environ.get("MLX2_MAXWELL_MHC_KERNEL", "0") == "1"
 # The fused mHC kernel runs one threadgroup per token with a serial Sinkhorn,
 # which loses to the compiled span on long prefill chunks (32K TTFT 108 s ->
@@ -96,6 +102,7 @@ MHC_KERNEL_MAX_ROWS = int(os.environ.get("MLX2_MAXWELL_MHC_KERNEL_MAX_ROWS", "16
 HEAD_MODE = os.environ.get("MLX2_MAXWELL_HEAD", "bf16")
 INDEX_KERNEL = os.environ.get("MLX2_MAXWELL_INDEX_KERNEL", "0") == "1"
 FUSED_QKV = os.environ.get("MLX2_MAXWELL_FUSED_QKV", "0") == "1"
+CANONICAL_PICK = os.environ.get("MLX2_MAXWELL_CANONICAL_PICK", "0") == "1"
 if HEAD_MODE not in ("fp32", "bf16"):
     raise ValueError("MLX2_MAXWELL_HEAD must be fp32 or bf16")
 
@@ -135,7 +142,8 @@ def _kernel_call(key, fn, *args, **kwargs):
 
 def maxwell_stats(reset: bool = False) -> dict:
     out = dict(STATS, levers={"compile": COMPILE_SPANS, "mhc_kernel": MHC_KERNEL, "head": HEAD_MODE,
-                              "fused_qkv": FUSED_QKV, "index_kernel": INDEX_KERNEL, "gather_rows": SPARSE_GATHER_ROWS,
+                              "fused_qkv": FUSED_QKV, "index_kernel": INDEX_KERNEL,
+                              "canonical_pick": CANONICAL_PICK, "gather_rows": SPARSE_GATHER_ROWS,
                               "sparse_prefill": SPARSE_PREFILL})
     if reset:
         for k in STATS:
@@ -527,15 +535,35 @@ class Attention(nn.Module):
         fixed = lambda a: mx.broadcast_to(a.astype(mx.int32)[None, None], (1, groups, t, a.shape[-1]))
         return mx.concatenate([fixed(prefix), remote, fixed(local)], axis=-1)
 
-    def _pick(self, scores, local_start, nb):
+    def _pick(self, scores, local_start, nb, canonical=None):
         """Top remote blocks from block scores ``[1, G, t, nb]``: eligible blocks only, -1 pads."""
         blk = mx.arange(nb)
         eligible = (blk[None, :] >= self.n_prefix) & (blk[None, :] < local_start[:, None])
         scores = mx.where(eligible[None, None], scores, -mx.inf)
         kk = min(self.n_remote, nb)
-        idx = mx.argpartition(-scores, kth=kk - 1, axis=-1)[..., :kk].astype(mx.int32)
-        val = mx.take_along_axis(scores, idx, axis=-1)
-        idx = mx.where(mx.isfinite(val), idx, -1)
+        if canonical is None:
+            canonical = CANONICAL_PICK
+        if not canonical:
+            idx = mx.argpartition(-scores, kth=kk - 1, axis=-1)[..., :kk].astype(mx.int32)
+            val = mx.take_along_axis(scores, idx, axis=-1)
+            idx = mx.where(mx.isfinite(val), idx, -1)
+            if kk < self.n_remote:
+                idx = mx.concatenate([idx, mx.full((*idx.shape[:-1], self.n_remote - kk), -1, mx.int32)], -1)
+            return idx
+        # Canonical selection (opt-in, MLX2_MAXWELL_CANONICAL_PICK): the top-kk set with ties at the threshold broken
+        # toward the lowest block id, returned in ascending block order.  An
+        # argpartition set and order depend on the kernel and the shape, so two
+        # numerically "exact" scorers (fp32 matmul, bf16 block kernel) could
+        # pick different tied blocks or gather the same blocks in a different
+        # summation order.  Same set as torch.topk whenever there is no tie.
+        kth = mx.sort(scores, axis=-1)[..., nb - kk: nb - kk + 1]          # kk-th largest
+        finite = mx.isfinite(scores)
+        above = (scores > kth) & finite
+        tied = (scores == kth) & finite
+        room = kk - above.sum(axis=-1, keepdims=True)
+        chosen = above | (tied & (mx.cumsum(tied.astype(mx.int32), axis=-1) <= room))
+        order = mx.argsort(mx.where(chosen, blk, nb + blk), axis=-1)[..., :kk].astype(mx.int32)
+        idx = mx.where(mx.take_along_axis(chosen, order, axis=-1), order, -1)
         if kk < self.n_remote:
             idx = mx.concatenate([idx, mx.full((*idx.shape[:-1], self.n_remote - kk), -1, mx.int32)], -1)
         return idx

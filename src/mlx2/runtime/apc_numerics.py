@@ -79,6 +79,8 @@ CANDIDATE_ENV = {
     "MLX2_MAXWELL_FUSED_QKV": "flag",
     # bf16 indexer-key plane (cached state dtype) with kernel block scores.
     "MLX2_MAXWELL_INDEX_KERNEL": "flag",
+    # Remote-block tie choice and gather order (changes which K/V is read).
+    "MLX2_MAXWELL_CANONICAL_PICK": "flag",
     "MLX2_MAXWELL_SPARSE_PREFILL": "default=union",
     "MLX2_MAXWELL_SPARSE_GATHER_ROWS": "default=16",
     "MLX2_MAXWELL_UNION_QUERY_CHUNK": "default=64",

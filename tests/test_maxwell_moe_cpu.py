@@ -713,3 +713,41 @@ def test_window_deadline_records_incomplete_without_starting_model(tmp_path, mon
     args.reference_model = tmp_path / "different"
     with pytest.raises(SystemExit, match="cannot resume"):
         window.window(args)
+
+
+def test_remote_pick_is_canonical_lowest_index_ties_ascending():
+    from mlx2.runtime.models import maxwell_moe as M
+
+    attn = M.Attention(ModelArgs.from_dict(TINY), sparse=True)
+    attn.n_prefix, attn.n_remote = 1, 3
+    nb = 9
+
+    # Row 0: no ties; row 1: a four-way tie for the last two slots; row 2: only two eligible.
+    scores = mx.array([[[[0, 5, 1, 7, 3, 6, 0, 0, 0],
+                         [0, 4, 9, 2, 2, 2, 2, 0, 0],
+                         [0, 1, 3, 0, 0, 0, 0, 0, 0]]]], dtype=mx.float32)
+    local_start = mx.array([9, 9, 3])
+    got = np.array(attn._pick(scores, local_start, nb, canonical=True))[0, 0]
+    np.testing.assert_array_equal(got[0], [1, 3, 5])
+    np.testing.assert_array_equal(got[1], [1, 2, 3])          # 9, 4, then the lowest-id 2 among blocks 3..6
+    np.testing.assert_array_equal(got[2], [1, 2, -1])         # blocks >= local start are ineligible
+    # Same set as an argpartition top-k whenever there is no tie.
+    rng = np.random.default_rng(0)
+    s = mx.array(rng.standard_normal((1, 2, 5, 40)).astype(np.float32))
+    attn.n_remote = 6
+    ls = mx.array([40, 40, 30, 20, 10])
+    got = np.array(attn._pick(s, ls, 40, canonical=True))
+    blk = np.arange(40)
+    for g in range(2):
+        for r in range(5):
+            elig = (blk >= attn.n_prefix) & (blk < int(ls[r]))
+            want = sorted(blk[elig][np.argsort(-np.array(s)[0, g, r][elig])[:6]])
+            want += [-1] * (6 - len(want))
+            assert list(got[0, g, r]) == want
+    # Default (flag off) keeps the argpartition pick: same set, any order.
+    assert M.CANONICAL_PICK is False
+    dflt = np.array(attn._pick(s, ls, 40))
+    for g in range(2):
+        for r in range(5):
+            assert sorted(dflt[0, g, r]) == sorted(got[0, g, r])
+
