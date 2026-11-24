@@ -711,6 +711,33 @@ _ROUND_TIMING_COUNTS = frozenset({
 
 # Diagnostic (default off): cProfile the executor's polls and dump the
 # cumulative stats to ``MLX2_EXTERNAL_ROUND_PROFILE`` every 200 polls.
+# Opt-in verify trace (diagnostics only; off by default, 2026-11-23 Hy4 DFly2 cold-replay drift): set
+# ``MLX2_EXTERNAL_VERIFY_TRACE=/path/trace.jsonl`` to write one JSON line per verified row of every verify forward:
+# the lane's verify inputs (anchor + drafted tokens), the row's target-logit sha256 (float32 bytes), its per-position
+# argmax and top-2 margin. With the variable unset every hook is one module-attribute check.
+_VERIFY_TRACE_PATH = os.environ.get("MLX2_EXTERNAL_VERIFY_TRACE") or None
+_VERIFY_TRACE_STATE = {"forward": 0, "handle": None}
+
+
+def _verify_trace(row, lane, inputs, logits, *, parents=None, kind="chain"):
+    import numpy as np
+
+    st = _VERIFY_TRACE_STATE
+    if st["handle"] is None:
+        st["handle"] = open(_VERIFY_TRACE_PATH, "a", buffering=1)
+    import mlx.core as mx
+
+    rows = logits[row][: len(inputs)].astype(mx.float32)
+    a = np.array(rows)
+    top2 = np.sort(a, axis=-1)[:, -2:]
+    st["handle"].write(json.dumps({
+        "forward": st["forward"], "kind": kind, "row": row, "lane": str(getattr(lane, "uid", "")),
+        "parents": None if parents is None else [int(p) for p in parents],
+        "inputs": [int(t) for t in inputs], "logits_sha256": hashlib.sha256(a.tobytes()).hexdigest(),
+        "argmax": [int(x) for x in a.argmax(-1)], "margin": [round(float(m), 6) for m in (top2[:, 1] - top2[:, 0])],
+        "shape": list(logits.shape)}) + "\n")
+
+
 _PROFILE_PATH = os.environ.get("MLX2_EXTERNAL_ROUND_PROFILE") or None
 _PROFILE = None
 _PROFILE_POLLS = 0
@@ -8161,6 +8188,8 @@ class ExternalDraftBatchGenerator:
     def _verify(self, cohort, blocks, logits):
         """Accept phase over the target logits of one verify forward."""
         vocab = int(logits.shape[-1])
+        if _VERIFY_TRACE_PATH is not None:
+            _VERIFY_TRACE_STATE["forward"] += 1
         decisions = []
         batched = bool(getattr(self, "batched_sampled_laws", False))
 
@@ -8198,6 +8227,8 @@ class ExternalDraftBatchGenerator:
                 rows_info[row] if batched else prepare(row, lane)
             )
             inputs = [lane.anchor] + drafts
+            if _VERIFY_TRACE_PATH is not None:
+                _verify_trace(row, lane, inputs, logits)
             targets, reachable = [], True
             response_rows = [] if lane.sampling.get("emit_logprobs", True) else None
             count = len(drafts)
@@ -14111,6 +14142,10 @@ class ExternalDraftBatchGenerator:
             logits, features, transaction = self._target_tree_forward_many(
                 cohort, inputs, parents
             )
+            if _VERIFY_TRACE_PATH is not None:
+                _VERIFY_TRACE_STATE["forward"] += 1
+                for row, lane in enumerate(cohort):
+                    _verify_trace(row, lane, inputs[row], logits, parents=parents[row], kind="tree")
             if phase is not None:
                 phase("tree_target_forward_build")
             batched = [
