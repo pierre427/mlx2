@@ -292,6 +292,18 @@ def _messages(request):
 
 class MaxwellMoeAdapter:
     default_route = "ordinary"
+    # When native MTP is selected, it runs only while one lane decodes; the
+    # cohort hands off to the ordinary batcher as soon as a second lane is
+    # live.  At width 4 (3K/6K cells, Maxwell-V1-Flash@sha256:6618b917..., mlx2
+    # 969899410) MTP d2 gave 0.51x/0.68x the aggregate decode of the same
+    # levers without MTP (qualification/runs/maxwell-qkv-w4-quick-969899410;
+    # Pierre 2026-11-24: MTP at batch 1 only).
+    default_mtp_ordinary_handoff_max_width = 1
+    # Policy keys an operator environment variable overrides (best-route
+    # defaults drop a defaulted key whose variable is set; see
+    # runtime.models.maxwell_moe.apply_policy_levers).
+    policy_env_overrides = {"index_kernel": "MLX2_MAXWELL_INDEX_KERNEL",
+                            "sparse_prefill": "MLX2_MAXWELL_SPARSE_PREFILL"}
     prompt_lookup_default = False
     descriptor = DESCRIPTOR
     artifact_inspector = staticmethod(inspect_artifact)
@@ -309,8 +321,8 @@ class MaxwellMoeAdapter:
         if execution_policy is not None and not isinstance(execution_policy, dict):
             raise ValueError("Maxwell execution policy must be a JSON object")
         policy = dict(execution_policy or {})
-        if set(policy) - {"num_draft"}:
-            raise ValueError("Maxwell execution policy supports only num_draft")
+        if set(policy) - {"num_draft", "index_kernel", "sparse_prefill"}:
+            raise ValueError("Maxwell execution policy supports only num_draft, index_kernel and sparse_prefill")
         self._num_draft = validate_self_mtp_num_draft(policy.get("num_draft", self.DEFAULT_NUM_DRAFT))
         artifact = inspect_artifact(model_path)
         has_mtp = bool(artifact.get("has_mtp", False))
@@ -330,6 +342,12 @@ class MaxwellMoeAdapter:
         self.environment = {"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1", **PROCESS_NUMERICS}
         os.environ.update(self.environment)
         assert_process_profile_applied("the Maxwell profile")
+        # The single-lane best-route default carries the index-kernel and
+        # masked-prefill levers as policy keys; an operator's env var wins.
+        from ..runtime.models import maxwell_moe as M
+
+        self.policy_levers = M.apply_policy_levers(index_kernel=policy.get("index_kernel"),
+                                                   sparse_prefill=policy.get("sparse_prefill"))
         from .process_globals import claim_stock_moe
 
         claim_stock_moe(self, "the Maxwell adapter")
@@ -521,6 +539,7 @@ class MaxwellMoeAdapter:
             "mtp_head_present": Capability.MTP in self.descriptor.capabilities,
             "num_draft": getattr(self, "_num_draft", None),
             "maxwell_attention": maxwell_stats(),
+            "policy_levers": dict(getattr(self, "policy_levers", {}) or {}),
             "target_forward_observed": getattr(getattr(self, "model", None), "completed_forwards", 0) > 0,
             "capability_receipts": self.capability_receipts(),
         }

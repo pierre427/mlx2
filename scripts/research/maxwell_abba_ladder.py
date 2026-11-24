@@ -285,6 +285,12 @@ def attribute(segments):
             ratio = {m: round(mean(r.get(m) for r in c["requests"]) / mean(r.get(m) for r in base["requests"]), 3)
                      if mean(r.get(m) for r in base["requests"]) and mean(r.get(m) for r in c["requests"]) else None
                      for m in ("decode_tok_s", "ttft_s")}
+            # At width > 1 the per-stream decode mean is not throughput: an arm
+            # that admits lanes one at a time decodes each stream beside more
+            # others and shows lower per-stream rates at the same wall clock.
+            # Compare the cell's generated tokens over its wall time instead.
+            ratio["aggregate_tok_s"] = (round(c["aggregate_tok_s"] / base["aggregate_tok_s"], 3)
+                                        if c.get("aggregate_tok_s") and base.get("aggregate_tok_s") else None)
             rows.append({"segment": seg["segment"], "arm": seg["arm"], "cell": c["cell"], "width": c["width"],
                          "vs_A": [classify(x, y) for x, y in zip(base["requests"], c["requests"])],
                          "ratio_vs_A": ratio})

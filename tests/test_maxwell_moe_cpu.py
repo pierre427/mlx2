@@ -937,3 +937,24 @@ def test_row_exact_head_verdict_lives_on_the_head_and_tracks_the_kernel_switch(m
     monkeypatch.setattr(M, "_KERNEL_DISABLED", {"head_gemv"})
     model.mtp_verify_logits(hidden)
     assert len(verdicts) == 2                               # a new verdict once the head kernel is off
+
+
+def test_native_mtp_hands_off_to_ordinary_above_one_lane():
+    from mlx2.adapters.registry import AdapterResolution
+    from mlx2.server import RouteSelection, resolve_execution_policy_defaults
+
+    with_mtp = AdapterResolution(A.MaxwellMoeAdapter, A.descriptor_for(has_mtp=True), {"fingerprint": "fixture"})
+    assert with_mtp.default_mtp_ordinary_handoff == {"enabled": True, "max_mtp_width": 1}
+    without = AdapterResolution(A.MaxwellMoeAdapter, A.descriptor_for(has_mtp=False), {"fingerprint": "fixture"})
+    assert without.default_mtp_ordinary_handoff is None
+    mtp, ordinary = RouteSelection("native_mtp", "cli"), RouteSelection("ordinary", "adapter_default")
+    assert resolve_execution_policy_defaults(None, mtp, with_mtp, max_lanes=4)["mtp_ordinary_handoff"] == {
+        "enabled": True, "max_mtp_width": 1}
+    skipped = {}
+    assert "mtp_ordinary_handoff" not in resolve_execution_policy_defaults(None, mtp, with_mtp, max_lanes=1,
+                                                                           skipped=skipped)
+    assert "cannot engage" in skipped["mtp_ordinary_handoff"]
+    assert "mtp_ordinary_handoff" not in (resolve_execution_policy_defaults(None, ordinary, with_mtp, max_lanes=4) or {})
+    # An operator's explicit policy still wins.
+    assert resolve_execution_policy_defaults({"mtp_ordinary_handoff": None}, mtp, with_mtp,
+                                             max_lanes=4)["mtp_ordinary_handoff"] is None

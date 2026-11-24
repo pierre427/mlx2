@@ -109,6 +109,41 @@ MHC_KERNEL_MAX_ROWS = int(os.environ.get("MLX2_MAXWELL_MHC_KERNEL_MAX_ROWS", "16
 HEAD_MODE = os.environ.get("MLX2_MAXWELL_HEAD", "bf16")
 INDEX_KERNEL = os.environ.get("MLX2_MAXWELL_INDEX_KERNEL", "0") == "1"
 FUSED_QKV = os.environ.get("MLX2_MAXWELL_FUSED_QKV", "0") == "1"
+
+
+def apply_policy_levers(*, index_kernel=None, sparse_prefill=None) -> dict:
+    """Set the index-kernel and long-chunk-prefill levers from an execution policy.
+
+    A route default (the single-lane best-route entry) carries these as policy
+    keys.  An operator's environment variable always wins: a lever whose
+    variable is set (non-empty) is left alone and reported as ``"environment"``.  An
+    applied lever is also written to the process environment, so the APCv2
+    execution-numerics identity (read from it after the adapter loads) binds
+    the value the model actually runs.
+    """
+    global INDEX_KERNEL, SPARSE_PREFILL
+    applied = {}
+    if index_kernel is not None:
+        if type(index_kernel) is not bool:
+            raise ValueError("Maxwell index_kernel policy must be true or false")
+        if os.environ.get("MLX2_MAXWELL_INDEX_KERNEL"):
+            applied["index_kernel"] = "environment"
+        else:
+            INDEX_KERNEL = index_kernel
+            os.environ["MLX2_MAXWELL_INDEX_KERNEL"] = "1" if index_kernel else "0"
+            applied["index_kernel"] = "policy"
+    if sparse_prefill is not None:
+        if sparse_prefill not in ("union", "masked"):
+            raise ValueError("Maxwell sparse_prefill policy must be union or masked")
+        if os.environ.get("MLX2_MAXWELL_SPARSE_PREFILL"):
+            applied["sparse_prefill"] = "environment"
+        else:
+            SPARSE_PREFILL = sparse_prefill
+            os.environ["MLX2_MAXWELL_SPARSE_PREFILL"] = sparse_prefill
+            applied["sparse_prefill"] = "policy"
+    return applied
+
+
 # Up to this many rows a multi-row call of the fused table runs each row with
 # its one-row law (canary-gated matvec strips; see Attention._linears).
 FUSED_QKV_EXACT_ROWS = 16

@@ -1087,6 +1087,37 @@
     "source_revision": "ec946f453b56bcd899f5771f5bceb621e28faa51",
     "decision_row": true
    }
+  },
+  {
+   "checkpoint": "Maxwell-V1-Flash@sha256:6618b91785140c136ba618a910e4e1a439f2ef9f61622a1d3140bb0683a0a294",
+   "fingerprint": "6618b91785140c136ba618a910e4e1a439f2ef9f61622a1d3140bb0683a0a294",
+   "adapter": "MaxwellMoeAdapter",
+   "status": "selected_unqualified",
+   "default": {
+    "name": "native_mtp",
+    "kind": "native_mtp",
+    "max_lanes": 1,
+    "execution_policy": {
+     "num_draft": 2,
+     "index_kernel": true,
+     "sparse_prefill": "masked"
+    }
+   },
+   "fallback": [
+    {
+     "name": "adapter_default",
+     "kind": "adapter_default"
+    }
+   ],
+   "reason": "decision row from another lane: Operator decision: Pierre 2026-11-24 13:45 (\"Yes, single-lane only\", relayed by the orchestration session): single-lane serving defaults to native MTP depth 2 + index kernel + masked prefill, no fused QKV; --max-lanes > 1 keeps the ordinary default (A); an operator route flag, policy or env var still wins. Evidence: ABBA width 1 decode 1.11-1.26x and TTFT 0.70-0.78x of A, near ties or exact, A-vs-A exact (809ceadb6); width 4 wall-clock throughput 1.02x/1.14x but 5 unclassified rows (1656af87b, corrected 913f8363e). Open: classify the 5 width-4 rows; no-MTP levers above one lane. Unqualified. R",
+   "evidence": {
+    "files": [
+     "qualification/runs/maxwell-candidate-abba-candw1-cc7049fcf",
+     "qualification/runs/maxwell-candidate-abba-candw4-cc7049fcf"
+    ],
+    "source_revision": "cc7049fcf8d9cff0e323ee7ee840051eabb4c5d9",
+    "decision_row": true
+   }
   }
  ]
 }

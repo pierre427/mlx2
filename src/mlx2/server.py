@@ -7709,7 +7709,7 @@ def apply_best_route_default(args, adapter_resolution, *, table=None, streaming=
         **({} if policy is ... else {"policy": policy}),
     )
     log = logging.getLogger("mlx2.server")
-    if record.get("status") in ("explicit_route", "opted_out", "not_applicable"):
+    if record.get("status") in ("explicit_route", "opted_out", "not_applicable", "width_keyed_adapter_default"):
         log.info("best-route default not applied (%s): %s",
                  record["status"], record.get("reason"))
     if record.get("applied"):
@@ -7719,7 +7719,7 @@ def apply_best_route_default(args, adapter_resolution, *, table=None, streaming=
             record.get("default"), record.get("checkpoint"), record.get("reason"),
             f"; paired drafter {drafter.get('identity')}" if drafter else "",
         )
-    elif record.get("failover"):
+    elif record.get("failover") and record.get("status") != "width_keyed_adapter_default":
         log.warning("best-route default not applied: %s", record["failover"])
     return record
 

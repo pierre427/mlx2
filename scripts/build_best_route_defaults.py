@@ -446,6 +446,11 @@ def lane_rows() -> tuple[list[dict], list[dict]]:
             continue
         spec = {"name": route["kind"] if route["kind"] != "ast" else f"ast_{route['drafter'] or 'auto'}",
                 "kind": route["kind"]}
+        # Optional width key: ``Max-lanes: N`` selects the route only when the
+        # server serves at most N lanes; wider servers keep the adapter default.
+        width = re.search(r"Max-lanes: (\d+)", row.get("reason", ""))
+        if width:
+            spec["max_lanes"] = int(width.group(1))
         # Optional JSON suffix keeps the exact profile in the durable decision
         # row rather than depending on a mutable external policy file.
         if "Execution-policy:" in row.get("reason", ""):
@@ -479,6 +484,7 @@ def lane_rows() -> tuple[list[dict], list[dict]]:
         entry = {
             "checkpoint": checkpoint_id, "fingerprint": fingerprint, "adapter": adapter["adapter"],
             "status": "selected_unqualified", "default": spec,
+            **({"fallback": [{"name": "adapter_default", "kind": "adapter_default"}]} if "max_lanes" in spec else {}),
             "reason": f"decision row from another lane: {row.get('reason', '')[:600]}",
             "evidence": {"files": [f for f in row.get("evidence", "").split(";") if f][:8] or [str(DECISIONS.relative_to(ROOT))],
                          "source_revision": row.get("source_revision") or "unknown",
@@ -580,6 +586,8 @@ def route_text(spec: dict) -> str:
             "ordinary": "`--ordinary`"}[kind] + (f" drafter={drafter}" if drafter else "")
     if spec.get("execution_policy"):
         text += f"; policy `{json.dumps(spec['execution_policy'], sort_keys=True)}`"
+    if "max_lanes" in spec:
+        text += f"; only at `--max-lanes` <= {spec['max_lanes']} (wider: adapter default)"
     return text
 
 

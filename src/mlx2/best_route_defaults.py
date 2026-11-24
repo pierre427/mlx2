@@ -227,6 +227,15 @@ def validate_entry(entry: dict) -> None:
                 not isinstance(key, str) for key in spec["execution_policy"]
             ):
                 raise ValueError("best-route execution policy must be an object with string keys")
+        if "max_lanes" in spec:
+            # A width-keyed route: it applies only when the server serves at
+            # most this many lanes; wider servers fall through to the next
+            # spec (e.g. a default measured to win single-lane only).
+            width = spec["max_lanes"]
+            if type(width) is not int or width < 1:
+                raise ValueError("best-route max_lanes must be a positive integer")
+            if spec["kind"] == "adapter_default":
+                raise ValueError("the adapter_default fallback cannot be width-keyed")
         drafter = spec.get("drafter")
         if isinstance(drafter, dict):
             if spec["kind"] != "ast":
@@ -344,13 +353,33 @@ def _record(table: dict | None, status: str, **fields) -> dict:
     return record
 
 
+class WidthKeyedSkip(LookupError):
+    """A width-keyed route does not apply at this server's ``--max-lanes``."""
+
+
 def _apply_spec(args, spec: dict, adapter_resolution, drafters_cache: dict, roots, include_hf) -> dict:
     """Apply one route spec to ``args``; raise ``LookupError`` to fail over."""
     from .contracts import Capability
 
     kind = spec["kind"]
     capabilities = adapter_resolution.descriptor.capabilities
+    if "max_lanes" in spec:
+        lanes = getattr(args, "max_lanes", None)
+        if lanes is None or int(lanes) > spec["max_lanes"]:
+            raise WidthKeyedSkip(
+                f"serving width --max-lanes {lanes} exceeds this route's max_lanes "
+                f"{spec['max_lanes']} (measured best only up to that width)"
+            )
     applied: dict = {"name": spec.get("name", kind), "kind": kind}
+    if "max_lanes" in spec:
+        applied["max_lanes"] = spec["max_lanes"]
+    overrides = vars(adapter_resolution.adapter_type).get("policy_env_overrides")
+    if overrides and "execution_policy" in spec:
+        # Adapter-declared policy keys an operator environment variable
+        # overrides; finish_best_route_default drops a defaulted key whose
+        # variable is set, so receipts never advertise a value not running.
+        applied["env_overrides"] = {key: var for key, var in overrides.items()
+                                    if key in spec["execution_policy"]}
     if "execution_policy" in spec:
         applied["execution_policy"] = dict(spec["execution_policy"])
     if kind == "adapter_default":
@@ -494,11 +523,23 @@ def resolve_best_route_default(
             for name, value in before.items():
                 setattr(args, name, value)
             item = {"route": spec.get("name", spec["kind"]), "reason": str(error)}
+            if isinstance(error, WidthKeyedSkip):
+                item["width_keyed"] = True
             if getattr(error, "refusals", None):
                 item["refused_drafters"] = error.refusals
             failover.append(item)
             continue
         primary = spec is entry["default"]
+        if (not primary and spec["kind"] == "adapter_default" and failover
+                and all(item.get("width_keyed") for item in failover)):
+            # Not a failure: the measured route is keyed to narrower serving,
+            # so today's adapter default serves this width by design.
+            record = _record(
+                table, "width_keyed_adapter_default", applied=False,
+                failover=failover, **{**common, "reason": "; ".join(item["reason"] for item in failover)},
+            )
+            args.route_default_selection = record
+            return record
         record = _record(
             table,
             "selected_unqualified" if primary else "failed_over_unqualified",
@@ -540,6 +581,16 @@ def finish_best_route_default(args, policy):
         # TensorFold/fused projection policy; the engine would refuse to start.
         record["execution_policy_defaults_skipped"] = owners
         defaults = None
+    if defaults:
+        import os
+
+        kept = {key: var for key, var in (record["route"].get("env_overrides") or {}).items()
+                if key in defaults and os.environ.get(var)}
+        if kept:
+            # The operator's environment variable owns these levers.
+            defaults = {key: value for key, value in defaults.items() if key not in kept}
+            record["route"]["execution_policy"] = dict(defaults)
+            record["execution_policy_env_kept"] = kept
     if defaults:
         # Explicit values (including False and None) always win. The normal
         # adapter validation and cache-identity construction see this policy.
@@ -585,4 +636,6 @@ def receipt_view(record: dict | None) -> dict | None:
         view["execution_policy_defaults_skipped"] = list(skipped)
     elif policy is not None:
         view["execution_policy"] = dict(policy)
+    if record.get("execution_policy_env_kept"):
+        view["execution_policy_env_kept"] = dict(record["execution_policy_env_kept"])
     return view

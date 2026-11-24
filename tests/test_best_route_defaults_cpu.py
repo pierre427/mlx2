@@ -798,3 +798,111 @@ def test_draft_policy_refusal_names_the_flags_to_pass():
     assert "requires --external-draft" in message
     assert "pass --external-draft" in message and "--ast" in message
     assert "--ast-drafter" in message
+
+
+# ------------------------------------------- width-keyed (Maxwell, 2026-11-24) --
+
+MAXWELL_FP = "6618b91785140c136ba618a910e4e1a439f2ef9f61622a1d3140bb0683a0a294"
+
+
+def _maxwell_resolution():
+    from mlx2.adapters.maxwell_moe import MaxwellMoeAdapter, descriptor_for
+    return AdapterResolution(MaxwellMoeAdapter, descriptor_for(has_mtp=True),
+                             {"identity": {"fingerprint": MAXWELL_FP}, "has_mtp": True})
+
+
+@pytest.mark.parametrize("lanes", [1, 4])
+def test_maxwell_single_lane_default_is_keyed_on_serving_width(lanes, monkeypatch):
+    monkeypatch.delenv("MLX2_MAXWELL_INDEX_KERNEL", raising=False)
+    monkeypatch.delenv("MLX2_MAXWELL_SPARSE_PREFILL", raising=False)
+    # Pierre 2026-11-24: the candidate (native MTP d2 + index kernel + masked
+    # prefill, no fused QKV) is the no-flag default only at --max-lanes 1.
+    args = _args(max_lanes=lanes)
+    record = apply_best_route_default(args, _maxwell_resolution(), table=brd.load_table())
+    policy = brd.finish_best_route_default(args, None)
+    assert record["qualification"] == "unqualified"
+    if lanes == 1:
+        assert record["applied"]
+        assert record["status"] == "selected_unqualified" and record["default"] == "native_mtp"
+        assert record["route"]["max_lanes"] == 1
+        assert args.native_mtp
+        assert policy == {"num_draft": 2, "index_kernel": True, "sparse_prefill": "masked"}
+        assert resolve_route_selection(args, policy, _maxwell_resolution()).route == "native_mtp"
+    else:
+        assert record["status"] == "width_keyed_adapter_default" and not record["applied"]
+        assert "--max-lanes 4 exceeds" in record["reason"]
+        assert "--max-lanes 4 exceeds" in brd.receipt_view(record)["reason"]
+        assert not args.native_mtp and policy is None
+        selection = resolve_route_selection(args, policy, _maxwell_resolution())
+        assert selection.route == "ordinary" and selection.source == "adapter_default"
+
+
+def test_maxwell_single_lane_default_yields_to_an_explicit_route():
+    args = _args(max_lanes=1, ordinary=True)
+    record = apply_best_route_default(args, _maxwell_resolution(), table=brd.load_table())
+    assert record["status"] == "explicit_route" and not record.get("applied")
+
+
+def test_width_keyed_spec_validation():
+    entry = _entry({"kind": "native_mtp", "max_lanes": 0})
+    with pytest.raises(ValueError, match="max_lanes"):
+        brd.validate_entry(entry)
+    with pytest.raises(ValueError, match="width-keyed"):
+        brd.validate_entry(_entry({"kind": "native_mtp", "max_lanes": 1},
+                                  fallback=[{"kind": "adapter_default", "max_lanes": 1}]))
+
+
+def test_maxwell_policy_levers_apply_unless_the_operator_set_the_env(monkeypatch):
+    from mlx2.runtime.models import maxwell_moe as M
+    monkeypatch.delenv("MLX2_MAXWELL_INDEX_KERNEL", raising=False)
+    monkeypatch.setenv("MLX2_MAXWELL_SPARSE_PREFILL", "union")
+    monkeypatch.setattr(M, "INDEX_KERNEL", False)
+    monkeypatch.setattr(M, "SPARSE_PREFILL", "union")
+    applied = M.apply_policy_levers(index_kernel=True, sparse_prefill="masked")
+    assert applied == {"index_kernel": "policy", "sparse_prefill": "environment"}
+    assert M.INDEX_KERNEL is True and M.SPARSE_PREFILL == "union"
+    import os
+    assert os.environ["MLX2_MAXWELL_INDEX_KERNEL"] == "1"    # the APCv2 numerics identity sees it
+    assert M.maxwell_stats()["levers"]["index_kernel"] is True
+    with pytest.raises(ValueError):
+        M.apply_policy_levers(sparse_prefill="dense")
+    assert M.apply_policy_levers() == {}
+
+
+def test_maxwell_width_key_boundary_and_unknown_width():
+    for lanes, applies in ((1, True), (2, False), (None, False)):
+        args = _args(max_lanes=lanes)
+        record = apply_best_route_default(args, _maxwell_resolution(), table=brd.load_table())
+        assert bool(args.native_mtp) is applies, lanes
+        assert record["status"] == ("selected_unqualified" if applies else "width_keyed_adapter_default")
+
+
+def test_maxwell_env_owned_lever_is_dropped_from_the_default_and_the_receipt(monkeypatch):
+    monkeypatch.setenv("MLX2_MAXWELL_SPARSE_PREFILL", "union")
+    monkeypatch.setenv("MLX2_MAXWELL_INDEX_KERNEL", "")          # empty: not operator intent
+    args = _args(max_lanes=1)
+    record = apply_best_route_default(args, _maxwell_resolution(), table=brd.load_table())
+    policy = brd.finish_best_route_default(args, None)
+    assert policy == {"num_draft": 2, "index_kernel": True}
+    view = brd.receipt_view(record)
+    assert view["execution_policy"] == {"num_draft": 2, "index_kernel": True}
+    assert view["execution_policy_env_kept"] == {"sparse_prefill": "MLX2_MAXWELL_SPARSE_PREFILL"}
+
+
+def test_builder_parses_max_lanes_and_emits_the_adapter_fallback(tmp_path, monkeypatch):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("brd_builder", ROOT / "scripts/build_best_route_defaults.py")
+    builder = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(builder)
+    header = (ROOT / "docs/research/model-feature-decisions.tsv").read_text().splitlines()[0]
+    row = ["maxwell_moe:base", f"Fixture@sha256:{MAXWELL_FP}", "feature", "best_route_default", "yes", "no",
+           "yes_default", "no", "x",
+           'Operator decision: fixture. Route: native_mtp adapter=MaxwellMoeAdapter Max-lanes: 1 '
+           'Execution-policy: {"num_draft": 2}', "qualification/runs/x", "abc", "bf16"]
+    path = tmp_path / "decisions.tsv"
+    path.write_text(header + "\n" + "\t".join(row) + "\n")
+    monkeypatch.setattr(builder, "DECISIONS", path)
+    entries, skipped = builder.lane_rows()
+    assert not skipped and entries[0]["default"]["max_lanes"] == 1
+    assert entries[0]["fallback"] == [{"name": "adapter_default", "kind": "adapter_default"}]
+    assert "only at `--max-lanes` <= 1" in builder.route_text(entries[0]["default"])
