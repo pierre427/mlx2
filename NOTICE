@@ -1531,3 +1531,11 @@ from MTPLX. All are original mlx2 code; no MTPLX source file was copied.
   probation/backoff rule over mlx2's own engine.
 The Apache-2.0 text is this repository's LICENSE. No Apple copyright header
 is added to mlx2 source files.
+
+Raon-1-mini (KRAFTON Inc., Apache-2.0): the mlx2 Raon-1-mini target
+(src/mlx2/runtime/models/raon1_mini.py, src/mlx2/adapters/raon1_mini*.py,
+src/mlx2/conversion/raon1_mini.py) is original mlx2 code written from the
+reference modeling_raon1_mini.py and, for the NVFP4 pack's global-scale
+conventions and the DFlash2 tap convention, from a clean-room functional
+specification of KRAFTON's Raon-1-mini-mlx runtime. No KRAFTON source file
+was copied.

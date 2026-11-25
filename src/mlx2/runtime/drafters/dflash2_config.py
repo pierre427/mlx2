@@ -81,6 +81,7 @@ class DFlash2Config(DFlashConfig):
             "conv_group_size",
             "selector_rank",
             "selector_top_k",
+            "target_streams_per_layer",
         )
         for key in positive_fields:
             value = getattr(self, key)
@@ -181,6 +182,7 @@ class DFlash2Config(DFlashConfig):
             "conv_group_size",
             "selector_rank",
             "selector_top_k",
+            "target_streams_per_layer",
         ):
             if key in dflash:
                 flat[key] = dflash[key]

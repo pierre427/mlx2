@@ -33,7 +33,7 @@ def _expected_weight_shapes(args):
     kv_heads = args.num_key_value_heads * args.head_dim
     groups = hidden // args.conv_group_size
     shapes = {
-        "fc.weight": [hidden, len(args.target_layer_ids) * hidden],
+        "fc.weight": [hidden, len(args.target_layer_ids) * hidden * args.target_streams_per_layer],
         "hidden_norm.weight": [hidden],
         "norm.weight": [hidden],
         "candidate_selector.hidden_projection.weight": [args.selector_rank, hidden],

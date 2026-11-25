@@ -282,6 +282,18 @@ def pair_drafter(
         record = module.inspect_drafter(dpath, tpath)
         pins["draft_revision"] = module.content_revision(record)
         policy.update(pins)
+    elif adapter == "RaonAdapter":
+        if archs != ["DFlash2DraftModel"]:
+            raise ValueError("Raon-1-mini accepts only its official DFlash2 drafter")
+        from . import dflash2, raon1_mini, raon1_mini_dflash2
+
+        target = raon1_mini.inspect_artifact(tpath)
+        record = raon1_mini_dflash2.inspect_drafter(
+            dpath, target_path=tpath, target_config=target["config"],
+            target_fingerprint=target["identity"]["fingerprint"])
+        # Identity only: the Raon external policy pins its drafter inside the
+        # adapter (config + weight sha256), so no revision keys are added.
+        pins["draft_revision"] = dflash2.content_revision(record)
     else:
         raise ValueError(f"{adapter} declares no external-draft route")
     identity = pins.get("draft_revision") or (record or {}).get("draft_revision") \

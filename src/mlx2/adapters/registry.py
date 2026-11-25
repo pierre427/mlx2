@@ -619,6 +619,12 @@ def _hysparse2(path: Path, config: dict) -> AdapterResolution:
     return AdapterResolution(module.HySparse2Adapter, module.DESCRIPTOR, artifact)
 
 
+def _raon1_mini(path: Path, config: dict) -> AdapterResolution:
+    module = importlib.import_module(".raon1_mini", __package__)
+    artifact = module.inspect_artifact(path)
+    return AdapterResolution(module.RaonAdapter, module.DESCRIPTOR, artifact)
+
+
 def _kimi_linear(path: Path, config: dict) -> AdapterResolution:
     module = importlib.import_module(".kimi_linear", __package__)
     artifact = module.inspect_artifact(path)
@@ -644,6 +650,7 @@ _RESOLVERS: dict[str, Callable[[Path, dict], AdapterResolution]] = {
     "kimi_k31": _kimi_k31,
     "ricursive": _ripple,
     "kimi_linear": _kimi_linear,
+    "raon1_mini": _raon1_mini,
     "bert": _minilm,
     "qwen4_exp": _flash_next,
     "qwen3_5": _qwen3_5_dense,

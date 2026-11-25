@@ -1148,6 +1148,43 @@
     "source_revision": "09e8df443",
     "decision_row": true
    }
+  },
+  {
+   "checkpoint": "Raon-1-mini-mlx@sha256:089f6390adb1c38bc64b4df2281b9c088a22c028208c558887f0148011c08c7b",
+   "fingerprint": "089f6390adb1c38bc64b4df2281b9c088a22c028208c558887f0148011c08c7b",
+   "adapter": "RaonAdapter",
+   "status": "pending",
+   "default": {
+    "name": "external_raon_dflash2_nd5",
+    "kind": "ast",
+    "max_lanes": 1,
+    "drafter": {
+     "name": "Raon-1-mini-dflash2",
+     "architectures": [
+      "DFlash2DraftModel"
+     ],
+     "identities": [
+      "61c18a66679a50bbb0a4cf66e78870fbbb96d87d560b8eb5a12bcd59b0a6036a"
+     ],
+     "config_sha256": [
+      "c18e57024746d4dc6e0521cb75ce98d6c64235e53037d05623102e89b25c8367"
+     ]
+    }
+   },
+   "fallback": [
+    {
+     "name": "adapter_default",
+     "kind": "adapter_default"
+    }
+   ],
+   "reason": "Pierre 2026-11-25: use the official DFlash2 drafter by default. GSM8K 30 q chat-fewshot greedy thinking off, one lane: ordinary 96.7 % 75.3 tok/s vs DFlash2 num_draft 5 (adapter default depth) 96.7 % 108.7 tok/s (+44 %, MAL 4.08, per-position 0.81/0.72/0.62/0.51/0.42). --ast on Raon (no tree tiles) lowers to the external DFlash2 chain. PENDING: 10/30 completions differ from ordinary token-for-token (all correct); first divergences not yet near-tie classified (AGENTS.md); flip status to selected_unqualified after scripts/raon1_mini_dflash2_divergence_20261125.sh classifies them. Measured at one lane only; wider servers keep the adapter default.",
+   "evidence": {
+    "files": [
+     "qualification/runs/raon1-mini-20261125/window-a11fe05e5/receipt.json",
+     "qualification/runs/raon1-mini-20261125/levers-dc587def2/gsm8k-receipt.json"
+    ],
+    "source_revision": "dc587def2"
+   }
   }
  ]
 }

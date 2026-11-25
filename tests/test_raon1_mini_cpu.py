@@ -1,0 +1,362 @@
+"""CPU checks for the Raon-1-mini runtime, conversion and DFlash2 binding.
+
+Tiny random configs only; no artifact and no GPU.  The full-size torch
+reference comparison lives in scripts/raon1_mini_reference_oracle.py.
+"""
+
+import json
+
+import mlx.core as mx
+import numpy as np
+import pytest
+from mlx.utils import tree_map
+
+
+@pytest.fixture(autouse=True)
+def _cpu_only():
+    previous = mx.default_device()
+    mx.set_default_device(mx.cpu)
+    try:
+        yield
+    finally:
+        mx.set_default_device(previous)
+
+
+def tiny_config(**overrides):
+    config = {
+        "model_type": "raon1_mini", "hidden_size": 64, "num_hidden_layers": 5, "num_attention_heads": 4,
+        "head_dim": 16, "vocab_size": 97, "tie_word_embeddings": False, "max_position_embeddings": 4096,
+        "rms_norm_eps": 1e-5, "activation_situ_beta": 4.0, "activation_situ_linear_beta": 25.0,
+        "intermediate_size": 96, "first_k_dense_replace": 1, "moe_layer_freq": 1, "num_experts": 8,
+        "num_experts_per_token": 2, "moe_intermediate_size": 32, "num_shared_experts": 1,
+        "moe_router_activation_func": "sigmoid", "moe_renormalize": True, "routed_scaling_factor": 1.0,
+        "q_lora_rank": 24, "kv_lora_rank": 32, "qk_nope_head_dim": 16, "qk_rope_head_dim": 8,
+        "v_head_dim": 16, "mla_use_nope": True, "mla_use_output_gate": True, "raon_mhc_streams": 4,
+        "reasoning_effort_steering": {"alpha": {"none": 0, "low": 0.3, "medium": 0.1, "high": 0.05,
+                                                "xhigh": 0.02, "max": 0},
+                                      "default": "high", "layers": [2, 4]},
+        "rda_config": {"num_heads": 4, "head_dim": 16, "conv_kernel_size": 4, "full_rank_gate": True,
+                       "gate_lower_bound": -5.0, "mla_layers": [4, 5], "rda_layers": [1, 2, 3]},
+        "rda_decay_rank": 8,
+    }
+    config.update(overrides)
+    return config
+
+
+def _model(seed=0, scale=0.25):
+    from mlx2.runtime.models import raon1_mini as R
+
+    model = R.Model(R.ModelArgs.from_dict(tiny_config()))
+    mx.random.seed(seed)
+    model.update(tree_map(lambda p: mx.random.normal(p.shape).astype(p.dtype) * scale, model.parameters()))
+    return model
+
+
+def test_layer_partition_is_one_based_and_steering_layers_carry_vectors():
+    model = _model()
+    kinds = [(layer.is_global, layer.is_moe, layer.steered) for layer in model.layers]
+    # rda_layers [1,2,3] (1-based) -> 0-based 0..2 RDA; mla_layers [4,5] -> 3, 4.
+    assert kinds == [(False, False, False), (False, True, False), (False, True, True),
+                     (True, True, False), (True, True, True)]
+
+
+def test_cached_decode_matches_full_forward():
+    model = _model()
+    tokens = mx.array([[3, 14, 15, 9, 26, 5, 35, 8, 9, 79]])
+    full = model(tokens)
+    cache = model.make_cache()
+    rows = [model(tokens[:, :6], cache)]
+    for i in range(6, tokens.shape[1]):
+        rows.append(model(tokens[:, i:i + 1], cache))
+    assert float(mx.abs(full - mx.concatenate(rows, 1)).max()) < 1e-5
+
+
+def test_taps_are_full_stream_residuals():
+    model = _model()
+    tokens = mx.array([[1, 2, 3, 4]])
+    logits, features = model.forward_with_taps(tokens, None, (1, 3))
+    assert features.shape == (1, 4, 2 * 4 * 64)
+    assert float(mx.abs(logits - model(tokens)).max()) == 0.0
+    with pytest.raises(ValueError):
+        model.forward_with_taps(tokens, None, (3, 1))
+
+
+def test_mhc_chart_rows_sum_to_one_and_stay_nonnegative():
+    from mlx2.runtime.models import raon1_mini as R
+
+    q = R.helmert_basis(4)
+    assert float(mx.abs(q.T @ q - mx.eye(3)).max()) < 1e-6
+    assert float(mx.abs(q.T @ mx.ones((4,))).max()) < 1e-6
+    model = _model(scale=1.0)
+    stream = mx.random.normal((2, 3, 4, 64)).astype(mx.float32)
+    _, post, res = model.layers[1].self_attn_raon_mhc.route(stream)
+    assert float(mx.abs(res.sum(-1) - 1.0).max()) < 1e-5
+    assert float(res.min()) >= -1e-6
+    assert float(post.max()) <= 2.0
+
+
+def test_effort_alpha_table():
+    model = _model()
+    assert model.effort_alpha(None) == 0.05
+    assert model.effort_alpha("none") == 0.1      # config none 0 -> no-thinking 0.1
+    assert model.effort_alpha("low") == 0.3
+    assert model.effort_alpha("max") == 0.0
+    with pytest.raises(ValueError):
+        model.effort_alpha("extreme")
+    assert model.set_reasoning_effort("none") == 0.1
+    assert all(layer.effort_alpha == 0.1 for layer in model.layers)
+
+
+def test_steering_changes_only_steered_layers():
+    model = _model()
+    tokens = mx.array([[5, 6, 7]])
+    model.set_reasoning_effort("max")
+    base = model(tokens)
+    model.set_reasoning_effort("low")
+    assert float(mx.abs(model(tokens) - base).max()) > 0
+    for layer in model.layers:
+        if layer.steered:
+            layer.moe.reasoning_effort_steering = mx.zeros_like(layer.moe.reasoning_effort_steering)
+    assert float(mx.abs(model(tokens) - base).max()) == 0.0
+
+
+def test_sanitize_splits_vendor_merged_conv_and_hf_convs():
+    model = _model()
+    merged = mx.arange(3 * 64 * 4, dtype=mx.float32).reshape(3 * 64, 4, 1)
+    out = model.sanitize({"model.layers.0.self_attn.qkv_conv1d.weight": merged,
+                          "model.layers.1.self_attn.q_conv1d.weight": mx.ones((64, 4))})
+    assert out["model.layers.0.self_attn.k_conv1d.conv.weight"].shape == (64, 4, 1)
+    assert float(out["model.layers.0.self_attn.v_conv1d.conv.weight"][0, 0, 0]) == 2 * 64 * 4
+    assert out["model.layers.1.self_attn.q_conv1d.conv.weight"].shape == (64, 4, 1)
+    with pytest.raises(ValueError, match="conversion"):
+        model.sanitize({"model.layers.1.moe.experts.0.gate_proj.weight": mx.zeros((2, 2))})
+
+
+def test_mxfp8_repack_is_byte_exact():
+    torch = pytest.importorskip("torch")
+    from mlx2.conversion.raon1_mini import pack_codes
+
+    torch.manual_seed(1)
+    weight = (torch.randn(8, 64) * 3).to(torch.float8_e4m3fn)
+    scale = torch.randint(118, 132, (8, 2), dtype=torch.uint8)
+    reference = (weight.float() * torch.exp2(scale.float() - 127).repeat_interleave(32, 1)).numpy()
+    codes = mx.array(weight.view(torch.uint8).numpy())
+    dequant = mx.dequantize(pack_codes(codes), mx.array(scale.numpy()), group_size=32, bits=8, mode="mxfp8",
+                             dtype=mx.float32)
+    assert np.array_equal(np.array(dequant), reference)
+
+
+def test_validate_config_refuses_unstaged_switches():
+    from mlx2.adapters import raon1_mini as A
+
+    with pytest.raises(ValueError, match="topology"):
+        A.validate_config({"model_type": "raon1_mini"})
+    with pytest.raises(ValueError):
+        A.parse_policy({"mla_flash": "all"})
+    with pytest.raises(ValueError):
+        A.parse_policy({"reasoning_effort": "extreme"})
+    assert A.parse_policy({})["mla"] == "auto"
+    assert A.parse_policy({})["merged_projections"] is True
+
+
+def test_registry_dispatches_raon():
+    from mlx2.adapters.registry import _RESOLVERS
+
+    assert "raon1_mini" in _RESOLVERS
+
+
+def test_dflash2_config_reads_stream_count_and_sizes_fc():
+    from mlx2.adapters.dflash2 import _expected_weight_shapes
+    from mlx2.runtime.drafters.dflash2_config import DFlash2Config
+
+    config = {
+        "architectures": ["DFlash2DraftModel"], "model_type": "qwen3", "hidden_size": 64,
+        "intermediate_size": 128, "num_hidden_layers": 2, "num_attention_heads": 4,
+        "num_key_value_heads": 1, "head_dim": 16, "vocab_size": 97, "max_position_embeddings": 4096,
+        "num_target_layers": 5, "rms_norm_eps": 1e-5, "hidden_act": "silu",
+        "layer_types": ["sliding_attention"] * 2, "sliding_window": 32,
+        "rope_parameters": {"rope_theta": 1e7, "rope_type": "default"}, "block_size": 8,
+        "dflash_config": {"block_size": 8, "causal": False, "conv_group_size": 16, "conv_kernel_size": 2,
+                          "mask_token_id": 96, "selector_rank": 8, "selector_top_k": 4,
+                          "target_layer_ids": [1, 3], "target_streams_per_layer": 4,
+                          "use_swa": True, "swa_window_size": 32},
+    }
+    args = DFlash2Config.from_dict(config)
+    assert args.target_streams_per_layer == 4
+    assert args.feature_width == 2 * 4 * 64
+    assert _expected_weight_shapes(args)["fc.weight"] == [64, 2 * 4 * 64]
+    single = DFlash2Config.from_dict({**config, "dflash_config": {
+        k: v for k, v in config["dflash_config"].items() if k != "target_streams_per_layer"}})
+    assert single.feature_width == 2 * 64
+    from mlx2.runtime.drafters.dflash2 import DFlash2DraftModel
+
+    assert DFlash2DraftModel(args).fc.weight.shape == (64, 2 * 4 * 64)
+
+
+def test_raon_dflash2_contract_refuses_single_stream_taps():
+    from mlx2.adapters.raon1_mini_dflash2 import _check_declared_contract
+
+    target = {"hidden_size": 2560, "vocab_size": 259840, "num_hidden_layers": 25}
+    good = {"architectures": ["DFlash2DraftModel"], "hidden_size": 2560, "vocab_size": 259840,
+            "num_target_layers": 25, "target_hidden_size": 10240,
+            "dflash_config": {"target_layer_ids": [1, 6, 11, 16, 21], "target_streams_per_layer": 4,
+                              "target_embedding_size": 2560, "target_feature_size": 51200}}
+    _check_declared_contract(good, target)
+    bad = json.loads(json.dumps(good))
+    bad["dflash_config"]["target_streams_per_layer"] = 1
+    with pytest.raises(ValueError, match="4 mHC streams"):
+        _check_declared_contract(bad, target)
+
+
+def test_merged_projections_match_parts():
+    from mlx2.adapters import raon1_mini as A
+
+    model = _model()
+    tokens = mx.array([[5, 6, 7, 8]])
+    model.configure(A.parse_policy({"merged_projections": False}))
+    cache = model.make_cache()
+    model(tokens, cache)
+    plain = model(mx.array([[9]]), cache)
+    model.configure(A.parse_policy({"merged_projections": True}))
+    cache = model.make_cache()
+    model(tokens, cache)
+    merged = model(mx.array([[9]]), cache)
+    assert model.layers[0].self_attn.calls["merged_projections"] > 0
+    assert float(mx.abs(plain - merged).max()) < 1e-5
+
+
+def test_rms_law_mlx_rounds_twice_and_fp32_matches_reference_rounding():
+    # PR sweep 2026-11-25 (vllm-project/vllm#64672 numerics note): the
+    # reference Raon1MiniRMSNorm multiplies the weight in fp32 and rounds once;
+    # mx.fast.rms_norm rounds the normalized row before the weight product.
+    from mlx2.runtime.models import raon1_mini as R
+
+    mx.random.seed(3)
+    x = (mx.random.normal((16, 256)) * 3).astype(mx.bfloat16)
+    norm = R.RaonRMSNorm(256, eps=1e-5)
+    norm.weight = (mx.random.normal((256,)) * 0.3 + 1).astype(mx.bfloat16)
+    x32 = x.astype(mx.float32)
+    normed = x32 * mx.rsqrt(mx.mean(x32 * x32, -1, keepdims=True) + 1e-5)
+    twice = normed.astype(mx.bfloat16) * norm.weight
+    once = (normed * norm.weight.astype(mx.float32)).astype(mx.bfloat16)
+    assert norm.law == "mlx"
+    assert mx.array_equal(norm(x), twice).item()
+    norm.law = "fp32"
+    out = norm(x)
+    assert out.dtype == mx.bfloat16
+    assert float(mx.abs(out.astype(mx.float32) - once.astype(mx.float32)).max()) == 0.0
+    assert not mx.array_equal(once, twice).item()   # the laws really differ in bf16
+
+
+def test_rms_law_policy_reaches_every_norm_and_defaults_to_mlx():
+    from mlx2.adapters import raon1_mini as A
+    from mlx2.runtime.models import raon1_mini as R
+
+    assert A.parse_policy()["rms_law"] == "mlx"
+    with pytest.raises(ValueError, match="rms_law"):
+        A.parse_policy({"rms_law": "fast"})
+    assert A.split_policy({"rms_law": "fp32", "draft_model": "x"}) == ({"rms_law": "fp32"}, {"draft_model": "x"})
+    model = _model()
+    norms = [m for _, m in model.named_modules() if isinstance(m, R.RaonRMSNorm)]
+    # 2 per layer + final + 2 latent norms per MLA layer (2 MLA layers).
+    assert len(norms) == 2 * 5 + 1 + 2 * 2
+    tokens = mx.array([[3, 14, 15, 9, 26]])
+    model.configure(A.parse_policy())
+    base = model(tokens)
+    model.configure(A.parse_policy({"rms_law": "fp32"}))
+    assert all(m.law == "fp32" for m in norms)
+    # In fp32 the laws coincide (CPU gather_mm is fp32-only, so the bf16
+    # difference is pinned per module above, not end to end).
+    assert float(mx.abs(model(tokens) - base).max()) < 1e-5
+    model.configure(A.parse_policy())
+    assert all(m.law == "mlx" for m in norms)
+    assert mx.array_equal(model(tokens), base).item()
+
+
+def test_steering_receipt_reports_thinking_off_reference_alpha():
+    from mlx2.adapters import raon1_mini as A
+
+    adapter = object.__new__(A.RaonAdapter)
+    adapter.model = _model()
+    adapter.policy = A.parse_policy()
+    adapter.model.set_reasoning_effort(None)
+    receipt = adapter.capability_receipts()["reasoning_effort_steering"]
+    assert receipt["thinking_off"] == {"reference_alpha": 0.1, "served_alpha": 0.05, "matches_reference": False}
+    adapter.policy = A.parse_policy({"reasoning_effort": "none"})
+    adapter.model.set_reasoning_effort("none")
+    assert adapter.capability_receipts()["reasoning_effort_steering"]["thinking_off"]["matches_reference"]
+
+
+def test_mla_expanded_bound_moves_the_prefill_law_and_budget():
+    from mlx2.adapters import raon1_mini as A
+    from mlx2.adapters.raon1_mini_memory import RaonCacheBudget
+
+    assert A.parse_policy({})["mla_expanded_gib"] == 4
+    with pytest.raises(ValueError):
+        A.parse_policy({"mla_expanded_gib": 0})
+    model = _model()
+    model.configure(A.parse_policy({"mla_expanded_gib": 12}))
+    mla = model.layers[3].self_attn
+    assert mla.expanded_bytes == 12 << 30
+    tokens = mx.array([list(range(1, 40))])
+    model(tokens)
+    assert mla.calls["auto_expanded"] > 0 and mla.calls["auto_latent"] == 0
+    mla.expanded_bytes = 1  # below any prefix: chunks take the absorbed latent law
+    model(tokens)
+    assert mla.calls["auto_latent"] > 0
+    base = RaonCacheBudget(7, 18, 512, 64, 40, 128, 128, 128, 2560, 259840, 3, 4, "auto")
+    wide = RaonCacheBudget(7, 18, 512, 64, 40, 128, 128, 128, 2560, 259840, 3, 4, "auto", expanded_bytes=12 << 30)
+    assert wide.prefill_transient_bytes(131072, 2048) > base.prefill_transient_bytes(131072, 2048)
+    assert wide.prefill_transient_bytes(32768, 2048) == base.prefill_transient_bytes(32768, 2048)
+
+
+def test_affine_install_and_merged_affine_projection_match_parts():
+    from mlx2.adapters import raon1_mini as A
+    from mlx2.runtime.models import raon1_mini as R
+
+    model = _model()
+    paths = []
+    for i, layer in enumerate(model.layers):
+        a = f"model.layers.{i}.self_attn."
+        if layer.is_global:
+            paths += [a + n for n in ("q_a_proj", "kv_a_proj_with_mqa", "g_proj", "o_proj")]
+        else:
+            paths += [a + n for n in ("q_proj", "k_proj", "v_proj", "b_proj", "f_a_proj", "g_proj",
+                                      "rda_w_proj", "o_proj")]
+        m = f"model.layers.{i}." + ("moe.shared_experts." if layer.is_moe else "mlp.")
+        paths += [m + n for n in ("gate_proj", "up_proj")]
+    names = {p + ".scales" for p in paths}
+    receipt = R.install_affine(model, {"quantization": {"group_size": 32, "bits": 4, "mode": "affine"}}, names)
+    assert receipt["quantized_linears"] == len(paths)
+    assert type(model.layers[0].self_attn.q_proj).__name__ == "QuantizedLinear"
+    tokens = mx.array([[5, 6, 7, 8]])
+    model.configure(A.parse_policy({"merged_projections": False}))
+    cache = model.make_cache()
+    model(tokens, cache)
+    plain = model(mx.array([[9]]), cache)
+    model.configure(A.parse_policy({"merged_projections": True}))
+    cache = model.make_cache()
+    model(tokens, cache)
+    merged = model(mx.array([[9]]), cache)
+    assert model.layers[0].self_attn.calls["merged_projections"] > 0
+    assert float(mx.abs(plain - merged).max()) < 1e-4
+
+
+def test_nax_levers_are_opt_in_and_decline_cleanly_on_cpu():
+    from mlx2.adapters import raon1_mini as A
+
+    policy = A.parse_policy({})
+    assert policy["mla_flash"] == "off" and policy["moe_nax"] == "off"
+    with pytest.raises(ValueError):
+        A.parse_policy({"mla_flash": "all"})
+    with pytest.raises(ValueError):
+        A.parse_policy({"moe_nax": "nvfp4"})
+    model = _model()
+    tokens = mx.array([list(range(1, 40))])
+    model.configure(A.parse_policy({}))
+    base = model(tokens)
+    model.configure(A.parse_policy({"mla_flash": "expanded"}))
+    flashed = model(tokens)
+    mla = model.layers[3].self_attn
+    assert mla.calls["flash_declined"] > 0 and mla.calls.get("expanded_flash192", 0) == 0
+    assert float(mx.abs(base - flashed).max()) == 0.0

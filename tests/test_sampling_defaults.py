@@ -59,6 +59,7 @@ def _adapter_classes():
     from mlx2.adapters.xing import XingAdapter
     from mlx2.adapters.hy_v4_flash import HYV4FlashAdapter
     from mlx2.adapters.inkling2 import Inkling2Adapter
+    from mlx2.adapters.raon1_mini import RaonAdapter
 
     return {
         "qwen4_exp": FlashNextAdapter,
@@ -69,6 +70,7 @@ def _adapter_classes():
         "xing4_0": XingAdapter,
         "hy_v4_flash": HYV4FlashAdapter,
         "inkling2_loop": Inkling2Adapter,
+        "raon1_mini": RaonAdapter,
         "laguna": LagunaXS21Adapter,
         "mellum": Mellum21ThinkingAdapter,
         "gemma3n": Gemma3nAdapter,
@@ -282,6 +284,8 @@ EXPECTED = {
     "hy_v4_flash": {"general": dict(temperature=0.9, top_p=1.0)},
     # thinkingmachines/Inkling-2-Mini generation_config.json (read 2026-11-20).
     "inkling2_loop": {"general": dict(temperature=1.0, top_p=1.0)},
+    # KRAFTON/Raon-1-mini@6691a076 generation_config.json (read 2026-11-25).
+    "raon1_mini": {"general": dict(temperature=1.0, top_p=0.95, top_k=20, presence_penalty=1.5)},
 }
 
 

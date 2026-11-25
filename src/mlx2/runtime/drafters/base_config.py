@@ -53,6 +53,16 @@ class DFlashConfig:
     final_logit_softcapping: Optional[float] = None
     runtime_block_size: int | None = None
     draft_window_size: int | None = None
+    # Residual streams per tapped target layer.  A hyper-connection target
+    # (Raon-1-mini's 4-stream mHC) feeds each tap's full n-stream residual,
+    # so one tap is ``n * hidden_size`` wide (``dflash_config.
+    # target_streams_per_layer``).  1 is every single-residual target.
+    target_streams_per_layer: int = 1
+
+    @property
+    def feature_width(self) -> int:
+        """Width of one concatenated target feature row (the ``fc`` input)."""
+        return len(self.target_layer_ids) * self.hidden_size * int(self.target_streams_per_layer)
 
     @classmethod
     def from_dict(cls, params: dict) -> "DFlashConfig":
@@ -71,6 +81,8 @@ class DFlashConfig:
             flat["runtime_block_size"] = dflash_cfg["runtime_block_size"]
         if "draft_window_size" in dflash_cfg:
             flat["draft_window_size"] = dflash_cfg["draft_window_size"]
+        if "target_streams_per_layer" in dflash_cfg:
+            flat["target_streams_per_layer"] = dflash_cfg["target_streams_per_layer"]
         sig = inspect.signature(cls).parameters
         return cls(**{k: v for k, v in flat.items() if k in sig})
 

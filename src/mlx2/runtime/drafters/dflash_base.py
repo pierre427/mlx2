@@ -270,7 +270,8 @@ class DFlashDraftModel(nn.Module):
         self.config = config
         if not self.config.layer_types:
             self.config.layer_types = ["full_attention"] * self.config.num_hidden_layers
-        concat_dim = len(config.target_layer_ids) * config.hidden_size
+        # One row is every tap concatenated (n-stream taps for an mHC target).
+        concat_dim = getattr(config, "feature_width", len(config.target_layer_ids) * config.hidden_size)
         self.fc = nn.Linear(concat_dim, config.hidden_size, bias=False)
         self.hidden_norm = nn.RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.layers = [
