@@ -736,6 +736,13 @@ PREFILL_WIDE_OPTION = "inkling2_prefill_wide_chunk"
 # requirement, so a host near its limit can defer or refuse a lane it admits
 # today), hence default off.
 PREFILL_PRICING_OPTION = "inkling2_prefill_transient_pricing"
+# PR sweep 2026-11-25 (raullenchai/Rapid-MLX#5953, idea only; runtime/models/
+# inkling2/prefill_route.py): a one-row decode forward submits the residual
+# stream with mx.async_eval after every visit. Same graph and kernels:
+# bit-identical (CPU test; GPU A/B pending). Not combined with
+# inkling2_native_replay (its recorded step is replayed, not rebuilt).
+# Counter: decode_handover_calls. Default off, unqualified.
+DECODE_HANDOVER_OPTION = "inkling2_decode_handover"
 DSPARK_OPTIONS = {"inkling2_dspark_kv_headroom": "kv_headroom",
                   "inkling2_dspark_fold_q8": "fold_q8",
                   "inkling2_dspark_cost_depth": "cost_depth"}
@@ -768,7 +775,8 @@ def dspark_options(external):
 # validate_policy go through model_kernel_options so a new adapter-only key
 # cannot break them (2026-11-23: prefill_wide_chunk broke three callers).
 ADAPTER_ONLY_KERNEL_KEYS = ("hard_no_thinking", "dspark_prefill_reclaim", "dspark_predraft",
-                            "prefill_wide_chunk", "prefill_transient_pricing")
+                            "prefill_wide_chunk", "prefill_transient_pricing",
+                            "decode_handover")
 
 
 def model_kernel_options(kernels):
@@ -812,6 +820,13 @@ def validate_policy(value):
     if type(predraft) is not bool:
         raise TypeError(f"Inkling 2 {PREDRAFT_OPTION} must be a boolean")
     kernels["dspark_predraft"] = predraft
+    decode_handover = value.pop(DECODE_HANDOVER_OPTION, False)
+    if type(decode_handover) is not bool:
+        raise TypeError(f"Inkling 2 {DECODE_HANDOVER_OPTION} must be a boolean")
+    if decode_handover and kernels.get("native_replay"):
+        raise ValueError(f"Inkling 2 {DECODE_HANDOVER_OPTION} is not combined with "
+                         "inkling2_native_replay")
+    kernels["decode_handover"] = decode_handover
     wide = value.pop(PREFILL_WIDE_OPTION, False)
     if type(wide) is not bool:
         raise TypeError(f"Inkling 2 {PREFILL_WIDE_OPTION} must be a boolean")
@@ -1178,6 +1193,10 @@ class Inkling2Adapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
         for key in ADAPTER_ONLY_KERNEL_KEYS:
             setattr(self, key, self.kernel_policy.pop(key))
         self.model.configure_kernels(**self.kernel_policy)
+        if self.decode_handover:
+            from ..runtime.models.inkling2 import prefill_route
+
+            prefill_route.configure_decode(self.model, decode_handover=True)
         self.prefill_schedule = None
         if self.prefill_wide_chunk:
             self._install_prefill_schedule()
@@ -1661,6 +1680,47 @@ class Inkling2Adapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
     def tool_constraint(self, request):
         return None
 
+    def structured_answer_token_ids(self, request):
+        """The ``<|content_text|>`` id a client grammar waits for, or None.
+
+        The template renders no reply header: the model writes
+        ``<|message_model|>`` and then ``<|content_thinking|>`` or
+        ``<|content_text|>`` itself. A ``response_format``/``grammar`` bound
+        from the first generated token excludes those special ids, so the
+        model would have to answer with no header at all, off its trained
+        framing (omlx#5635 measured 17/71 correct extractions this way on
+        Inkling 2 Mini). The grammar therefore binds once the text channel is
+        open; the answer then ends at end-sampling, as an unconstrained
+        reply does. None when the prompt already opened the text channel
+        (``inkling2_hard_no_thinking``), for a raw completion, or when the
+        marker does not encode to one id that decodes back exactly."""
+        if "messages" not in request or self._text_prefill(request):
+            return None
+        marker = TEXT_PREFILL[1]
+        try:
+            ids = [int(token) for token in self.tokenizer.encode(marker, add_special_tokens=False)]
+            if len(ids) != 1 or self.tokenizer.decode(ids) != marker:
+                return None
+        except Exception:  # noqa: BLE001 - undeclared marker, not a load failure
+            return None
+        return tuple(ids)
+
+    def structured_envelope_token_ids(self):
+        """``((), (<|end_message|>,))``: a constrained answer may close its
+        text block once the grammar is complete, as the model does unconstrained
+        (omlx#5635 counted <|end_message|> after every answer), before
+        end-sampling. Nothing opens inside the answer: the header comes before
+        the ``structured_answer_token_ids`` deferral point. None when the marker
+        does not encode to one id that decodes back exactly."""
+        marker = "<|end_message|>"
+        try:
+            ids = [int(token) for token in self.tokenizer.encode(marker, add_special_tokens=False)]
+            if len(ids) != 1 or self.tokenizer.decode(ids) != marker:
+                return None
+        except Exception:  # noqa: BLE001 - undeclared marker, not a load failure
+            return None
+        return (), tuple(ids)
+
     def _native_replay_receipt(self):
         from ..runtime.models.inkling2 import capacity_state
 
@@ -1690,6 +1750,8 @@ class Inkling2Adapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             "prefill_transient_pricing": bool(getattr(self, "prefill_transient_pricing", False)),
             "loop": (self.model.loop_receipt() if getattr(self, "model", None) else None),
             "hard_no_thinking": bool(getattr(self, "hard_no_thinking", False)),
+            "decode_handover": {"selected": bool(getattr(self, "decode_handover", False)),
+                                "qualified": False},
             "native_replay": self._native_replay_receipt(),
             "experts": getattr(self, "expert_receipt", None),
             "target_forward_observed": bool(getattr(getattr(self, "model", None), "completed_forwards", 0)),

@@ -368,7 +368,7 @@ def test_policy_parsing():
          "sink_slot": True, "flash_prefill": False, "verify_splitk": True,
          "moe_fused": True, "moe_weighted_sum": True, "moe_logdomain_renorm": False,
          "moe_nax_gather": None, "hard_no_thinking": False, "dspark_prefill_reclaim": None,
-         "dspark_predraft": False,
+         "dspark_predraft": False, "decode_handover": False,
          "prefill_mask_mb": None, "loop_passes": None, "fuse_controllers": True, "fuse_residual": True, "fuse_sconv": True,
          "fuse_attention": True, "fuse_sconv_kernel": True, "fuse_residual_kernel": False,
          "fuse_gather_lhs": False, "fuse_norm_fp32": False, "fuse_shared_tau": False,
