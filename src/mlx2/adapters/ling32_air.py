@@ -33,8 +33,39 @@ from .ordinary_artifact import inspect_indexed_artifact
 RECIPE = "ling32-air-affine-e4g64-r8g64-v1"
 SOURCE_REVISION = "1613b1a4dcc6aa0d8f346606628cd9a92061a525"
 CACHE_LAYOUT = "ling32-air-hybrid-kda-gated-mla-v1"
+# Prefill transient law (LingCacheBudget fields). Week-models ladder
+# 2026-11-25 (8e4ec3526 / 975cf6d5a-fix2, M5 Max, 512-row chunks): the Metal
+# peak rose ~1.0 GB at 16K and ~1.9 GB at 32K over the 1K cell, while the
+# original law (three fp32 score buffers) charged 3.6 / 7.5 GiB more and
+# refused 32K at the autoscaled 2048 rows (27.6 GiB). The model computes in
+# bf16 and builds two score buffers (pe_scores, its masked copy). The 4 GiB
+# score budget gives 512 rows at 32K-64K and 256 at 128K, the shapes that
+# passed in the fix-up ladder; shorter prompts keep the autoscale chunk.
+PREFILL_LAW = {"prefill_activation_bytes": 2, "score_buffers": 2,
+               "prefill_score_budget_bytes": 4 << 30}
 EXPERT_LIMITS = [0] * 35 + [4] * 7
 SHARED_LIMITS = [0] * 34 + [5] * 6 + [7] * 2
+# Config laws the runtime implements only at the released value and does not
+# read (it hard-codes them), so a changed value would be served silently with
+# the wrong math. ``rope_scaling``/``rope_parameters`` stay absent: sglang
+# #52593 reads a YaRN block from config.json for 1M context (text MLA and
+# all three M-RoPE axes); mlx2 has reviewed neither for Ling, and the 3D
+# M-RoPE law here is the unscaled one. 2026-11-25 PR sweep.
+PINNED_LAWS = {
+    "rope_scaling": None,
+    "rope_parameters": None,
+    "rope_interleave": True,
+    "mrope_section": [8, 12, 12],
+    "partial_rotary_factor": 0.5,
+    "rotary_dim": 64,
+    "linear_silu": True,
+    "group_norm_size": 1,
+    "use_kda_lora": False,
+    "use_qk_norm": True,
+    "num_kv_heads_for_linear_attn": 0,
+}
+# Absent means the runtime default, which is the pinned value.
+PINNED_DEFAULTS = {"rope_interleave": True}
 
 DESCRIPTOR = replace(
     ling3_flash.DESCRIPTOR,
@@ -96,6 +127,13 @@ def inspect_artifact(model_path):
     conversion = config.get("mlx2_conversion") or {}
     if conversion.get("recipe") != RECIPE or conversion.get("source_revision") != SOURCE_REVISION:
         raise ValueError("artifact is not the pinned mlx2 Ling-3.2-air conversion")
+    unpinned = sorted(
+        key for key, value in PINNED_LAWS.items()
+        if config.get(key, PINNED_DEFAULTS.get(key)) != value
+        or type(config.get(key, PINNED_DEFAULTS.get(key))) is not type(value)
+    )
+    if unpinned:
+        raise ValueError(f"Ling-3.2-air config law is not the reviewed one: {unpinned}")
     expected = {
         "model_type": "bailing_hybrid",
         "architectures": ["BailingMoeV3ForCausalLM"],
@@ -194,7 +232,12 @@ class Ling32AirAdapter(ling3_flash.Ling3FlashAdapter):
     # kda_fused passed (bitwise, engaged, not slower); routed_moe_decode was
     # slower and stays off (see ling3_flash.optimization_policy).
     # {"ling_optimizations": {"kda_fused": false}} selects the eager path.
-    optimization_overrides = {"kda_fused": True}
+    # moe_nax (prompt-chunk MoE NAX gather, M5 hosts; elsewhere stock): night
+    # window 2026-11-24/25 @c4b4b2592 cold prefill +8.6..+11.3 % at ~4.4K and
+    # ~17.7K tokens, output tokens identical, 10,680 launches, 0 fallbacks.
+    # Default ON (Pierre 2026-11-25, "make all of the beneficial options
+    # default-on"); stepped back off under weight streaming.
+    optimization_overrides = {"kda_fused": True, "moe_nax": True}
     cache_layout_base = CACHE_LAYOUT
     tree_variant_prefix = "mlx2-e4r8-mtp-ast"
     # No Ling-3.2-air UBTree drafter exists; the 3.0 drafter is a different
@@ -228,6 +271,7 @@ class Ling32AirAdapter(ling3_flash.Ling3FlashAdapter):
             # Native-MTP tree tiles: anchor + the default 3x5 topology (depth 5).
             policy.setdefault("num_draft", self.EXTERNAL_DEFAULT_NUM_DRAFT)
         super().__init__(model_path, execution_policy=policy, weight_streaming=weight_streaming)
+        self._bind_prefill_row_cap()
         if self.vision_enabled:
             self._enable_vision()
         self.page_in_receipt = None
@@ -303,6 +347,12 @@ class Ling32AirAdapter(ling3_flash.Ling3FlashAdapter):
 
     def validate_prefill_inputs(self, request, remaining_tokens, prefill_input):
         image = self.config.get("image_token_id")
+        # No route serves video: a <|video_pad|> typed into text (it encodes as
+        # the special token) would otherwise run as a bare placeholder
+        # embedding the vendor always replaces with video features.
+        video = self.config.get("video_token_id")
+        if video is not None and any(t == video for t in remaining_tokens):
+            raise ValueError("Ling-3.2-air video tokens cannot run: no route serves video input")
         if prefill_input is None:
             if image is not None and any(t == image for t in remaining_tokens):
                 raise ValueError("Ling-3.2-air image tokens cannot run without their image payload")
@@ -360,9 +410,20 @@ class Ling32AirAdapter(ling3_flash.Ling3FlashAdapter):
     def cache_budget(self, *, mtp):
         if getattr(self, "draft_model", None) is not None:
             return None
+        from dataclasses import replace as _replace
+
         from .ling_memory import LingCacheBudget
 
-        return LingCacheBudget.from_config(self.config, mtp=mtp)
+        return _replace(LingCacheBudget.from_config(self.config, mtp=mtp), **PREFILL_LAW)
+
+    def _bind_prefill_row_cap(self):
+        # The executor shrinks each prefill chunk through the model's declared
+        # recommended_prefill_rows (generate.BatchGenerator._prompt_prefill_step),
+        # the same bound admission prices: rows x context stays in the score
+        # budget, so long prompts run narrower chunks instead of a 429.
+        budget = self.cache_budget(mtp=False)
+        if budget is not None:
+            self.model.recommended_prefill_rows = budget.recommended_prefill_rows
 
     def _inspect_external_drafter(self, model_path):
         from .qwen38_27b import _names_target

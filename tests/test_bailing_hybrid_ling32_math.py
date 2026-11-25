@@ -267,3 +267,27 @@ def test_segmented_mla_refuses_quantized_rows_before_append():
         attn._attend_segmented_rows(mx.zeros((1, 2, 1, 32)), mx.zeros((1, 2, 1, 16)),
                                     mx.zeros((1, 1, 1, 32)), mx.zeros((1, 1, 1, 16)), None, fake)
     assert appended == []
+
+
+def test_absorbed_verify_rows_law_is_opt_in_and_equivalent():
+    """Attribution opt-in (2026-11-25): 2-16-row MLA forwards may take the
+    one-row absorbed formula; off by default, same math within tolerance."""
+    model = _tiny()
+    attention = next(l for l in model.model.layers if l.is_global).attention
+    assert attention.ling_absorbed_verify_rows is False
+    cache = model.make_cache()
+    model(mx.array([[3, 7, 11, 2, 5, 9]]), cache)
+    import copy
+    rows = mx.array([[4, 13, 8]])
+    base = model(rows, copy.deepcopy(cache))
+    assert attention.ling_calls["mla_absorbed_verify_rows"] == 0
+    for layer in model.model.layers:
+        if layer.is_global:
+            layer.attention.ling_absorbed_verify_rows = True
+    absorbed = model(rows, copy.deepcopy(cache))
+    assert attention.ling_calls["mla_absorbed_verify_rows"] > 0
+    assert mx.allclose(absorbed, base, atol=1e-4, rtol=1e-4)
+    # Prompt chunks above 16 rows keep the expanded formula.
+    before = attention.ling_calls["mla_absorbed_verify_rows"]
+    model(mx.array([list(range(1, 21))]), model.make_cache())
+    assert attention.ling_calls["mla_absorbed_verify_rows"] == before

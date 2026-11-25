@@ -338,6 +338,8 @@ def test_ordinary_optimization_policy_loads_and_revisions_cache(tiny_ling):
         assert ordinary.diagnostics()['optimizations']['policy'] == {
             'merged_conv': False, 'fused_norm': False, 'fused_mla_decode': False,
             'moe_nax': False, 'kda_fused': False, 'routed_moe_decode': False,
+            'absorbed_verify_rows': False, 'verify_rowwise': False, 'rowwise_dense': False,
+            'rowwise_moe': False, 'rowwise_kda': False, 'rowwise_mla': False,
         }
     finally:
         ordinary.close()
@@ -459,3 +461,32 @@ def test_nax_engagement_counter_is_zero_when_off_and_reaches_metrics(tiny_ling):
         assert 'mlx2_moe_nax_gather_calls_total{route="gather"} 0' in text
     finally:
         adapter.close()
+
+
+def test_verify_rowwise_policy_binds_trunk_and_revisions(tiny_ling):
+    """Diagnostic per-row verify laws (2026-11-25): verify_rowwise binds all
+    four components on the target trunk only and changes the revision."""
+    from mlx2.runtime.models import bailing_hybrid as bh
+
+    ordinary = ling3_flash.Ling3FlashAdapter(tiny_ling)
+    candidate = None
+    try:
+        candidate = ling3_flash.Ling3FlashAdapter(tiny_ling, execution_policy={
+            'ling_optimizations': {'verify_rowwise': True},
+        })
+        assert candidate.layout != ordinary.layout
+        assert 'ling_rowwise.py' in candidate.optimization_sources
+        layers = candidate.model.layers
+        assert all(layer.attention.ling_rowwise for layer in layers)
+        assert all(layer.mlp.ling_rowwise for layer in layers
+                   if isinstance(layer.mlp, bh.SparseMoeBlock))
+        assert type(candidate.model.lm_head).__name__.startswith('Rowwise')
+        assert type(candidate.model.model.norm).__name__.startswith('Rowwise')
+        assert not any(getattr(layer.attention, 'ling_rowwise', False) for layer in ordinary.model.layers)
+        rowwise = candidate.diagnostics()['optimizations']['rowwise']
+        assert rowwise['components'] == ['dense', 'moe', 'kda', 'mla']
+        assert 'rowwise' not in ordinary.diagnostics()['optimizations']
+    finally:
+        ordinary.close()
+        if candidate is not None:
+            candidate.close()

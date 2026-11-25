@@ -35,6 +35,13 @@ _DECODE_ONLY_FLAGS = {
                           ("models/ling_routed_decode.py", "models/deepseek_v41_routed_decode.py",
                            "models/qwen4_routed_decode.py", "models/switch_layers.py")),
     "moe_nax": (None, ("models/moe_nax_gather.py", "models/switch_layers.py")),
+    # Tree rows take tree.mla, never the 2-16-row absorbed branch.
+    "absorbed_verify_rows": (("attention", "ling_absorbed_verify_rows"), ()),
+    # Per-row verify laws engage only inside a chain verify scope
+    # (ling_rowwise.scope); tree rows never open one. Bound by source only,
+    # since one attention attribute serves both the kda and mla components.
+    **{key: (None, ("models/ling_rowwise.py",)) for key in (
+        "verify_rowwise", "rowwise_dense", "rowwise_moe", "rowwise_kda", "rowwise_mla")},
 }
 
 

@@ -30,8 +30,10 @@ def optimization_policy(value, overrides=None):
     # All candidates await checkpoint A/B evidence and explicit default approval.
     # moe_nax: the segmented NAX sorted gather for prompt-chunk MoE (M5 only,
     # bit-identical to stock sorted gather_qmm per moe_nax_gather's canary);
-    # FN measured the MoE layer 1.27-1.67x, prefill up to 1.20x. Off until a
-    # Ling checkpoint A/B shows engagement and a win.
+    # FN measured the MoE layer 1.27-1.67x, prefill up to 1.20x. Ling-3.2-air
+    # A/B (night 2026-11-24/25, c4b4b2592): cold prefill +8.6..+11.3 %, tokens
+    # identical, engaged; default ON for air only (Pierre 2026-11-25,
+    # Ling32AirAdapter.optimization_overrides). Ling 3 Flash stays off (untested).
     # kda_fused: the one-launch B1 KDA decode body (ling_kda_fused decode_v1,
     # port of glm53_kda_fused). Ling-3.2-air smoke 2026-11-23 (Ling-3.2-air-
     # mlx2-e4r8@sha256:12d9f57b..., tree c02b49792 on main 50f52f56f): all
@@ -45,8 +47,21 @@ def optimization_policy(value, overrides=None):
     # bitwise and engaged (23040), but decode -9.1 / -3.8 % on the warm
     # prompts, and kda_fused alone beat kda_fused + routed. Clearly not
     # helpful on Ling's 8-of-512 shape: left OFF.
+    # absorbed_verify_rows: attribution opt-in (2026-11-25 night analysis): MLA
+    # forwards of 2-16 rows use the one-row absorbed formula, to test whether
+    # verify-vs-decode arithmetic explains MTP/AST first divergences. Off.
+    # Attribution 2026-11-25 (attr-d8702e440): it moved which near ties flip
+    # but left MTP d2 at 5/8 divergent, so it does not make verify exact.
+    # verify_rowwise / rowwise_{dense,moe,kda,mla}: diagnostic per-row verify
+    # laws (runtime/models/ling_rowwise.py). verify_rowwise selects all four,
+    # the exact control (verify rows == the L==1 decode sequence); each
+    # component flag alone localises the drift. Slow by design; never a
+    # default.
     defaults = {"merged_conv": False, "fused_norm": False, "fused_mla_decode": False,
-                "moe_nax": False, "kda_fused": False, "routed_moe_decode": False}
+                "moe_nax": False, "kda_fused": False, "routed_moe_decode": False,
+                "absorbed_verify_rows": False, "verify_rowwise": False,
+                "rowwise_dense": False, "rowwise_moe": False, "rowwise_kda": False,
+                "rowwise_mla": False}
     if overrides:
         if set(overrides) - defaults.keys():
             raise ValueError("unknown Ling optimization default override")
@@ -294,9 +309,18 @@ class Ling3FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
 
         stream_request = require_declared(type(self), weight_streaming)
         policy = dict(execution_policy or {})
-        self.optimizations = optimization_policy(
-            policy.pop("ling_optimizations", None), self.optimization_overrides
-        )
+        requested = policy.pop("ling_optimizations", None)
+        self.optimizations = optimization_policy(requested, self.optimization_overrides)
+        # An adapter-default kernel that needs resident experts steps back to
+        # stock arithmetic under weight streaming instead of refusing the
+        # load; an explicit operator selection still fails closed below.
+        self.optimization_defaults_skipped = {}
+        explicit = set(requested or ())
+        if stream_request is not None:
+            for key in ("moe_nax", "routed_moe_decode"):
+                if self.optimizations[key] and key not in explicit:
+                    self.optimizations[key] = False
+                    self.optimization_defaults_skipped[key] = "weight streaming needs stock MoE"
         external = self._parse_external_policy(policy, family="Ling 3 Flash")
         _tree_controls(self.external_policy)
         if type(self.external_policy.get("ast_graft_prompt_lookup", False)) is not bool:
@@ -464,6 +488,7 @@ class Ling3FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             attention = layer.attention
             if layer.is_global:
                 attention.ling_fused_mla = self.optimizations["fused_mla_decode"]
+                attention.ling_absorbed_verify_rows = self.optimizations["absorbed_verify_rows"]
             else:
                 attention.ling_merged_conv = self.optimizations["merged_conv"]
                 attention.ling_fused_norm = self.optimizations["fused_norm"]
@@ -481,9 +506,30 @@ class Ling3FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
         for _name, module in self.model.named_modules():
             if isinstance(module, SparseMoeBlock):
                 module.ling_routed_decode = self.optimizations["routed_moe_decode"]
+        rowwise = self.rowwise_components()
+        if rowwise:
+            from ..runtime.models import ling_rowwise
+
+            # Target trunk only: the MTP head drafts one row per step and
+            # never runs inside a verify scope.
+            for layer in self.model.layers:
+                if "mla" in rowwise and layer.is_global:
+                    layer.attention.ling_rowwise = True
+                if "kda" in rowwise and not layer.is_global:
+                    layer.attention.ling_rowwise = True
+                if "moe" in rowwise and isinstance(layer.mlp, SparseMoeBlock):
+                    layer.mlp.ling_rowwise = True
+                if "dense" in rowwise:
+                    ling_rowwise.bind_dense(module for _n, module in layer.named_modules())
+            if "dense" in rowwise:
+                if self.model.args.tie_word_embeddings:
+                    raise ValueError("Ling rowwise_dense does not cover a tied embedding head")
+                ling_rowwise.bind_dense([self.model.model.norm, self.model.lm_head])
         if any(self.optimizations.values()):
             root = Path(__file__).parents[1] / "runtime" / "models"
             sources = ["bailing_hybrid.py", "ling_tree.py"]
+            if self.rowwise_components():
+                sources += ["ling_rowwise.py"]
             if self.optimizations["fused_norm"]:
                 sources += ["ling_fused.py", "qwen4_fused_gdn_prefill.py", "served_exp.py"]
             if self.optimizations["fused_mla_decode"]:
@@ -739,6 +785,13 @@ class Ling3FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
                       "tree_controls": value},
         )
 
+    def rowwise_components(self):
+        selected = getattr(self, "optimizations", None) or {}
+        if selected.get("verify_rowwise"):
+            return ("dense", "moe", "kda", "mla")
+        return tuple(name for name in ("dense", "moe", "kda", "mla")
+                     if selected.get("rowwise_" + name))
+
     def diagnostics(self):
         from collections import Counter
 
@@ -753,6 +806,13 @@ class Ling3FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
 
             # Process-wide graph-build counters (engaged / decline:<reason>).
             optimizations["routed_moe_decode"] = ling_routed_decode.status()
+        if getattr(self, "optimization_defaults_skipped", None):
+            optimizations["defaults_skipped"] = dict(self.optimization_defaults_skipped)
+        if self.rowwise_components():
+            from ..runtime.models import ling_rowwise
+
+            optimizations["rowwise"] = {"components": list(self.rowwise_components()),
+                                        **ling_rowwise.status()}
         # NAX sorted-gather engagement (prompt-chunk MoE): launches by route,
         # fallbacks and never-offered gathers. Rendered by /metrics from the
         # route receipt's execution block (mlx2_moe_nax_gather_*); all zero

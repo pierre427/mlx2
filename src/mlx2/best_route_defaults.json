@@ -1118,6 +1118,36 @@
     "source_revision": "cc7049fcf8d9cff0e323ee7ee840051eabb4c5d9",
     "decision_row": true
    }
+  },
+  {
+   "checkpoint": "Ling-3.2-air-mlx2-e4r8@sha256:12d9f57b5300b88d8e48d84b5800757425f55798e9ddee60339136fba0b9fe2a",
+   "fingerprint": "12d9f57b5300b88d8e48d84b5800757425f55798e9ddee60339136fba0b9fe2a",
+   "adapter": "Ling32AirAdapter",
+   "status": "selected_unqualified",
+   "default": {
+    "name": "native_mtp",
+    "kind": "native_mtp",
+    "max_lanes": 1,
+    "execution_policy": {
+     "num_draft": 2
+    }
+   },
+   "fallback": [
+    {
+     "name": "adapter_default",
+     "kind": "adapter_default"
+    }
+   ],
+   "reason": "decision row from another lane: Operator decision: Pierre 2026-11-25 asked for every beneficial option default-on. Route: native_mtp adapter=Ling32AirAdapter. GSM8K 30 q greedy chat-fewshot thinking off, one lane: ordinary 96.7 % 55.85 tok/s vs native MTP num_draft 2 96.7 % 77.67 tok/s (+39 %, MAL 2.51). Per-row verify control @09e8df443 made mtp-d2 token-identical to ordinary on 8/8 probe questions thinking off and on: divergences are multi-row verify arithmetic, not the MTP head or rollback. Measured at one lane only; wider servers keep the adapter default (ordinary). Selected unqualified. Max-lanes: 1. Execution-policy: {",
+   "evidence": {
+    "files": [
+     "qualification/runs/ling32-air-20261123/ordinary-thinking-off-a8356962b/summary.json",
+     "qualification/runs/ling32-air-20261123/night-c4b4b2592/divergence-analysis.md",
+     "qualification/runs/ling32-air-20261123/rowwise-09e8df443/rowwise-analysis.md"
+    ],
+    "source_revision": "09e8df443",
+    "decision_row": true
+   }
   }
  ]
 }

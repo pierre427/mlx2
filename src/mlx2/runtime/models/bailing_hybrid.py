@@ -27,7 +27,7 @@ from .base import (
 from .cache import ArraysCache, KVCache
 from .gated_delta import gated_delta_update
 from .rope_utils import initialize_rope
-from . import moe_nax_gather
+from . import ling_rowwise, moe_nax_gather
 from .switch_layers import SwiGLU, SwitchGLU
 from .xing4_0 import MultiLinear
 
@@ -159,6 +159,9 @@ class MultiLatentAttention(nn.Module):
         self.gate_type = args.gated_attention_proj_granularity_type
         self.scale = self.qk_head_dim**-0.5
         self.ling_fused_mla = False
+        self.ling_absorbed_verify_rows = False
+        # Diagnostic per-row verify law (ling_rowwise, component ``mla``). Off.
+        self.ling_rowwise = False
         self.ling_calls = Counter()
 
         if self.q_lora_rank is None:
@@ -273,7 +276,10 @@ class MultiLatentAttention(nn.Module):
         kv_latent = self.kv_a_layernorm(compressed_kv)
 
         offset = _cache_offset(cache)
-        if rope_positions is None:
+        if rope_positions is None and tree is None and self._rowwise_rows(length):
+            q_pe = self._rope_rows(q_pe, offset)
+            k_pe = self._rope_rows(k_pe, offset)
+        elif rope_positions is None:
             q_pe = self.rope(q_pe, offset=offset) if tree is None else tree.rope(self.rope, q_pe, offset)
             k_pe = self.rope(k_pe, offset=offset) if tree is None else tree.rope(self.rope, k_pe, offset)
         else:
@@ -356,6 +362,48 @@ class MultiLatentAttention(nn.Module):
             return mx.concatenate(qs, axis=-2), mx.concatenate(ks, axis=-2)
         return self.rope(q_pe, offset=positions), self.rope(k_pe, offset=positions)
 
+    def _rowwise_rows(self, length):
+        return (self.ling_rowwise and 1 < length <= ling_rowwise.MAX_ROWS
+                and ling_rowwise.active())
+
+    def _rope_rows(self, x, offset):
+        return mx.concatenate(
+            [self.rope(x[:, :, i:i + 1], offset=offset + i) for i in range(x.shape[2])], axis=2)
+
+    def _rowwise_decline(self, reason):
+        self.ling_calls["mla_rowwise_declined"] += 1
+        self.ling_calls["mla_rowwise_declined:" + reason] += 1
+        return None
+
+    def _attend_rows(self, q_nope, q_pe, kv_latent, k_pe, mask, cache):
+        """Per-row verify law: row ``i`` attends its own causal key prefix
+        through the one-row (decode) branch.  None declines (counted)."""
+        length, keys = q_nope.shape[2], kv_latent.shape[-2]
+        if isinstance(mask, str):
+            if mask != "causal":
+                return self._rowwise_decline("mask kind")
+            ends = [keys - length + i + 1 for i in range(length)]
+        elif mask is None:
+            return self._rowwise_decline("no mask")
+        else:
+            rows = np.array(mask.astype(mx.bool_))
+            rows = rows.reshape(-1, rows.shape[-2], rows.shape[-1])
+            if rows.shape[1:] != (length, keys) or not (rows == rows[:1]).all():
+                return self._rowwise_decline("mask shape")
+            ends = []
+            for row in rows[0]:
+                end = int(row.sum())
+                if end == 0 or not row[:end].all():
+                    return self._rowwise_decline("non-prefix mask")
+                ends.append(end)
+        pieces = [
+            self._attend_latent(q_nope[:, :, i:i + 1], q_pe[:, :, i:i + 1],
+                                kv_latent[..., :end, :], k_pe[..., :end, :], None, cache)
+            for i, end in enumerate(ends)
+        ]
+        self.ling_calls["mla_rowwise_rows"] += length
+        return mx.concatenate(pieces, axis=2)
+
     def _attend_latent(self, q_nope, q_pe, kv_latent, k_pe, mask, cache):
         """Reference latent attention over dense history -> [B, heads, L, v].
 
@@ -363,10 +411,19 @@ class MultiLatentAttention(nn.Module):
         encoding. Ling supplies rotated Q/K here, preserving its RoPE law.
         """
         length = q_nope.shape[2]
+        if self._rowwise_rows(length):
+            output = self._attend_rows(q_nope, q_pe, kv_latent, k_pe, mask, cache)
+            if output is not None:
+                return output
         if length == 1:
             fused_output = self.fused_latent_output(q_nope, q_pe, kv_latent, k_pe, mask)
             if fused_output is not None:
                 return fused_output
+        # Opt-in attribution law (ling_optimizations.absorbed_verify_rows): short
+        # multi-row forwards (speculative verify windows, 2-16 rows) take the
+        # one-row absorbed formula instead of the expanded one, so each verify
+        # row follows the decode step's arithmetic order.
+        absorbed = length == 1 or (self.ling_absorbed_verify_rows and length <= 16)
         pe_scores = (q_pe * self.scale) @ k_pe.swapaxes(-1, -2)
         if mask is not None:
             pe_scores = mx.where(
@@ -374,7 +431,7 @@ class MultiLatentAttention(nn.Module):
                 pe_scores,
                 mx.array(mx.finfo(pe_scores.dtype).min, pe_scores.dtype),
             )
-        if length == 1:
+        if absorbed:
             q_nope = self.embed_q(q_nope)
             keys = values = kv_latent
         else:
@@ -383,8 +440,10 @@ class MultiLatentAttention(nn.Module):
         output = scaled_dot_product_attention(
             q_nope, keys, values, cache=cache, scale=self.scale, mask=pe_scores,
         )
-        if length == 1:
+        if absorbed:
             output = self.unembed_out(output)
+        if absorbed and length > 1:
+            self.ling_calls["mla_absorbed_verify_rows"] += 1
         self.ling_calls["mla_reference"] += 1
         return output
 
@@ -545,6 +604,8 @@ class KimiDeltaAttention(nn.Module):
         self.ling_merged_conv = False
         self.ling_fused_norm = False
         self.ling_kda_fused = False
+        # Diagnostic per-row verify law (ling_rowwise, component ``kda``). Off.
+        self.ling_rowwise = False
         self.ling_calls = Counter()
 
         hidden = args.hidden_size
@@ -616,9 +677,16 @@ class KimiDeltaAttention(nn.Module):
             fused = self.fused_decode(x, raw, snapshot, mask, cache, spans)
             if fused is not None:
                 return fused
-        (q, k, v), (q_state, k_state, v_state) = self.convolve_qkv(
-            raw, (q_state, k_state, v_state), mask, lengths,
-        )
+        rowwise = (self.ling_rowwise and 1 < length <= ling_rowwise.MAX_ROWS
+                   and ling_rowwise.active())
+        if rowwise:
+            (q, k, v), (q_state, k_state, v_state) = self._convolve_rows(
+                raw, (q_state, k_state, v_state), mask, lengths,
+            )
+        else:
+            (q, k, v), (q_state, k_state, v_state) = self.convolve_qkv(
+                raw, (q_state, k_state, v_state), mask, lengths,
+            )
 
         if cache is not None:
             cache[0] = q_state
@@ -629,8 +697,16 @@ class KimiDeltaAttention(nn.Module):
         k = k.reshape(batch, length, self.num_heads, self.head_dim)
         v = v.reshape(batch, length, self.num_heads, self.head_dim)
 
-        q = (self.scale**2) * mx.fast.rms_norm(q, None, 1e-6)
-        k = self.scale * mx.fast.rms_norm(k, None, 1e-6)
+        if rowwise:
+            # The CPU rms_norm is not row-invariant at every width; keep the
+            # one-row reduction for the per-row law.
+            q = (self.scale**2) * ling_rowwise.rows(
+                lambda row: mx.fast.rms_norm(row, None, 1e-6), q, axis=1)
+            k = self.scale * ling_rowwise.rows(
+                lambda row: mx.fast.rms_norm(row, None, 1e-6), k, axis=1)
+        else:
+            q = (self.scale**2) * mx.fast.rms_norm(q, None, 1e-6)
+            k = self.scale * mx.fast.rms_norm(k, None, 1e-6)
 
         if self.no_kda_lora:
             decay_logits = self.f_proj(x)
@@ -647,25 +723,31 @@ class KimiDeltaAttention(nn.Module):
         if spans is not None:
             self._record_rollback(
                 cache, length, spans, snapshot, raw, mask,
-                (q, k, v, decay_logits, beta_logits),
+                (q, k, v, decay_logits, beta_logits), rowwise=rowwise,
             )
 
-        output, recurrent_state = self._gated_delta_update(
-            q,
-            k,
-            v,
-            decay_logits,
-            beta_logits,
-            self.A_log.reshape(self.num_heads, 1),
-            self.dt_bias.reshape(self.num_heads, self.head_dim),
-            state=recurrent_state,
-            mask=mask,
-            use_kernel=not self.training,
-            lower_bound=self.lower_bound,
-            prefill_chunk_size=(getattr(self, "_prefill_scan_chunk", 0)
-                if length >= 17 and not bool(getattr(cache, "speculating", False)) else 0),
-            prefill_stats=getattr(self, "_prefill_scan_stats", None),
-        )
+        if rowwise:
+            output, recurrent_state = self._scan_rows(
+                (q, k, v, decay_logits, beta_logits), recurrent_state, mask,
+            )
+            self.ling_calls["kda_rowwise_rows"] += length
+        else:
+            output, recurrent_state = self._gated_delta_update(
+                q,
+                k,
+                v,
+                decay_logits,
+                beta_logits,
+                self.A_log.reshape(self.num_heads, 1),
+                self.dt_bias.reshape(self.num_heads, self.head_dim),
+                state=recurrent_state,
+                mask=mask,
+                use_kernel=not self.training,
+                lower_bound=self.lower_bound,
+                prefill_chunk_size=(getattr(self, "_prefill_scan_chunk", 0)
+                    if length >= 17 and not bool(getattr(cache, "speculating", False)) else 0),
+                prefill_stats=getattr(self, "_prefill_scan_stats", None),
+            )
 
         if cache is not None:
             cache[3] = recurrent_state
@@ -678,6 +760,35 @@ class KimiDeltaAttention(nn.Module):
         gate = gate.reshape(batch, length, self.num_heads, self.head_dim)
         output = self.output_norm_gate(output, gate)
         return self.o_proj(output.reshape(batch, length, -1))
+
+    def _convolve_rows(self, raw, states, mask, lengths):
+        """Per-row verify law: each row through the one-row convolution."""
+        outputs = ([], [], [])
+        for i in range(raw[0].shape[1]):
+            row_mask = None if mask is None else mask[:, i:i + 1]
+            row_lengths = None if lengths is None else mx.clip(lengths - i, 0, 1)
+            values, states = self.convolve_qkv(
+                tuple(value[:, i:i + 1] for value in raw), states, row_mask, row_lengths,
+            )
+            for bucket, value in zip(outputs, values):
+                bucket.append(value)
+        return tuple(mx.concatenate(bucket, axis=1) for bucket in outputs), states
+
+    def _scan_rows(self, scan, state, mask):
+        """Per-row verify law: the gated-delta scan one row per call."""
+        a_log = self.A_log.reshape(self.num_heads, 1)
+        dt_bias = self.dt_bias.reshape(self.num_heads, self.head_dim)
+        outputs = []
+        for i in range(scan[0].shape[1]):
+            output, state = self._gated_delta_update(
+                *(value[:, i:i + 1] for value in scan), a_log, dt_bias,
+                state=state, mask=None if mask is None else mask[:, i:i + 1],
+                use_kernel=not self.training, lower_bound=self.lower_bound,
+                prefill_chunk_size=0,
+                prefill_stats=getattr(self, "_prefill_scan_stats", None),
+            )
+            outputs.append(output)
+        return mx.concatenate(outputs, axis=1), state
 
     def _kda_fused_decline(self, reason):
         self.ling_calls["kda_fused_declined"] += 1
@@ -787,7 +898,7 @@ class KimiDeltaAttention(nn.Module):
     def _gated_delta_update(self, *args, **kwargs):
         return gated_delta_update(*args, **kwargs)
 
-    def _record_rollback(self, cache, length, spans, snapshot, raw, mask, scan):
+    def _record_rollback(self, cache, length, spans, snapshot, raw, mask, scan, *, rowwise=False):
         """Retain all three conv histories and the accepted KDA successor.
 
         Speculative forwards disable reordered chunk scans. Replay therefore
@@ -807,6 +918,12 @@ class KimiDeltaAttention(nn.Module):
         lower_bound = self.lower_bound
 
         def rollback(m):
+            if rowwise and m > 0:
+                _, state = self._scan_rows(
+                    tuple(value[:, :m] for value in scan), snapshot[3],
+                    None if mask is None else mask[:, :m],
+                )
+                return [*[mx.contiguous(value[:, m:m + keep]) for value in padded], state]
             _, state = self._gated_delta_update(
                 *(value[:, :m] for value in scan), a_log, dt_bias,
                 state=snapshot[3],
@@ -933,6 +1050,8 @@ class SparseMoeBlock(nn.Module):
         )
         self.gate = Gate(args)
         self.ling_routed_decode = False
+        # Diagnostic per-row verify law (ling_rowwise, component ``moe``). Off.
+        self.ling_rowwise = False
         shared_size = (
             args.moe_shared_expert_intermediate_size or args.moe_intermediate_size
         ) * args.num_shared_experts
@@ -943,6 +1062,13 @@ class SparseMoeBlock(nn.Module):
         )
 
     def __call__(self, x: mx.array) -> mx.array:
+        if (self.ling_rowwise and 1 < x.shape[-2] <= ling_rowwise.MAX_ROWS
+                and ling_rowwise.active()):
+            ling_rowwise.STATS["moe_rows"] += x.shape[-2]
+            return ling_rowwise.rows(self._forward, x)
+        return self._forward(x)
+
+    def _forward(self, x: mx.array) -> mx.array:
         indices, weights = self.gate(x)
         output = None
         if self.ling_routed_decode:
@@ -1051,7 +1177,8 @@ class LanguageModel(nn.Module):
         # Admits the NAX sorted gather for prompt chunks when the adapter
         # claimed it (bit-identical to stock sorted gather_qmm); a no-op
         # under claim_stock_moe and for decode rows.
-        with moe_nax_gather.forward_scope(inputs, cache):
+        shape = inputs if inputs_embeds is None else inputs_embeds
+        with moe_nax_gather.forward_scope(inputs, cache), ling_rowwise.scope(shape, cache):
             return self._forward(inputs, cache, tail_row=tail_row,
                                  inputs_embeds=inputs_embeds, rope_positions=rope_positions)
 
@@ -1151,16 +1278,17 @@ class Model(nn.Module):
         inputs: mx.array,
         cache: list[Any] | None = None,
     ) -> mx.array:
-        if inputs.ndim == 2 and inputs.shape[1] > 1 and self._claim_tail(inputs, cache):
-            STATS["ling_tail_split"] += 1
-            output = self.model(inputs, cache, tail_row=True)
-        else:
-            # Prompt chunks project only each lane's checkpoint row through
-            # the head (prefill_checkpoint_rows); identity outside a request.
-            output = select_checkpoint_rows(self.model(inputs, cache))
-        if self.args.tie_word_embeddings:
-            return self.model.word_embeddings.as_linear(output)
-        return self.lm_head(output)
+        with ling_rowwise.scope(inputs, cache):
+            if inputs.ndim == 2 and inputs.shape[1] > 1 and self._claim_tail(inputs, cache):
+                STATS["ling_tail_split"] += 1
+                output = self.model(inputs, cache, tail_row=True)
+            else:
+                # Prompt chunks project only each lane's checkpoint row through
+                # the head (prefill_checkpoint_rows); identity outside a request.
+                output = select_checkpoint_rows(self.model(inputs, cache))
+            if self.args.tie_word_embeddings:
+                return self.model.word_embeddings.as_linear(output)
+            return self.lm_head(output)
 
     def _claim_tail(self, inputs, cache=None):
         """Opt-in last-layer tail (MLX2_PREFILL_TAIL_SKIP=1, default off).
@@ -1245,6 +1373,13 @@ class Model(nn.Module):
     ):
         """Return logits and concatenated post-layer residual-stream taps."""
 
+        with ling_rowwise.scope(inputs, cache):
+            return self._forward_with_taps_scoped(
+                inputs, cache, capture_layers, body_only=body_only,
+                last_logits_only=last_logits_only)
+
+    def _forward_with_taps_scoped(self, inputs, cache, capture_layers, *, body_only,
+                                  last_logits_only):
         capture_layers = tuple(int(value) for value in capture_layers)
         if self.external_feature_source == "mtp_seed":
             if capture_layers != (len(self.layers) - 1,):
