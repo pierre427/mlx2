@@ -129,6 +129,21 @@ def _synthetic_images():
     return out
 
 
+def test_processor_refuses_combined_patch_count_before_allocating(tmp_path, monkeypatch):
+    settings = policy(_preprocessor_dir(tmp_path))
+    img = Image.new('RGB', (64, 64))
+
+    _, grids = process_images(iter([img]), settings, max_patches=16)
+    assert grids == [[1, 4, 4]]
+
+    def unexpected_resize(*args, **kwargs):
+        pytest.fail('patch budget must be checked before resizing any image')
+
+    monkeypatch.setattr(Image.Image, 'resize', unexpected_resize)
+    with pytest.raises(ValueError, match=r'16 image patches per request .*32'):
+        process_images([img, img], settings, max_patches=16)
+
+
 def test_processor_matches_transformers_qwen2vl_pil(tmp_path):
     from transformers.models.qwen2_vl.image_processing_pil_qwen2_vl import Qwen2VLImageProcessorPil
 

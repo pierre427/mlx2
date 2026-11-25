@@ -435,6 +435,7 @@ class GatedDeltaProduct(nn.Module):
         )
         if cache is not None:
             cache[1] = state
+            cache.advance(S)
         y = y.reshape(B, S, m, Hv, Dv)[:, :, -1]
         z = self.z_proj(x).reshape(B, S, Hv, Dv)
         # Gate then RMS-normalize per key-head group (Hv/Hk value heads each).

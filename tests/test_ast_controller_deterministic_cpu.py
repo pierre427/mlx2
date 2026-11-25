@@ -250,3 +250,11 @@ def test_deterministic_mode_refuses_a_measured_tile_budget_cost(tmp_path, tiny, 
             adapter.create_external_batch(completion_batch_size=1, prefill_step_size=4)
     finally:
         adapter.close()
+
+
+@pytest.mark.parametrize("field", COST)
+def test_controller_costs_require_finite_values(monkeypatch, field):
+    monkeypatch.setenv("MLX2_AST_CONTROLLER_MODE", "deterministic")
+    monkeypatch.setenv("MLX2_AST_CONTROLLER_COST", json.dumps({**COST, field: float("inf")}))
+    with pytest.raises(ValueError, match="MLX2_AST_CONTROLLER_COST"):
+        ES.controller_settings()

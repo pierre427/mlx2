@@ -235,6 +235,26 @@ def test_stage_a_jobs_follow_the_composed_products():
         object.__setattr__(attn, "_fused_bounds", None)
 
 
+def test_missing_matvec_library_declines_both_plans(monkeypatch):
+    from mlx2.runtime.models.inkling2 import attn_output, stage_a
+
+    model = _model(fuse_sconv=True, fuse_sconv_kernel=True)
+    layer = model.model.layers[0]
+    attn = layer.self_attn
+    x = mx.zeros((1, 1, attn.o_proj.weight.shape[0]))
+    gated = mx.zeros((1, 1, attn.o_proj.weight.shape[1]))
+    conv = model.make_cache()[1]
+    # Exercise the device-selection branch with CPU tensors. No kernel is built.
+    monkeypatch.setattr(mx, "default_device", lambda: mx.gpu)
+    monkeypatch.setattr(lib, "library", lambda *_: (None, "disabled"))
+    monkeypatch.setattr(lib, "matvec_plan", lambda *_: ("gemv", (1, 1)))
+    monkeypatch.setattr(lib, "logical_groups", lambda *_: (1, 1, 32))
+    monkeypatch.setattr(stage_a, "_kernels", {})
+    monkeypatch.setattr(attn_output, "_kernels", {})
+    assert stage_a.plan(attn, x, x, x) == "library"
+    assert attn_output.plan_residual(layer, gated, conv, None, x) == "library"
+
+
 def test_launch_probe_reports_pass_message_saving():
     import sys
     from pathlib import Path

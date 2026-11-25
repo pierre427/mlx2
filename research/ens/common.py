@@ -109,6 +109,14 @@ def save_core(core: Core, out: Path, name: str) -> str:
     return f"{name}@{sha[:12]}"
 
 
+def load_checkpoint_weights(module, weights: Path, checkpoint: str) -> None:
+    with weights.open("rb") as stream:
+        fingerprint = hashlib.file_digest(stream, "sha256").hexdigest()[:12]
+    if checkpoint.rpartition("@")[2] != fingerprint:
+        raise ValueError(f"{weights}: weights differ from the training receipt")
+    module.load_weights(str(weights))
+
+
 def load_core(ckpt_dir: str | Path) -> tuple[Core, str]:
     d = Path(ckpt_dir)
     cfg = CoreConfig.from_json(json.loads((d / "core_config.json").read_text()))

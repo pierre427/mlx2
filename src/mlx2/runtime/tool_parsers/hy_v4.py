@@ -22,7 +22,6 @@ fails it closed or, with tolerant markers, serves it as text).
 from __future__ import annotations
 
 import ast
-import copy
 import json
 import math
 import re
@@ -159,11 +158,11 @@ def _resolve_ref(schema, root, seen=frozenset(), hops=0):
     target = _local_ref(root, ref)
     if target is None:
         return {}
-    typed = {key: copy.deepcopy(target[key]) for key in _TYPED_KEYS if target.get(key)}
-    if typed:
-        return _resolve_unions(typed, root, seen | {ref}, hops + 1) or typed
     if _is_ref_type(target):
         return _resolve_ref(target, root, seen | {ref}, hops + 1)
+    typed = {key: target[key] for key in _TYPED_KEYS if target.get(key)}
+    if typed:
+        return _resolve_unions(typed, root, seen | {ref}, hops + 1) or typed
     return {}
 
 
@@ -171,15 +170,19 @@ def _resolve_unions(schema, root, seen=frozenset(), hops=0):
     resolved = None
     for key in ("anyOf", "oneOf", "allOf"):
         branches = schema.get(key)
-        if not isinstance(branches, list) or not any(_is_ref_type(b) for b in branches):
+        if not isinstance(branches, list):
             continue
-        if resolved is None:
-            resolved = copy.deepcopy(schema)
-        for index, branch in enumerate(resolved[key]):
-            if _is_ref_type(branch):
-                value = _resolve_ref(branch, root, seen, hops)
-                if value:
-                    resolved[key][index] = value
+        for index, branch in enumerate(branches):
+            if not isinstance(branch, dict):
+                continue
+            value = (_resolve_ref(branch, root, seen, hops) if _is_ref_type(branch)
+                     else _resolve_unions(branch, root, seen, hops))
+            if value:
+                if resolved is None:
+                    resolved = dict(schema)
+                if resolved[key] is branches:
+                    resolved[key] = list(branches)
+                resolved[key][index] = value
     return resolved
 
 

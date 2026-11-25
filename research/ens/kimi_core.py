@@ -228,6 +228,7 @@ class KimiTok:
     parsed as specials, as Qwen's tokenizer does."""
 
     def __init__(self, core: KimiCore):
+        self.chat = kimi_chat
         self.t = _Inner(core.tokenizer)
         self.pad = self.t.token_to_id("[PAD]")
 

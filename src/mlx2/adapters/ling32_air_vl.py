@@ -209,10 +209,7 @@ def prepare(adapter, request, *, file_loader=None):
     if len(sources) > MAX_IMAGES:
         raise ValueError(f"Ling-3.2-air vision mode accepts at most {MAX_IMAGES} images per request")
     media = [resolve_media(source, kind="image", file_loader=file_loader) for source in sources]
-    pixels, grids = process_images([m.value for m in media], adapter.image_policy)
-    if int(pixels.shape[0]) > MAX_PATCHES:
-        raise ValueError(f"Ling-3.2-air vision mode accepts at most {MAX_PATCHES} image patches "
-                         f"per request (got {int(pixels.shape[0])}); send smaller images")
+    pixels, grids = process_images([m.value for m in media], adapter.image_policy, max_patches=MAX_PATCHES)
     prompt = adapter.tokenizer.apply_chat_template(
         messages, add_generation_prompt=True, tokenize=False,
         enable_thinking=adapter.thinking_enabled(request), tools=adapter._template_tools(request),

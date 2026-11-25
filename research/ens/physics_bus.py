@@ -178,7 +178,9 @@ def site_states(model, tokens, site, mentions, h=None):
 # ------------------------------------------------------------------ prompts
 def make_row(tok, voc, task, papers, rng, templates):
     """A realistic Q&A row: (prompt ids, answer ids, mentions, record ids, meta) or None (no valid pair / too long)."""
-    qa = QA.make_qa(task, papers, rng, templates)
+    if len(papers) == 2 and papers[0]["title"] == papers[1]["title"]:
+        return None
+    qa = QA.make_qa(task, papers, rng, templates, format_chat=getattr(tok, "chat", QA.chat))
     if qa is None:
         return None
     prompt, answer, titles, meta = qa
@@ -423,7 +425,6 @@ def load_world(args):
         from research.ens import kimi_core as KC
         model = KC.KimiCore(args.model, kda_policy=getattr(args, "kda_policy", "chunk_wy"))
         tok = KC.KimiTok(model)
-        QA.chat = KC.kimi_chat                            # the Q&A prompts use Kimi's chat format
         return facts, model, model.config, model.checkpoint, tok, Vocab(tok, facts, model)
     path = Q.snapshot_dir(args.model)
     model, cfg, ckpt = Q.load(path, dtype=mx.bfloat16, repo=args.model)
@@ -531,6 +532,15 @@ def train(args) -> int:
     return 0
 
 
+def eval_batches(rows):
+    """Keep every row pairable for the swapped-record control, even at 16k + 1 rows."""
+    start = 0
+    while start < len(rows):
+        size = 15 if len(rows) - start == 17 else 16
+        yield rows[start:start + size]
+        start += size
+
+
 def score_batch(tasks, texts, metas, concepts=()):
     return [QA.score(tk, tx, m, concepts) for tk, tx, m in zip(tasks, texts, metas)]
 
@@ -577,9 +587,8 @@ def evaluate(model, port, tok, voc, facts, titles, args, cells: EvalCells):
                 if r is not None:
                     rows.append(r)
             tally, ex = {}, None
-            for a0 in range(0, len(rows), 16):
+            for sub in eval_batches(rows):
                 cells.check()
-                sub = rows[a0:a0 + 16]
                 prompts = [r[0] for r in sub]
                 M = mx.array([r[2] + [-1] * (2 - len(r[2])) for r in sub])
                 R = {s: mx.array([r[3][s] + [0] * (2 - len(r[3][s])) for r in sub]) for s in SLOTS}

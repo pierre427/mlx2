@@ -84,7 +84,11 @@ def compare(args):
     a, b = (json.loads(Path(p).read_text()) for p in (args.reference, args.candidate))
     ra = {r["test_index"]: r for x in a["batches"] for r in x["rows"]}
     rb = {r["test_index"]: r for x in b["batches"] for r in x["rows"]}
-    keys = sorted(ra.keys() & rb.keys())
+    if (a["checkpoint"] != b["checkpoint"] or a["width"] != b["width"]
+            or a["max_tokens"] != b["max_tokens"] or not ra or ra.keys() != rb.keys()
+            or len(ra) != a["questions"] or len(rb) != b["questions"]):
+        raise ValueError("batch arms must cover the same checkpoint, serving shape, and questions")
+    keys = sorted(ra)
     out = {"reference_accuracy": a["accuracy"], "candidate_accuracy": b["accuracy"],
            "answers_differ": [k for k in keys if ra[k]["predicted"] != rb[k]["predicted"]],
            "texts_identical": sum(ra[k]["text"] == rb[k]["text"] for k in keys), "questions": len(keys),

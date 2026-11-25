@@ -196,7 +196,7 @@ def inspect_artifact(model_path):
 
 
 NUMERIC_POLICY_KEYS = frozenset({"moe_nax", "mla", "mla_flash", "rda", "fused_norm", "reasoning_effort", "mhc",
-                                 "merged_projections", "rms_law"})
+                                 "merged_projections", "rms_law", "mla_expanded_gib"})
 
 
 def split_policy(policy=None):
@@ -477,6 +477,7 @@ class RaonAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
 
     def capability_receipts(self):
         status = self.model.mechanism_status()
+        flash_calls = status["mla"].get("expanded_flash192", 0) + status["mla"].get("expanded_flash192_windows", 0)
         external = getattr(self, "draft_model", None) is not None
         unq = {"qualified": False, "selection_authority": "serving_route_receipt"}
         return {
@@ -500,13 +501,13 @@ class RaonAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
                                  "served_alpha": status["effort_alpha"],
                                  "matches_reference": status["effort_alpha"] == self.model.effort_alpha("none")},
                 **unq},
-            "mla_flash": {"implemented": "expanded prompt chunks only (flash192 / key windows at 40 heads)",
-                          "selected": self.policy["mla_flash"], "qualified": False,
-                          "observed_used": int(status["mla"].get("expanded_flash192", 0)
-                                               + status["mla"].get("expanded_flash192_windows", 0)),
+            "mla_flash": {"implemented": True, "scope": "expanded prompt chunks (flash192 / key windows at 40 heads)",
+                          "selected": self.policy["mla_flash"] != "off", "mode": self.policy["mla_flash"],
+                          "qualified": False, "observed_used": flash_calls > 0, "calls": flash_calls,
                           "declined": int(status["mla"].get("flash_declined", 0)),
                           "absorbed_decode": "not implemented: the NAX absorbed kernel's grid covers 32 heads"},
-            "moe_nax_gather": {"implemented": "affine artifact only", "selected": self.policy["moe_nax"],
+            "moe_nax_gather": {"implemented": True, "scope": "affine artifact only",
+                               "selected": self.policy["moe_nax"] != "off", "mode": self.policy["moe_nax"],
                                "qualified": False},
         }
 
@@ -527,8 +528,9 @@ class RaonAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
                 "capability_receipts": self.capability_receipts()}
 
     def close(self):
-        from .process_globals import release
-
-        release(self)
-        self.model = None
-        self.tokenizer = None
+        try:
+            super().close()
+        finally:
+            self.draft_model = None
+            self.model = None
+            self.tokenizer = None

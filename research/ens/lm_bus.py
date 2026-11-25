@@ -191,7 +191,7 @@ def text_windows(tok: Tok, split: str, n_docs=None):
             if (i % 10 == 0) != (split == "held"):
                 continue
             ids = tok.encode(json.loads(line)["text"])
-            wins += [ids[j:j + SEQ] for j in range(0, len(ids) - SEQ, SEQ)]
+            wins += [ids[j:j + SEQ] for j in range(0, len(ids) - SEQ + 1, SEQ)]
             if n_docs and i > n_docs:
                 break
     return wins
@@ -288,7 +288,10 @@ def eval_only(args):
         if hashlib.file_digest(f, "sha256").hexdigest()[:12] != rec["adapter_checkpoint"].rpartition("@")[2]:
             raise SystemExit("adapter weights differ from the training receipt")
     adapter.freeze()
-    return finish(out, rec, model, adapter, Tok(path), C.codebook(s["width"]), args)
+    if (out / "receipt.json").exists():
+        raise SystemExit("receipt.json exists; refusing to overwrite an evaluation")
+    return finish(out, dict(rec, eval_source_revision=C.source_revision()), model, adapter, Tok(path),
+                  C.codebook(s["width"]), argparse.Namespace(**rec["args"]))
 
 
 CHUNK = 32

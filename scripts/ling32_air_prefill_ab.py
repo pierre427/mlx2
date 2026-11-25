@@ -87,9 +87,19 @@ def compare(args):
     a = json.loads(Path(args.reference).read_text())
     b = json.loads(Path(args.candidate).read_text())
     rows = []
-    for x, y in zip(a["rows"], b["rows"]):
+    def by_cell(record):
+        indexed = {(row["target_tokens"], row["repeat"]): row for row in record["rows"]}
+        if not indexed or len(indexed) != len(record["rows"]):
+            raise ValueError("missing or duplicate prefill cells")
+        return indexed
+
+    reference, candidate = by_cell(a), by_cell(b)
+    if a["checkpoint"] != b["checkpoint"] or reference.keys() != candidate.keys():
+        raise ValueError("prefill arms must cover the same checkpoint and cells")
+    for key, x in reference.items():
+        y = candidate[key]
         rows.append({"target_tokens": x["target_tokens"], "repeat": x["repeat"],
-                     "identical_tokens": x["token_ids"] == y["token_ids"] and x["token_ids"] is not None,
+                     "identical_tokens": x["token_ids"] == y["token_ids"] and bool(x["token_ids"]),
                      "reference_tok_s": x["prefill_tok_s"], "candidate_tok_s": y["prefill_tok_s"],
                      "speedup": (y["prefill_tok_s"] / x["prefill_tok_s"])
                      if x["prefill_tok_s"] and y["prefill_tok_s"] else None})

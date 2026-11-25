@@ -77,8 +77,12 @@ def compare(args):
     a = json.loads(Path(args.reference).read_text())["rows"]
     b = json.loads(Path(args.candidate).read_text())["rows"]
     positions, report = {}, {}
-    for index in sorted(set(a) & set(b), key=int):
+    if not a or a.keys() != b.keys():
+        raise ValueError("trace arms must cover the same questions")
+    for index in sorted(a, key=int):
         x, y = a[index]["token_trace"]["token_ids"], b[index]["token_trace"]["token_ids"]
+        if not x or not y:
+            raise ValueError(f"missing token trace for question {index}")
         first = next((i for i, (p, q) in enumerate(zip(x, y)) if p != q), None)
         if first is None and len(x) != len(y):
             first = min(len(x), len(y))
@@ -106,11 +110,16 @@ def classify(args):
     ref = json.loads(Path(args.reference).read_text())["rows"]
     cand = json.loads(Path(args.candidate).read_text())["rows"]
     verdicts = {}
-    for index in sorted(set(ref) & set(cand), key=int):
+    if ref.keys() != cand.keys():
+        raise ValueError("window arms must cover the same questions")
+    for index in sorted(ref, key=int):
         rs, rt = _top(ref[index])
         cs, ct = _top(cand[index])
         if not rt or not ct:
             verdicts[index] = {"verdict": "unclassified", "why": "missing window"}
+            continue
+        if ref[index].get("position") != cand[index].get("position") or rs == cs:
+            verdicts[index] = {"verdict": "unclassified", "why": "windows do not show the same divergence"}
             continue
         r_top, c_top = max(rt.values()), max(ct.values())
         # Each arm's selected token must sit within the ceiling of the other arm's top.
@@ -118,10 +127,13 @@ def classify(args):
         r_in_c = ct.get(rs)
         margins = {"ref_selected_vs_cand_top": None if r_in_c is None else c_top - r_in_c,
                    "cand_selected_vs_ref_top": None if c_in_r is None else r_top - c_in_r}
+        high_margin = (any(v is not None and v > CEILING for v in margins.values())
+                       or (c_in_r is None and r_top - min(rt.values()) > CEILING)
+                       or (r_in_c is None and c_top - min(ct.values()) > CEILING))
         known = all(v is not None for v in margins.values())
         near = known and all(v <= CEILING for v in margins.values())
         verdicts[index] = {"verdict": "near_tie_candidate" if near else
-                           ("high_margin" if known else "unclassified"),
+                           ("high_margin" if high_margin else "unclassified"),
                            "position": ref[index].get("position"), "ref_selected": rs,
                            "cand_selected": cs, "margins_nats": margins,
                            "ref_top5": rt, "cand_top5": ct,

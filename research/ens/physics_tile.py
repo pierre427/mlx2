@@ -141,7 +141,7 @@ def load_init(tile, init_dir: Path):
     rec = json.loads((init_dir / "receipt.json").read_text())
     if rec.get("width", DENSE_H) * (1 if not tile.sparse else SPARSE_H // DENSE_H) != tile.w1.shape[1]:
         raise SystemExit("--init must be a phase-1 run of the same width")   # before load_weights (review)
-    tile.load_weights(str(init_dir / "tile.safetensors"))
+    C.load_checkpoint_weights(tile, init_dir / "tile.safetensors", rec["tile_checkpoint"])
     rd = PB.resume_dir(init_dir)
     u = dict(mx.load(str(rd / "model.safetensors"))).get("usage") if rd else None
     return rec, u
@@ -179,7 +179,7 @@ def run(args) -> int:
         raise SystemExit("base checkpoint or facts differ from the bus receipt")
     s = brec["port"]
     port = PB.RecordPort(model, s["site"], s["rank"], s["tau"])
-    port.load_weights(str(Path(args.bus) / "port.safetensors"))
+    C.load_checkpoint_weights(port, Path(args.bus) / "port.safetensors", brec["port_checkpoint"])
     port.freeze()
     allp = [p for p in facts["papers"] if "'" not in p["title"]]
     prng = random.Random(123 + args.world_seed)
@@ -456,9 +456,8 @@ def evaluate(model, port, tile, tok, voc, papers, rare, unseen, args, batch_inpu
         rng = random.Random(70_000 + args.seed + PB.hash_task(key))
         rows = world_rows(tok, voc, pool, None, rng, n, temps, [task])
         tally, ex = {}, None
-        for a0 in range(0, len(rows), 16):
+        for sub in PB.eval_batches(rows):
             cells.check()
-            sub = rows[a0:a0 + 16]
             T, W, Y, M, X, H = batch_inputs(sub)
             _, _, _, _, R = PB.stack(tok, [r[2:] for r in sub])
             prompts, metas, mn = [r[2] for r in sub], [r[6] for r in sub], QA.MAX_NEW[task]
@@ -530,9 +529,8 @@ def evaluate_posthoc(tile_fn, model, port, tok, voc, split, unseen, args, batch_
         if cells.done(key):
             return
         tally, ex = {}, None
-        for a0 in range(0, len(rows), 16):
+        for sub in PB.eval_batches(rows):
             cells.check()
-            sub = rows[a0:a0 + 16]
             T, W, Y, M, X, H = batch_inputs(sub)
             prompts, metas, mn = [r[2] for r in sub], [r[6] for r in sub], QA.MAX_NEW[task]
             pl = payload(tile_fn(X), voc, model)

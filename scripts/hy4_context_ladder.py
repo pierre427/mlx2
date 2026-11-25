@@ -118,8 +118,8 @@ def stream_one(base: str, body: dict, *, timeout: float) -> dict:
                     arrivals.append(time.perf_counter() - started)
                 parts.append((choice.get("delta") or {}).get("content") or "")
                 finish = choice.get("finish_reason") or finish
-    if not done or receipt is None:
-        raise ValueError("incomplete generation stream or absent terminal receipt")
+    if not done or receipt is None or not ids:
+        raise ValueError("incomplete generation stream, token trace or terminal receipt")
     first = arrivals[0] if arrivals else None
     decode = ((len(arrivals) - 1) / (arrivals[-1] - arrivals[0])
               if len(arrivals) > 1 and arrivals[-1] > arrivals[0] else None)
@@ -172,8 +172,7 @@ def ladder_verdict(cells):
     """Correctness failures of the finished cells.
 
     An oracle failure, or a warm arm that restored nothing from APCv2, fails
-    the ladder.  A cold/warm token mismatch is only counted: it can be a
-    passing near tie and needs classification, not an automatic failure.
+    the ladder.  Cold/warm replay of the same width-one route requires exact token parity.
     """
     ran = [row for row in cells if "cold" in row and "warm" in row]
     return {
@@ -382,7 +381,8 @@ def main(argv=None) -> int:
         # its expected behaviour, not a miss.
         apc = (report["execution_policy"] or {}).get("latent_kv") != "fp8"
         report["verdict"]["warm_restore_expected"] = apc
-        failed = [k for k in ("oracle_failures", "warm_misses") if report["verdict"][k] and (apc or k != "warm_misses")]
+        failed = [k for k in ("oracle_failures", "warm_misses", "cold_warm_mismatches")
+                  if report["verdict"][k] and (apc or k == "oracle_failures")]
         if failed and report["status"] == "completed":  # an early stop keeps its own reason
             report["status"] = "failed: " + ", ".join(
                 f"{len(report['verdict'][k])} {k.replace('_', ' ')}" for k in failed)

@@ -97,9 +97,12 @@ def record_twice(module, fn):
     mx.eval(fn())
     first, second = record(module, fn), record(module, fn)
     a, b = first.summary(), second.summary()
-    return {"first": a, "second": b, "compare": module.compare_recordings(first, second),
-            "supported": not a["unsupported"] and not b["unsupported"],
-            "reflected": a["unreflected_kernels"] == 0}
+    compare = module.compare_recordings(first, second)
+    supported = not a["unsupported"] and not b["unsupported"]
+    reflected = all(r["unreflected_kernels"] == 0 for r in (a, b))
+    captured = all(r["dispatches"] > 0 and r["drained"] for r in (a, b))
+    return {"first": a, "second": b, "compare": compare, "supported": supported,
+            "reflected": reflected, "ok": supported and reflected and captured and compare == "equal"}
 
 
 def inkling2(module, model_path, pos):
@@ -163,7 +166,10 @@ def main():
     receipt["finished"] = time.time()
     ok = (receipt["abi"]["probe"] is True and receipt["abi"]["libmlx_images"] == 1
           and receipt["install"]["installed"] and not receipt["install"]["error"]
-          and all(g["supported"] and g["compare"] == "equal" for g in receipt["graphs"].values()))
+          and receipt["abi"]["mlx_version"] == receipt["abi"]["runtime"] == mx.__version__
+          and receipt["abi"]["api"] == 1
+          and all(g["ok"] for g in receipt["graphs"].values())
+          and (not args.model or receipt["inkling2"].get("ok", False)))
     receipt["hooks_and_recording_ok"] = ok
     Path(args.out).write_text(json.dumps(receipt, indent=1, default=str) + "\n")
     print(json.dumps({k: receipt[k] for k in ("hooks_and_recording_ok", "passed", "reason")}))

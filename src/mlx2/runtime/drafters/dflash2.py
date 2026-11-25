@@ -552,12 +552,14 @@ def _draft_distributions(
                     + hosted_edges[row]
                 )
                 if post_cap is not None:
-                    # The cap is monotonic, so a masked -inf stays -inf.
+                    # Preserve processor exclusions: tanh(-inf) itself is -1.
+                    excluded = np.isneginf(candidate_scores)
                     candidate_scores = np.asarray(
                         cap_selector_scores(
                             mx.array(candidate_scores.astype(np.float32)), post_cap
                         ).astype(mx.float32)
                     )
+                    candidate_scores = np.where(excluded, -np.inf, candidate_scores)
                 if not np.isfinite(candidate_scores).any():
                     # The target still has a legal dense continuation, but the
                     # selector cannot propose it. End this lane's draft here;

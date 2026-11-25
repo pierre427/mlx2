@@ -103,22 +103,30 @@ def _check_settings(settings):
             _refuse(f'settings {key}={settings.get(key)!r}')
 
 
-def process_images(images, settings):
+def process_images(images, settings, *, max_patches=None):
     _check_settings(settings)
     patch, merge = settings['patch_size'], settings['merge_size']
     temporal = settings['temporal_patch_size']
     mean = np.array(settings['image_mean'], dtype=np.float32)[:, None, None]
     std = np.array(settings['image_std'], dtype=np.float32)[:, None, None]
-    if not images:
-        raise ValueError('Ling-3.2-air image processing needs at least one image')
-    pixels, grids = [], []
+    sized_images = []
     for image in images:
         if not isinstance(image, Image.Image):
             raise TypeError('Ling-3.2-air image processing accepts PIL images only')
+        size = smart_resize(image.height, image.width, patch * merge,
+                            settings['min_pixels'], settings['max_pixels'])
+        sized_images.append((image, size))
+    if not sized_images:
+        raise ValueError('Ling-3.2-air image processing needs at least one image')
+    total = sum((height // patch) * (width // patch) for _, (height, width) in sized_images)
+    if max_patches is not None and total > max_patches:
+        raise ValueError(f'Ling-3.2-air vision mode accepts at most {max_patches} image patches '
+                         f'per request (got {total}); send smaller images')
+
+    pixels, grids = [], []
+    for image, (height, width) in sized_images:
         if image.mode != 'RGB':
             image = image.convert('RGB')
-        height, width = smart_resize(image.height, image.width, patch * merge,
-                                     settings['min_pixels'], settings['max_pixels'])
         image = image.resize((width, height), resample=Image.Resampling.BICUBIC)
         array = np.asarray(image).transpose(2, 0, 1)
         array = (array.astype(np.float64) * settings['rescale_factor']).astype(np.float32)

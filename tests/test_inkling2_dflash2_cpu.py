@@ -715,3 +715,27 @@ def test_tiny_inkling2_engine_greedy_exact_and_sampled_through_the_crop():
     sampled, stats = _inkling_run(target, draft, prompt, 1.0)
     assert len(sampled) == 12 and all(0 <= token < 500 for token in sampled)
     assert stats.get("external_hybrid_transactions", 0) > 0
+
+
+def test_post_correction_cap_keeps_processor_exclusions():
+    target = _Target()
+    _declare(target, rows=30)
+    draft = _draft("after_correction").bind(target)
+    hidden = mx.zeros((1, 3, 16))
+    # The grammar permits only a token outside the selector's top-k.
+    def outside_top_k(_tokens, logits):
+        ids = mx.arange(logits.shape[-1])
+        return mx.where(ids == mx.argmin(logits, axis=-1), logits, -mx.inf)
+
+    tokens, laws = draft.draft_distributions(
+        [7], hidden, draft.make_cache(), 2, [SimpleNamespace(sample=np.argmax)], [1.0],
+        logits_processors=[[outside_top_k]], processor_histories=[[1, 2]],
+    )
+    assert tokens == [[]] and laws == [[]]
+
+
+@pytest.mark.parametrize("cap", [-1.0, float("inf"), float("nan"), True, "3.0"])
+def test_after_correction_requires_finite_positive_numeric_cap(cap):
+    with pytest.raises(ValueError, match="final_logit_softcapping"):
+        DFlash2Config.from_dict(_hf_config(selector_softcap_mode="after_correction",
+                                           final_logit_softcapping=cap))

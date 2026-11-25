@@ -10,6 +10,7 @@ import contextlib
 import copy
 import hashlib
 import json
+import math
 import os
 import time
 import uuid
@@ -753,7 +754,7 @@ CONTROLLER_MODES = ("measured", "deterministic")
 
 def _controller_cost(cost, where):
     if not isinstance(cost, dict) or set(cost) != {"a_ms", "b_ms", "ordinary_ms"} or not all(
-            isinstance(v, (int, float)) and not isinstance(v, bool) and v >= 0 for v in cost.values()) \
+            type(v) in (int, float) and math.isfinite(v) and v >= 0 for v in cost.values()) \
             or not cost["a_ms"] > 0 or not cost["ordinary_ms"] > 0:
         raise ValueError(f"{where} needs a_ms > 0, b_ms >= 0 and ordinary_ms > 0")
     return {k: float(v) for k, v in cost.items()}

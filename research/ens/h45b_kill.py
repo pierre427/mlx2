@@ -88,6 +88,12 @@ def main(argv=None):
         if ref is not None and "loop" not in row:
             out.setdefault("reference_missing_seeds", []).append(s)
     done = [r for r in out["per_seed"].values() if all(a in r for a in ("gain6", "fixed6", "decay6"))]
+    missing = {s: [a for a in ("gain6", "fixed6", "decay6") if a not in row]
+               for s, row in out["per_seed"].items()}
+    if any(missing.values()) or not seeds:
+        out["missing_arms"] = {s: arms for s, arms in missing.items() if arms}
+        print(json.dumps(out, indent=1))
+        raise SystemExit("a complete gain6, fixed6, decay6 comparison is required for every requested seed")
     if done:
         mean = lambda xs: round(sum(xs) / len(xs), 4)
         out["gain6_minus_fixed6_unseen"] = mean([r["gain6"]["unseen_bus"] - r["fixed6"]["unseen_bus"] for r in done])

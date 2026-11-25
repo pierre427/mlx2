@@ -63,25 +63,25 @@ def chat(question: str) -> str:
     return f"<|im_start|>user\n{question}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
 
 
-def make_qa(task, papers, rng, q_templates, concept_pick=None):
+def make_qa(task, papers, rng, q_templates, concept_pick=None, *, format_chat=chat):
     """(prompt text, answer text, mentioned titles in order, meta) or None. papers have title/field/month/concept."""
     A = papers[0]
     q = rng.choice(q_templates[task])
     if task == "field":
-        return chat(q.format(A=A["title"])), rng.choice(A_TEMPLATES["field"]).format(F=FIELD_NAME[A["field"]]), \
+        return format_chat(q.format(A=A["title"])), rng.choice(A_TEMPLATES["field"]).format(F=FIELD_NAME[A["field"]]), \
             [A["title"]], {"value": A["field"]}
     if task == "month":
-        return chat(q.format(A=A["title"])), rng.choice(A_TEMPLATES["month"]).format(M=A["month"]), \
+        return format_chat(q.format(A=A["title"])), rng.choice(A_TEMPLATES["month"]).format(M=A["month"]), \
             [A["title"]], {"value": A["month"]}
     if task == "concept":
-        return chat(q.format(A=A["title"])), rng.choice(A_TEMPLATES["concept"]).format(c=A["concept"]), \
+        return format_chat(q.format(A=A["title"])), rng.choice(A_TEMPLATES["concept"]).format(c=A["concept"]), \
             [A["title"]], {"value": A["concept"]}
     B = papers[1]
     if task == "same_field":
         same = A["field"] == B["field"]
         ans = (rng.choice(A_TEMPLATES["same_yes"]).format(F=FIELD_NAME[A["field"]]) if same else
                rng.choice(A_TEMPLATES["same_no"]).format(F1=FIELD_NAME[A["field"]], F2=FIELD_NAME[B["field"]]))
-        return chat(q.format(A=A["title"], B=B["title"])), ans, [A["title"], B["title"]], \
+        return format_chat(q.format(A=A["title"], B=B["title"])), ans, [A["title"], B["title"]], \
             {"decision": "Yes" if same else "No", "fields": (A["field"], B["field"])}
     if task == "earlier":
         ma, mb = PF.MONTHS.index(A["month"]), PF.MONTHS.index(B["month"])
@@ -91,7 +91,7 @@ def make_qa(task, papers, rng, q_templates, concept_pick=None):
         early, late = (A["month"], B["month"]) if ma < mb else (B["month"], A["month"])
         rest = "the second" if w == "first" else "the first"
         ans = rng.choice(A_TEMPLATES["earlier"]).format(w=w, M1=early, rest=rest, M2=late)
-        return chat(q.format(A=A["title"], B=B["title"])), ans, [A["title"], B["title"]], \
+        return format_chat(q.format(A=A["title"], B=B["title"])), ans, [A["title"], B["title"]], \
             {"decision": w, "months": (A["month"], B["month"])}
     if task == "which_concept":
         if A["concept"] == B["concept"]:
@@ -100,7 +100,7 @@ def make_qa(task, papers, rng, q_templates, concept_pick=None):
         c = [A, B][pick]["concept"]
         w = "first" if pick == 0 else "second"
         ans = rng.choice(A_TEMPLATES["which_concept"]).format(w=w, c=c)
-        return chat(q.format(A=A["title"], B=B["title"], c=c)), ans, [A["title"], B["title"]], {"decision": w}
+        return format_chat(q.format(A=A["title"], B=B["title"], c=c)), ans, [A["title"], B["title"]], {"decision": w}
     raise ValueError(task)
 
 

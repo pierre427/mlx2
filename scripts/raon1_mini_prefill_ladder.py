@@ -19,6 +19,7 @@ import argparse
 import json
 import os
 import signal
+import shlex
 import statistics
 import subprocess
 import sys
@@ -44,13 +45,21 @@ def stream(base, body, timeout=2400):
     request = urllib.request.Request(base + "/v1/chat/completions", data=json.dumps(body).encode(),
                                      headers={"content-type": "application/json"})
     start = time.perf_counter()
-    first, usage, text, last = None, None, "", None
+    first, usage, text = None, None, ""
+    done = False
+    receipt = None
     with urllib.request.urlopen(request, timeout=timeout) as response:
         for line in response:
             line = line.decode().strip()
-            if not line.startswith("data:") or line == "data: [DONE]":
+            if line == "data: [DONE]":
+                done = True
+                break
+            if not line.startswith("data:"):
                 continue
             chunk = json.loads(line[5:])
+            if "error" in chunk:
+                raise RuntimeError(f"generation failed: {chunk['error']}")
+            receipt = chunk.get("mlx2") or chunk.get("route_receipt") or receipt
             if chunk.get("usage"):
                 usage = chunk["usage"]
             for choice in chunk.get("choices", []):
@@ -59,9 +68,10 @@ def stream(base, body, timeout=2400):
                 if piece and first is None:
                     first = time.perf_counter() - start
                 text += piece
-            last = chunk
+    if not done or not usage or not receipt or first is None:
+        raise ValueError("incomplete generation stream, usage or terminal receipt")
     return {"ttft_s": first, "total_s": time.perf_counter() - start, "usage": usage, "text": text,
-            "receipt": (last or {}).get("mlx2") or (last or {}).get("route_receipt")}
+            "receipt": receipt}
 
 
 def main():
@@ -78,6 +88,16 @@ def main():
                         help="bury a unique access code at 1/3 depth of every prompt and score the reply")
     parser.add_argument("--label", default="", help="arm label in the report")
     args = parser.parse_args()
+    extra_args = shlex.split(args.extra_args)
+    owned = ("--host", "--port", "--model", "--allow-production-port", "--admin-token-file",
+             "--prefill-step", "--max-context", "--max-lanes", "--max-inflight", "--cache-dir",
+             "--no-cache-dir", "--cache-bytes")
+    for arg in extra_args:
+        option = arg.partition("=")[0]
+        if option.startswith("--") and any(name.startswith(option) for name in owned):
+            parser.error(f"--extra-args cannot override ladder-owned setting {option}")
+    if args.reps < 1:
+        parser.error("--reps must be positive")
     if args.out.exists() and any(args.out.iterdir()):
         raise SystemExit(f"{args.out} is not empty")
     args.out.mkdir(parents=True, exist_ok=True)
@@ -88,6 +108,8 @@ def main():
 
     from mlx2.adapters.registry import inspect_model
     from realistic_haystack import bury, haystack
+    from qualify_prefill_handoff import needle_match
+    from run_guarded_benchmark import owns_listener
 
     resolution = inspect_model(args.model)
     checkpoint = f"{args.model.name}@sha256:{resolution.artifact_fingerprint}"
@@ -132,7 +154,7 @@ def main():
                    "--port", str(args.port), "--max-inflight", "1", "--max-lanes", "1",
                    "--max-context", str(max(cells) + 4096), "--cache-bytes", str(4 << 30),
                    "--cache-dir", str(arm_dir / "cache"), "--admin-token-file", str(token_file),
-                   "--prefill-step", str(step), *args.extra_args.split()]
+                   "--prefill-step", str(step), *extra_args]
         log = (arm_dir / "server.log").open("w")
         server = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT, start_new_session=True,
                                   env={**os.environ, "PYTHONPATH": str(ROOT / "src")}, cwd=ROOT)
@@ -143,7 +165,7 @@ def main():
                 if server.poll() is not None:
                     raise RuntimeError("server exited before readiness")
                 try:
-                    if call(base, "/v1/status", token, timeout=10).get("healthy"):
+                    if owns_listener(server.pid, args.port) and call(base, "/v1/status", token, timeout=10).get("healthy"):
                         break
                 except OSError:
                     pass
@@ -182,10 +204,16 @@ def main():
                     "warm_cached_tokens": ((warm["usage"] or {}).get("prompt_tokens_details") or {}).get("cached_tokens"),
                     "cold_text": [r["text"] for r in cold], "warm_text": warm["text"],
                     **({"needle_codes": [codes[(cell, rep)] for rep in range(args.reps)],
-                        "needle_found": [codes[(cell, rep)] in r["text"].replace("\u2011", "-").replace("\u2013", "-")
-                                         for rep, r in enumerate(cold)]} if args.needle else {})})
+                        "needle_found": [needle_match(r["text"], codes[(cell, rep)])
+                                         for rep, r in enumerate(cold)],
+                        "warm_needle_found": needle_match(warm["text"], codes[(cell, args.reps - 1)])}
+                       if args.needle else {})})
             arm["final_status"] = call(base, "/v1/status", token)
-            arm["passed"] = True
+            arm["passed"] = all(
+                (cell["warm_cached_tokens"] or 0) > 0
+                and (not args.needle or (all(cell["needle_found"]) and cell["warm_needle_found"]))
+                for cell in arm["cells"]
+            )
         except Exception as error:  # noqa: BLE001 - recorded, next arm still runs
             arm["passed"] = False
             arm["error"] = repr(error)
@@ -196,6 +224,7 @@ def main():
                     server.wait(timeout=60)
                 except subprocess.TimeoutExpired:
                     os.killpg(server.pid, signal.SIGKILL)
+                    server.wait(timeout=10)
             log.close()
         report["arms"].append(arm)
         tmp = args.out / "ladder.json.tmp"
@@ -206,6 +235,8 @@ def main():
                           "median_tok_s": {c["cell"]: c["cold_prefill_tok_s_median"] for c in arm["cells"]},
                           "warm_ttft": {c["cell"]: c["warm_ttft_s"] for c in arm["cells"]}}))
 
+    return 0 if all(arm["passed"] for arm in report["arms"]) else 1
+
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

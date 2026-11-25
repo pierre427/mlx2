@@ -914,3 +914,45 @@ def test_engine_drains_before_each_recording(monkeypatch):
     for _ in range(2):
         site.call(_fn([]), [mx.ones((2,)) * 2], ("g", 1))
     assert len(calls) == 2 and site.counts["recording"] == 2
+
+
+def test_seal_uses_buffers_from_selected_recording():
+    seen = []
+    class Backend(FakeBackend):
+        def seal(self, recording, inputs, outputs, written, pinned):
+            seen.append((recording, inputs[0].item(), outputs[0].item()))
+            return super().seal(recording, inputs, outputs, written, pinned)
+
+    site = _site(Backend(None, signatures=["short", "long"],
+                         superset={("short", "long"): "copy_superset_b"}), warm_calls=0)
+    for value in (1, 5):
+        site.call(_fn([]), [mx.array(value)], ("g", 1))
+    assert seen == [("short", 1, 4)]
+
+
+def test_check_replays_mutating_step_from_original_input():
+    def step(inputs):
+        inputs[0][0] = inputs[0][0] + 1
+        return [inputs[0] * 2]
+
+    site = _site(FakeBackend(step), warm_calls=0)
+    for _ in range(3):
+        x = mx.array([4])
+        site.call(step, [x], ("g", 1), written=(0,))
+        assert x.item() == 5
+    assert site.receipt()["keys"] == {"live": 1}
+
+
+@pytest.mark.parametrize("bad", [
+    {"unreflected_kernels": 1}, {"dispatches": 0}, {"drained": False},
+])
+def test_recording_selftest_requires_evidence_from_both_runs(monkeypatch, bad):
+    from types import SimpleNamespace
+    from scripts import step_replay_selftest as selftest
+
+    good = {"unsupported": "", "unreflected_kernels": 0, "dispatches": 1, "drained": True}
+    rows = iter([good, {**good, **bad}])
+    monkeypatch.setattr(selftest, "record", lambda *_: SimpleNamespace(summary=lambda row=next(rows): row))
+    module = SimpleNamespace(compare_recordings=lambda *_: "equal")
+    result = selftest.record_twice(module, lambda: [mx.zeros((1,))])
+    assert result["ok"] is False

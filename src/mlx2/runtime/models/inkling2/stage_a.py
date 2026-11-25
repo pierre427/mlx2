@@ -104,7 +104,7 @@ def _kernel(plans, dtype, rows, n_inputs):
         return held
     header, why = lib.library("matvec")
     if header is None:
-        return None, why
+        return (None, 0), why
     source, groups = _source(plans, dtype, rows)
     kernel = mx.fast.metal_kernel(
         name=f"inkling2_stage_a_{len(_kernels)}",

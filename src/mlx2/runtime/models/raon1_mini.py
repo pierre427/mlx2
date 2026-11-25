@@ -511,12 +511,14 @@ def expanded_flash_available(heads: int, dtype) -> bool:
     ``H``, head grid axis); only its admission and probe are pinned to 32
     heads.  This memoized probe checks it at ``heads`` against its FP32 ops
     law (same 2e-2 relative bound as Kimi's) on an M5 GPU."""
+    if mx.default_device() != mx.gpu:
+        return False
     key = (int(heads), str(dtype))
     if key not in _EXPANDED_FLASH_OK:
         from . import kimi_linear_mla_flash as fl
 
         ok = False
-        if mx.default_device() == mx.gpu and fl._device_is_m5():
+        if fl._device_is_m5():
             try:
                 k1, k2, k3 = mx.random.split(mx.random.key(20261125), 3)
                 rows, width, n, r, v = 40, 100, fl.NOPE, fl.SHARED, fl.VDIM

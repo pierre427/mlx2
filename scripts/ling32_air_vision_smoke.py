@@ -122,29 +122,29 @@ def run_images(args):
     cases = [
         ("code_4729", [image_part(code_image("4729")),
                        {"type": "text", "text": "What number is written in the image? Reply with the digits only."}],
-         lambda text: text.strip().replace(" ", "").startswith("4729")),
+         lambda text: text.strip().replace(" ", "") == "4729"),
         ("red_square", [image_part(shape_image("red", "square")),
                         {"type": "text", "text": "What colour is the shape? Reply with one word."}],
-         lambda text: "red" in text.lower()),
+         lambda text: text.strip().lower().rstrip(".!") == "red"),
         ("blue_circle", [image_part(shape_image("blue", "circle")),
                          {"type": "text", "text": "Is the shape a circle or a square? Reply with one word."}],
-         lambda text: "circle" in text.lower()),
+         lambda text: text.strip().lower().rstrip(".!") == "circle"),
         ("two_images", [{"type": "text", "text": "First image:"}, image_part(shape_image("green", "square")),
                         {"type": "text", "text": "Second image:"}, image_part(shape_image("yellow", "circle")),
                         {"type": "text", "text": "What colour is the shape in the second image? One word."}],
-         lambda text: "yellow" in text.lower()),
+         lambda text: text.strip().lower().rstrip(".!") == "yellow"),
     ]
     if args.extended:
         cases += [
             ("code_3081", [image_part(code_image("3081")),
                            {"type": "text", "text": "Read the number in the image. Digits only."}],
-             lambda text: text.strip().replace(" ", "").startswith("3081")),
+             lambda text: text.strip().replace(" ", "") == "3081"),
             ("count_dots", [image_part(dots_image(3)),
                             {"type": "text", "text": "How many red dots are in the image? Reply with a digit."}],
-             lambda text: text.strip().startswith("3") or "three" in text.lower()),
+             lambda text: text.strip().lower().rstrip(".!") in {"3", "three"}),
             ("word_planet", [image_part(code_image("PLANET")),
                              {"type": "text", "text": "What word is written in the image? One word."}],
-             lambda text: "planet" in text.lower()),
+             lambda text: text.strip().lower().rstrip(".!") == "planet"),
         ]
     rows = []
     for name, parts, oracle in cases * args.repeat:
@@ -201,7 +201,12 @@ def run_refusal(args):
     rows = []
     for name in args.cases.split(","):
         status, body = call(args.base_url, "/v1/chat/completions", chat(model, cases[name]))
-        rows.append({"case": name, "status": status, "refused": status >= 400, "body": body})
+        expected_status, expected_message = {
+            "video_part": (400, "invalid multimodal content part"),
+            "image": (501, "no implemented multimodal prefill"),
+        }[name]
+        refused = status == expected_status and expected_message in json.dumps(body).lower()
+        rows.append({"case": name, "status": status, "refused": refused, "body": body})
         print(json.dumps({"case": name, "status": status}), flush=True)
     out = {"checkpoint": args.checkpoint, "mode": "refusal", "rows": rows,
            "passed": all(row["refused"] for row in rows)}
@@ -212,8 +217,9 @@ def run_refusal(args):
 def run_compare(args):
     a = json.loads(Path(args.reference).read_text())["rows"]
     b = json.loads(Path(args.candidate).read_text())["rows"]
-    same = [x["token_ids"] == y["token_ids"] and x["token_ids"] is not None for x, y in zip(a, b)]
-    out = {"identical": same, "passed": all(same) and len(a) == len(b)}
+    same = [x["status"] == y["status"] == 200 and x["prompt"] == y["prompt"]
+            and bool(x["token_ids"]) and x["token_ids"] == y["token_ids"] for x, y in zip(a, b)]
+    out = {"identical": same, "passed": bool(same) and all(same) and len(a) == len(b)}
     Path(args.output).write_text(json.dumps(out, indent=1) + "\n")
     print(json.dumps(out))
     return 0 if out["passed"] else 1
@@ -232,6 +238,8 @@ def main(argv=None):
     parser.add_argument("--candidate")
     parser.add_argument("--output", required=True)
     args = parser.parse_args(argv)
+    if args.repeat <= 0:
+        parser.error("--repeat must be positive")
     return {"images": run_images, "text": run_text, "refusal": run_refusal,
             "compare": run_compare}[args.mode](args)
 

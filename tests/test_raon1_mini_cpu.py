@@ -291,7 +291,9 @@ def test_mla_expanded_bound_moves_the_prefill_law_and_budget():
     from mlx2.adapters import raon1_mini as A
     from mlx2.adapters.raon1_mini_memory import RaonCacheBudget
 
-    assert A.parse_policy({})["mla_expanded_gib"] == 4
+    defaults = A.parse_policy({})
+    assert A.split_policy({**defaults, "draft_model": "draft"}) == (defaults, {"draft_model": "draft"})
+    assert defaults["mla_expanded_gib"] == 4
     with pytest.raises(ValueError):
         A.parse_policy({"mla_expanded_gib": 0})
     model = _model()
@@ -360,3 +362,48 @@ def test_nax_levers_are_opt_in_and_decline_cleanly_on_cpu():
     mla = model.layers[3].self_attn
     assert mla.calls["flash_declined"] > 0 and mla.calls.get("expanded_flash192", 0) == 0
     assert float(mx.abs(base - flashed).max()) == 0.0
+
+
+def test_close_flushes_external_feedback_and_releases_drafter():
+    from unittest.mock import Mock
+
+    from mlx2.adapters.raon1_mini import RaonAdapter
+
+    adapter = RaonAdapter.__new__(RaonAdapter)
+    manager = adapter._external_feedback_manager = Mock()
+    adapter.draft_model = object()
+    adapter.close()
+    manager.close.assert_called_once_with()
+    assert adapter.draft_model is None
+
+
+def test_flash_probe_cache_is_gpu_only(monkeypatch):
+    from mlx2.runtime.models import raon1_mini as R
+
+    cache = {}
+    monkeypatch.setattr(R, "_EXPANDED_FLASH_OK", cache)
+    assert not R.expanded_flash_available(40, mx.bfloat16)
+    assert not cache
+    cache[40, str(mx.bfloat16)] = True
+    assert not R.expanded_flash_available(40, mx.bfloat16)
+
+
+def test_nax_receipts_distinguish_selection_from_calls():
+    from types import SimpleNamespace
+
+    from mlx2.adapters.raon1_mini import RaonAdapter, parse_policy
+
+    adapter = object.__new__(RaonAdapter)
+    mla = {}
+    adapter.model = SimpleNamespace(mechanism_status=lambda: dict(mla=mla, rda={}, effort_alpha=0),
+                                    effort_alpha=lambda _: 0)
+    adapter.policy = parse_policy()
+    receipts = adapter.capability_receipts()
+    assert all(receipts[key]["selected"] is False for key in ("mla_flash", "moe_nax_gather"))
+    adapter.policy = parse_policy({"mla_flash": "expanded", "moe_nax": "gather"})
+    receipts = adapter.capability_receipts()
+    assert all(receipts[key]["selected"] is True for key in ("mla_flash", "moe_nax_gather"))
+    assert receipts["mla_flash"]["observed_used"] is False
+    mla["expanded_flash192_windows"] = 2
+    flash = adapter.capability_receipts()["mla_flash"]
+    assert flash["observed_used"] is True and flash["calls"] == 2

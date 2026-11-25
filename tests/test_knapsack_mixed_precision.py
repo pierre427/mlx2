@@ -501,3 +501,23 @@ def test_uniform_plan_fits_exactly_without_a_gcd_bucket():
 def test_user_resolution_that_does_not_divide_sizes_is_not_exact():
     sol = K.solve([[1.0, 0.0]] * 2, [[3, 5]] * 2, 10, resolution=2)
     assert not sol.exact and sol.nbytes <= 10
+
+
+@pytest.mark.parametrize("costs,sizes,kwargs", [
+    ([[float("nan")]], [[8]], {}),
+    ([[1.0, 2.0]], [[8]], {}),
+    ([[0.0]], [[-1]], {}),
+    ([[1.0]], [[8]], {"resolution": 0}),
+    ([[1.0]], [[8]], {"resolution": -1}),
+])
+def test_solver_validates_inputs_even_for_a_forced_plan(costs, sizes, kwargs):
+    with pytest.raises(ValueError):
+        K.solve(costs, sizes, 8, **kwargs)
+
+
+def test_layer_kl_scans_must_score_the_same_token_positions():
+    a, b = _scan(2, [1.0]), _scan(4, [0.5])
+    a["reference"]["skip"] = 32
+    b["reference"]["skip"] = 0
+    with pytest.raises(ValueError, match="different references"):
+        K.layer_kl_costs({"q2g64": a, "q4g64": b})

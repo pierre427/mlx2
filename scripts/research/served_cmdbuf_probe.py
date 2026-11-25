@@ -63,12 +63,18 @@ def stream(url, body):
                                  headers={"Content-Type": "application/json"})
     stamps, text, usage, receipt = [], [], None, None
     t0 = time.monotonic()
+    done = False
     with urllib.request.urlopen(req, timeout=3600) as response:
         for raw in response:
             line = raw.decode().strip()
-            if not line.startswith("data:") or line == "data: [DONE]":
+            if line == "data: [DONE]":
+                done = True
+                break
+            if not line.startswith("data:"):
                 continue
             event = json.loads(line[5:])
+            if "error" in event:
+                raise RuntimeError(f"generation failed: {event['error']}")
             choices = event.get("choices") or []
             if choices and (choices[0].get("delta") or {}).get("content"):
                 stamps.append(time.monotonic() - t0)
@@ -77,6 +83,8 @@ def stream(url, body):
                 usage = event["usage"]
             if event.get("mlx2"):
                 receipt = event["mlx2"]
+    if not done or not receipt or not usage or not stamps:
+        raise ValueError("incomplete generation stream, usage or terminal receipt")
     return stamps, "".join(text), usage, receipt
 
 
@@ -109,9 +117,6 @@ def main():
            "--cache-dir", str(args.out / "cache"),
            "--admin-token-file", str(args.out / "admin-token"),
            "--reasoning-signing-key-file", str(args.out / "reasoning-key")]
-    log = (args.out / "server.log").open("w")
-    proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, start_new_session=True,
-                            env={**os.environ, "PYTHONPATH": str(ROOT / "src")})
     url = f"http://127.0.0.1:{port}"
     admin = {"Authorization": "Bearer " + (args.out / "admin-token").read_text()}
     record = {"schema": "mlx2.served-cmdbuf-probe.v1", "label": args.label,
@@ -127,6 +132,9 @@ def main():
          "  'libmlx_sha256': hashlib.sha256(lib.read_bytes()).hexdigest() if lib.exists() else None}))"],
         capture_output=True, text=True, check=True, env={**os.environ, "PYTHONPATH": str(ROOT / "src")},
     ).stdout)
+    log = (args.out / "server.log").open("w")
+    proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, process_group=0,
+                            env={**os.environ, "PYTHONPATH": str(ROOT / "src")})
     t_start = time.time()
     try:
         deadline = time.time() + 1200
@@ -157,10 +165,7 @@ def main():
                 "max_tokens": 16, "temperature": 0, "enable_thinking": False}
         call(url, "/v1/chat/completions", warm)
         for i, kind in enumerate(args.kinds.split(",")):
-            try:
-                call(url, "/v1/admin/apc/clear", {}, headers=admin)
-            except Exception as error:  # noqa: BLE001
-                record.setdefault("apc_clear_errors", []).append(repr(error))
+            call(url, "/v1/admin/apc/clear", {}, headers=admin)
             body = {"model": model,
                     "messages": [{"role": "user", "content": text[i * chars:(i + 1) * chars] + question}],
                     "max_tokens": args.max_tokens, "temperature": 0, "enable_thinking": False,

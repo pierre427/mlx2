@@ -1032,8 +1032,11 @@ def _numeric_effort(effort):
         if isinstance(effort, bool):
             raise ValueError("Inkling 2 reasoning_effort must be a level name or a number")
         return effort
-    if not math.isfinite(effort):
+    if isinstance(effort, float) and not math.isfinite(effort):
         raise ValueError("Inkling 2 reasoning_effort must be finite")
+    # Reject large values before converting to float or quantizing to cents.
+    if not -1 < effort < 1:
+        raise ValueError("Inkling 2 reasoning_effort must be in [0.0, 0.99]")
     rounded = float(Decimal(repr(float(effort))).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
     if not 0.0 <= rounded <= 0.99:
         raise ValueError("Inkling 2 reasoning_effort must be in [0.0, 0.99]")

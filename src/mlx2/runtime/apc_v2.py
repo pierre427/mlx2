@@ -546,8 +546,8 @@ def publication_alignment_refusal(
     from .checkpoint_publication import checkpoint_publication_refusal
 
     length = int(length)
-    leaves = list(_walk_cache_entries(prompt_cache))
-    for index, cache in enumerate(leaves):
+    roots = list(prompt_cache)
+    for index, cache in enumerate(_walk_cache_entries(roots)):
         contract = cache_operations(
             cache, capability="APCv2 publication alignment", required=False
         )
@@ -567,7 +567,8 @@ def publication_alignment_refusal(
             return PublicationAlignmentRefusal(
                 "position_mismatch", index, name, length, position
             )
-    transaction = checkpoint_publication_refusal(leaves)
+    # CacheList subclasses may own a transaction above their positional leaves.
+    transaction = checkpoint_publication_refusal(roots)
     if transaction is not None:
         return PublicationAlignmentRefusal(
             "uncommitted_transaction", None, None, length, detail=transaction

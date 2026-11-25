@@ -547,10 +547,13 @@ def test_eos_immediately_after_call_opener_obeys_marker_policy(separate_finish):
 # vllm#69174 (read, not copied): an argument whose schema is only ``allOf``
 # used to fall back to string (an object came back as "{...}", true as "true").
 ALL_OF_DEFS = {"Obj": {"type": "object"}, "Flag": {"type": "boolean"},
+               "Alias": {"$ref": "#/$defs/Flag", "allOf": [{"description": "d"}]},
                "Wrapped": {"allOf": [{"$ref": "#/$defs/Obj"}]}}
 ALL_OF_CASES = [
     ({"allOf": [{"$ref": "#/$defs/Obj"}]}, '{"x": 1}', {"x": 1}),
     ({"allOf": [{"type": "boolean"}]}, "true", True),
+    ({"$ref": "#/$defs/Alias"}, "true", True),
+    ({"allOf": [{"allOf": [{"$ref": "#/$defs/Flag"}]}]}, "false", False),
     ({"allOf": [{"$ref": "#/$defs/Flag"}, {"description": "a flag"}]}, "false", False),
     ({"$ref": "#/$defs/Wrapped"}, '{"y": [2]}', {"y": [2]}),
     ({"allOf": [{"allOf": [{"type": "integer"}]}, {"minimum": 0}]}, "7", 7),

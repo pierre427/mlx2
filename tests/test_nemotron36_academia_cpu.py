@@ -394,9 +394,6 @@ def test_left_padded_batch_matches_single_rows(mode, backend):
             batch.append(fresh)
     rows = mx.array([[0] * pad + p for pad, p in zip(padding, prompts)])
     prefill = model(rows, cache=batch)
-    for plane in batch:
-        if isinstance(plane, ArraysCache):
-            plane.left_padding = None  # padding is consumed by the prefill
     step = model(mx.array([[5], [7]]), cache=batch)
     mx.eval(prefill, step)
     for row, prompt in enumerate(prompts):

@@ -860,15 +860,22 @@ def test_maxwell_policy_levers_apply_unless_the_operator_set_the_env(monkeypatch
     monkeypatch.setenv("MLX2_MAXWELL_SPARSE_PREFILL", "union")
     monkeypatch.setattr(M, "INDEX_KERNEL", False)
     monkeypatch.setattr(M, "SPARSE_PREFILL", "union")
-    applied = M.apply_policy_levers(index_kernel=True, sparse_prefill="masked")
+    from mlx2.adapters.maxwell_moe import MaxwellMoeAdapter
+    from mlx2.serving import adapter_numerical_contract
+
+    first, applied = M.resolve_policy_levers(index_kernel=True, sparse_prefill="masked")
     assert applied == {"index_kernel": "policy", "sparse_prefill": "environment"}
-    assert M.INDEX_KERNEL is True and M.SPARSE_PREFILL == "union"
-    import os
-    assert os.environ["MLX2_MAXWELL_INDEX_KERNEL"] == "1"    # the APCv2 numerics identity sees it
-    assert M.maxwell_stats()["levers"]["index_kernel"] is True
+    assert first == {"index_kernel": True, "sparse_prefill": "union"}
+    second, applied = M.resolve_policy_levers(index_kernel=False)
+    assert second["index_kernel"] is False and applied == {"index_kernel": "policy"}
+    assert M.maxwell_stats(attention_levers=first)["levers"]["index_kernel"] is True
+    adapter = object.__new__(MaxwellMoeAdapter)
+    adapter.attention_levers = first
+    assert adapter_numerical_contract(adapter) == {"maxwell_attention": first}
+    adapter.attention_levers = second
+    assert adapter_numerical_contract(adapter) is None
     with pytest.raises(ValueError):
-        M.apply_policy_levers(sparse_prefill="dense")
-    assert M.apply_policy_levers() == {}
+        M.resolve_policy_levers(sparse_prefill="dense")
 
 
 def test_maxwell_width_key_boundary_and_unknown_width():

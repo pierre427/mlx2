@@ -53,7 +53,8 @@ ANCHOR_CONTEXT = "Topic:"
 
 
 def sha16(p: Path) -> str:
-    return hashlib.sha256(p.read_bytes()).hexdigest()[:16]
+    with p.open("rb") as stream:
+        return hashlib.file_digest(stream, "sha256").hexdigest()[:16]
 
 
 # ------------------------------------------------------------------ corpus, anchors
@@ -84,6 +85,8 @@ def extract_concepts(ref, n_max=1500, min_docs=3, max_group_frac=0.15, group="co
     labels), and over-represented against FineWeb-Edu: score = course document frequency x log(course doc fraction /
     FineWeb doc fraction), multi-word x1.5, a single word must be 20x over-represented. The tuning library contributes
     its own curated topics as topic anchors instead (its record-structured prose made phrase extraction template)."""
+    if n_max <= 0:
+        return []
     gd, n_g, n_r = ref["group_df"][group], ref["group_sizes"][group], ref["_n_ref_docs"]
     scored = []
     for g, c in gd.items():
@@ -242,7 +245,7 @@ def text_chunks(tok, split, n=400, n_tok=128, seed=0):
             if (i % 10 == 0) != (split == "held"):
                 continue
             ids = tok.encode(json.loads(line)["text"])
-            wins += [ids[j:j + n_tok] for j in range(0, len(ids) - n_tok, n_tok)]
+            wins += [ids[j:j + n_tok] for j in range(0, len(ids) - n_tok + 1, n_tok)]
             if len(wins) >= n * 4:
                 break
     rng.shuffle(wins)
@@ -288,15 +291,21 @@ def build_world(args, run: Path | None = None):
     if train_ids & held_ids:
         raise SystemExit("split.json: a document is both train and held out")
     doc_topics = topics_of(graph)
-    topics = sorted({t for s in doc_topics.values() for t in s})
+    topics = sorted({t for doc_id in train_ids for t in doc_topics.get(doc_id, ())})
     concepts = extract_concepts(ref, n_max=args.n_concepts)
     anchors = ([("topic", t, topic_phrase(t)) for t in topics] +
                [("concept", c, c) for c in concepts] +
                [("doc", d["id"], d.get("title") or d["id"]) for d in docs if d["id"] in train_ids])
     # held-out documents get NO anchor and no chunks: the tile must not know they exist (the recall floor)
-    anchor_index = {(k, n): i for i, (k, n, _) in enumerate(anchors)}
     if run is not None:
         saved = json.loads((run / "anchors.json").read_text())
+        if hashes != saved["hashes"] or (saved.get("base_checkpoint", ckpt) != ckpt):
+            raise SystemExit("base checkpoint or corpus files differ from the saved anchors")
+        # Older runs included topics unique to held documents. Restore their exact
+        # slot ordering when the pinned corpus matches.
+        if "base_checkpoint" not in saved:
+            all_topics = sorted({t for ts in doc_topics.values() for t in ts})
+            anchors = [("topic", t, topic_phrase(t)) for t in all_topics] + [a for a in anchors if a[0] != "topic"]
         if [list(a) for a in anchors] != saved["anchors"]:
             raise SystemExit("anchor list differs from training (corpus files changed?)")
         st = mx.load(str(run / "anchor_state.safetensors"))
@@ -309,11 +318,12 @@ def build_world(args, run: Path | None = None):
         X = site_inputs(model, tok, sample[:512], args.site)
         mu = mx.mean(X, axis=0)
         H = anchor_states(model, tok, [p for _, _, p in anchors], args.site, mu)
-        perm = mx.array(random.Random(6).sample(range(X.shape[0]), min(X.shape[0], args.n_free)))
+        perm = mx.array(random.Random(6).sample(range(X.shape[0]), min(X.shape[0], args.n_free)), dtype=mx.int32)
         free_init = X[perm] - mu
         if free_init.shape[0] < args.n_free:                     # tile the sample if it is short
             reps = -(-args.n_free // free_init.shape[0])
             free_init = mx.concatenate([free_init] * reps)[:args.n_free]
+    anchor_index = {(k, n): i for i, (k, n, _) in enumerate(anchors)}
     concepts_re = (re.compile(r"\b(" + "|".join(re.escape(c) for c in sorted(concepts, key=len, reverse=True)) + r")\b")
                    if concepts else None)
     return dict(docs=docs, split=split, graph=graph, model=model, cfg=cfg, ckpt=ckpt, tok=tok, train_ids=train_ids,
@@ -355,7 +365,7 @@ def train(args) -> int:
     if run_for_anchors is None:                                  # saved once, so resumes and eval use the same keys
         mx.save_safetensors(str(out / "anchor_state.safetensors"), {"mu": W["mu"], "H": W["H"]})
         C.write_json(out / "anchors.json", {"anchors": [list(a) for a in W["anchors"]], "concepts": W["concepts"],
-                                            "context": ANCHOR_CONTEXT, "hashes": W["hashes"]})
+                                            "context": ANCHOR_CONTEXT, "hashes": W["hashes"], "base_checkpoint": W["ckpt"]})
         if W["free_init"] is not None:
             mx.save_safetensors(str(out / "free_init.safetensors"), {"x": W["free_init"]})
     elif (out / "free_init.safetensors").exists():
@@ -486,6 +496,9 @@ def nll_eval(W, tile, args, n=64):
             "train_tuning": doc_chunks(tok, W["docs"], {i for i in W["train_ids"] if is_t[i]}),
             "held_tuning": doc_chunks(tok, W["docs"], {i for i in W["held_ids"] if is_t[i]})}
     for name, ch in sets.items():
+        if not ch:
+            res[name] = {"n_tokens": 0}
+            continue
         pick = rng.sample(ch, min(n, len(ch)))
         acc, cnt = collections.Counter(), 0.0
         for i in range(0, len(pick), 4):
@@ -500,20 +513,25 @@ def nll_eval(W, tile, args, n=64):
         r = {a: round(acc[a] / cnt, 4) for a, _, _ in ARMS}
         r["gain"] = round(r["base"] - r["tile"], 4)
         r["gain_lora_only"] = round(r["base"] - r["lora_only"], 4)
-        res[name] = r
+        res[name] = dict(r, n_tokens=int(cnt))
     text = text_chunks(tok, "held", n=128, seed=1)
     acc = collections.Counter()
     k = 0
     for i in range(0, len(text), 16):
-        T = mx.array(text[i:i + 16]); k += 1
+        T = mx.array(text[i:i + 16])
+        k += T[:, 1:].size
         for arm, t, zv in ARMS:
             lg, _ = forward(model, T, tile if t else None, zero_values=zv)
-            acc[arm] += float(nn.losses.cross_entropy(lg[:, :-1].astype(mx.float32), T[:, 1:], reduction="mean").item())
+            acc[arm] += float(nn.losses.cross_entropy(lg[:, :-1].astype(mx.float32), T[:, 1:], reduction="sum").item())
+    if not k:
+        raise ValueError("ordinary-text evaluation needs at least one complete held window")
     res["ordinary_text"] = {a: round(acc[a] / k, 4) for a, _, _ in ARMS} | {"cost": round((acc["tile"] - acc["base"]) / k, 4)}
-    res["recall_gain_trained_minus_held"] = round(res["train_docs"]["gain"] - res["held_docs"]["gain"], 4)
-    for src in ("course", "tuning"):
-        res[f"recall_gain_{src}"] = round(res[f"train_{src}"]["gain"] - res[f"held_{src}"]["gain"], 4)
-    res["memory_share_trained"] = round(res["train_docs"]["gain"] - res["train_docs"]["gain_lora_only"], 4)
+    for src, metric in (("docs", "recall_gain_trained_minus_held"), ("course", "recall_gain_course"),
+                        ("tuning", "recall_gain_tuning")):
+        train, held = res[f"train_{src}"], res[f"held_{src}"]
+        res[metric] = round(train["gain"] - held["gain"], 4) if train["n_tokens"] and held["n_tokens"] else None
+    train = res["train_docs"]
+    res["memory_share_trained"] = round(train["gain"] - train["gain_lora_only"], 4) if train["n_tokens"] else None
     return res
 
 
@@ -527,13 +545,14 @@ def evaluate(args) -> int:
     if W["ckpt"] != rec["base_checkpoint"] or W["hashes"] != rec["corpus_hashes"]:
         raise SystemExit("base checkpoint or corpus files differ from the training receipt")
     tile = make_tile(W, targs)
-    tile.load_weights(str(run / "tile.safetensors"))
+    C.load_checkpoint_weights(tile, run / "tile.safetensors", rec["tile_checkpoint"])
     tile.freeze()
     res = {"nll": nll_eval(W, tile, targs)}
     if args.questions:
         from research.ens import corpus_tile_eval as E
         res |= E.qa_eval(W, tile, targs, Path(args.questions).expanduser(), run)
-    receipt = rec | {"schema": "ens.h51.corpus_tile_eval.v2", "eval": res, **C.source_revision(), **C.host_record()}
+    receipt = rec | {"schema": "ens.h51.corpus_tile_eval.v2", "eval": res,
+                     "eval_source_revision": C.source_revision(), "eval_host": C.host_record()}
     C.write_json(run / "receipt.json", receipt)
     print("eval", json.dumps(res), flush=True)
     return 0

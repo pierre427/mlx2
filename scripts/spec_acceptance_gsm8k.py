@@ -671,7 +671,7 @@ def main(argv=None):
             log = (out / "server.log").open("w")
             env = {**os.environ, "PYTHONPATH": str(tree / "src"), **arm.get("env", {})}
             server = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT,
-                                      start_new_session=True, env=env, cwd=tree)
+                                      process_group=0, env=env, cwd=tree)
             row = {"name": arm["name"], "tree": str(tree), "revision": revision(tree),
                    "args": arm.get("args", []), "env": arm.get("env", {}), "request": arm_request,
                    "command": command}

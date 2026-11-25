@@ -151,7 +151,7 @@ def _kernel(kind, tiles, dtype, rows, n):
     if held is None:
         header, why = lib.library("matvec")
         if header is None:
-            return None, why
+            return (None, 0), why
         source, groups = _source(kind, tiles, dtype, rows, n)
         kernel = mx.fast.metal_kernel(
             name=f"inkling2_attn_output_{len(_kernels)}",

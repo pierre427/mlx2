@@ -21,6 +21,7 @@ import hashlib
 import json
 import re
 import shutil
+import tempfile
 import time
 from pathlib import Path
 
@@ -41,34 +42,76 @@ def pack_codes(codes: mx.array) -> mx.array:
     return mx.view(codes, mx.uint32)
 
 
-def convert(source: Path, dest: Path, *, log=print) -> dict:
+def _publish(source, dest, recipe, log):
     source, dest = Path(source).expanduser().resolve(), Path(dest).expanduser().resolve()
     if dest.exists() and any(dest.iterdir()):
         raise FileExistsError(f"{dest} is not empty")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=dest.parent, prefix=f".{dest.name}-") as temporary:
+        stage = Path(temporary) / "artifact"
+        stage.mkdir()
+        receipt = recipe(source, stage, log=log)
+        stage.rename(dest)
+    return receipt
+
+
+def _read_source(source):
     config = json.loads((source / "config.json").read_text())
     quant = config.get("quantization_config") or {}
-    if config.get("model_type") != "raon1_mini" or quant.get("quant_method") != "mxfp8" \
-            or quant.get("weight_block_size") != [1, 32] or quant.get("dequantize"):
+    if (config.get("model_type") != "raon1_mini" or quant.get("quant_method") != "mxfp8"
+            or quant.get("weight_block_size") != [1, 32] or quant.get("dequantize")):
         raise ValueError("source is not the KRAFTON Raon-1-mini BF16/MXFP8 release")
     weight_map = json.loads((source / "model.safetensors.index.json").read_text())["weight_map"]
-    shards = sorted(set(weight_map.values()))
-    for name in shards:
-        if not (source / name).is_file():
-            raise FileNotFoundError(f"incomplete download: {name}")
+    if not weight_map:
+        raise ValueError("source tensor index is empty")
+    members = {}
+    for key, shard in weight_map.items():
+        members.setdefault(shard, []).append(key)
+    by_layer, plain = {}, {}
+    shards = sorted(members)
+    for shard in shards:
+        if not (source / shard).is_file():
+            raise FileNotFoundError(f"incomplete download: {shard}")
+        tensors = mx.load(str(source / shard))
+        missing = set(members[shard]) - tensors.keys()
+        if missing:
+            raise ValueError(f"{shard} lacks indexed tensors: {sorted(missing)[:6]}")
+        for key in members[shard]:
+            match = _EXPERT.match(key)
+            if match:
+                layer, expert, proj, part = match.groups()
+                by_layer.setdefault(int(layer), {})[(int(expert), proj, part)] = tensors[key]
+            else:
+                plain[key] = tensors[key]
+    freq = config.get("moe_layer_freq", 1)
+    first = config.get("first_k_dense_replace", 1)
+    if type(freq) is not int or freq < 1 or type(first) is not int or first < 0:
+        raise ValueError("invalid source expert layer topology")
+    layers = {i for i in range(first, config["num_hidden_layers"]) if i % freq == 0}
+    if not layers or set(by_layer) != layers:
+        raise ValueError("indexed expert layers differ from the source topology")
+    planes = {(expert, proj, part) for expert in range(config["num_experts"])
+              for proj in ("gate_proj", "up_proj", "down_proj") for part in ("weight", "weight_scale_inv")}
+    for layer, items in by_layer.items():
+        if items.keys() != planes:
+            raise ValueError(f"layer {layer}: expert projection planes differ from the source topology")
+        for (expert, proj, part), codes in items.items():
+            if part != "weight":
+                continue
+            scales = items[(expert, proj, "weight_scale_inv")]
+            if (codes.dtype != mx.uint8 or scales.dtype != mx.uint8 or codes.ndim != 2
+                    or codes.shape[1] % 32 or scales.shape != (codes.shape[0], codes.shape[1] // 32)):
+                raise ValueError(f"layer {layer} expert {expert} {proj}: invalid MXFP8 code/scale grid")
+    return config, shards, by_layer, plain
+
+
+def convert(source: Path, dest: Path, *, log=print) -> dict:
+    return _publish(source, dest, _write_mxfp8e, log)
+
+
+def _write_mxfp8e(source, dest, *, log):
+    config, shards, by_layer, plain = _read_source(source)
     experts = config["num_experts"]
-    dest.mkdir(parents=True, exist_ok=True)
-    lazy = {}
-    for name in shards:
-        lazy.update(mx.load(str(source / name)))
-    by_layer: dict[int, dict] = {}
-    plain = {}
-    for key, value in lazy.items():
-        match = _EXPERT.match(key)
-        if match:
-            layer, expert, proj, part = match.groups()
-            by_layer.setdefault(int(layer), {})[(int(expert), proj, part)] = value
-        else:
-            plain[key] = value
     index, out_files, started = {}, [], time.time()
 
     def emit(name, tensors):
@@ -83,10 +126,6 @@ def convert(source: Path, dest: Path, *, log=print) -> dict:
         for proj in ("gate_proj", "up_proj", "down_proj"):
             codes = mx.stack([items[(e, proj, "weight")] for e in range(experts)])
             scales = mx.stack([items[(e, proj, "weight_scale_inv")] for e in range(experts)])
-            if codes.dtype != mx.uint8 or scales.dtype != mx.uint8:
-                raise ValueError(f"layer {layer} {proj}: expected E4M3/E8M0 bytes")
-            if scales.shape[-1] * 32 != codes.shape[-1]:
-                raise ValueError(f"layer {layer} {proj}: scale grid is not group 32")
             prefix = f"model.layers.{layer}.moe.switch_mlp.{proj}"
             out[prefix + ".weight"] = pack_codes(codes)
             out[prefix + ".scales"] = scales
@@ -156,29 +195,12 @@ def convert_affine(source: Path, dest: Path, *, log=print) -> dict:
     exactly to BF16 first); the NVFP4 pack is not an input, so no double
     quantization.  Memory high-water: one layer's BF16 expert stack (~2 GB).
     """
-    source, dest = Path(source).expanduser().resolve(), Path(dest).expanduser().resolve()
-    if dest.exists() and any(dest.iterdir()):
-        raise FileExistsError(f"{dest} is not empty")
-    config = json.loads((source / "config.json").read_text())
-    quant = config.get("quantization_config") or {}
-    if config.get("model_type") != "raon1_mini" or quant.get("quant_method") != "mxfp8":
-        raise ValueError("source is not the KRAFTON Raon-1-mini BF16/MXFP8 release")
-    weight_map = json.loads((source / "model.safetensors.index.json").read_text())["weight_map"]
-    shards = sorted(set(weight_map.values()))
-    lazy = {}
-    for name in shards:
-        lazy.update(mx.load(str(source / name)))
-    dest.mkdir(parents=True, exist_ok=True)
+    return _publish(source, dest, _write_affine, log)
+
+
+def _write_affine(source, dest, *, log):
+    config, shards, by_layer, plain = _read_source(source)
     experts = config["num_experts"]
-    by_layer: dict[int, dict] = {}
-    plain = {}
-    for key, value in lazy.items():
-        match = _EXPERT.match(key)
-        if match:
-            layer, expert, proj, part = match.groups()
-            by_layer.setdefault(int(layer), {})[(int(expert), proj, part)] = value
-        else:
-            plain[key] = value
     index, out_files, started = {}, [], time.time()
     quantized = {}
 

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: MIT
 # Mined closure; provenance/muse-dflash2.json.
 import inspect
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import ClassVar
@@ -162,9 +163,9 @@ class DFlash2Config(DFlashConfig):
                 "DFlash2 selector_softcap_mode must be one of "
                 f"{list(SELECTOR_SOFTCAP_MODES)}, got {self.selector_softcap_mode!r}."
             )
-        if (
-            self.selector_softcap_mode == "after_correction"
-            and not self.final_logit_softcapping
+        cap = self.final_logit_softcapping
+        if self.selector_softcap_mode == "after_correction" and (
+            type(cap) not in (int, float) or not math.isfinite(cap) or cap <= 0
         ):
             raise ValueError(
                 "DFlash2 selector_softcap_mode 'after_correction' needs a "

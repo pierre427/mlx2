@@ -262,9 +262,25 @@ def solve(costs: Sequence[Sequence[Optional[float]]], sizes: Sequence[Sequence[O
     budget = int(budget)
     if budget < 0:
         raise ValueError("budget must be >= 0")
-    all_sizes = [int(x) for row in sizes for x in row if x is not None]
-    allowed_ix = [[j for j, (c, s) in enumerate(zip(rc, rs)) if c is not None and s is not None]
-                  for rc, rs in zip(costs, sizes)]
+    if resolution is not None and (type(resolution) is not int or resolution < 1):
+        raise ValueError("resolution must be a positive integer")
+    if max_cells < 1:
+        raise ValueError("max_cells must be positive")
+    all_sizes, allowed_ix = [], []
+    for row_c, row_s in zip(costs, sizes):
+        if len(row_c) != len(row_s):
+            raise ValueError("cost and size rows differ in length")
+        options = []
+        for j, (cost, size) in enumerate(zip(row_c, row_s)):
+            if cost is None or size is None:
+                continue
+            if not math.isfinite(float(cost)):
+                raise ValueError("costs must be finite (use None to forbid an option)")
+            if int(size) != size or size < 0:
+                raise ValueError("option sizes must be nonnegative integers")
+            options.append(j)
+            all_sizes.append(int(size))
+        allowed_ix.append(options)
     if all(len(ix) == 1 for ix in allowed_ix):
         # One allowed option per row (a uniform plan): no search, and no rounding to lose a tight fit.
         choice = [ix[0] for ix in allowed_ix]
@@ -272,7 +288,7 @@ def solve(costs: Sequence[Sequence[Optional[float]]], sizes: Sequence[Sequence[O
         if nbytes > budget:
             raise ValueError("no plan fits the budget with the allowed options")
         return Solution(choice, float(sum(float(costs[i][j]) for i, j in enumerate(choice))), nbytes, 1, True)
-    if resolution:
+    if resolution is not None:
         q = int(resolution)
     else:
         g = math.gcd(*all_sizes) if all_sizes else 1
@@ -282,17 +298,12 @@ def solve(costs: Sequence[Sequence[Optional[float]]], sizes: Sequence[Sequence[O
     dp = np.full(cells + 1, inf)
     dp[0] = 0.0
     picks = []
-    for row_c, row_s in zip(costs, sizes):
-        if len(row_c) != len(row_s):
-            raise ValueError("cost and size rows differ in length")
+    for row_c, row_s, options in zip(costs, sizes, allowed_ix):
         new = np.full(cells + 1, inf)
         pick = np.full(cells + 1, -1, dtype=np.int16)
-        for j, (c, s) in enumerate(zip(row_c, row_s)):
-            if c is None or s is None:
-                continue
-            if not math.isfinite(float(c)):
-                raise ValueError("costs must be finite (use None to forbid an option)")
-            w = -(-int(s) // q)
+        for j in options:
+            c = row_c[j]
+            w = -(-int(row_s[j]) // q)
             if w > cells:
                 continue
             cand = np.full(cells + 1, inf)
@@ -448,7 +459,8 @@ def layer_kl_costs(scans: Mapping[str, Mapping], *, checkpoint: Optional[str] = 
         if checkpoint is not None and "checkpoint" in doc and \
                 fingerprint_of(doc["checkpoint"]) != fingerprint_of(checkpoint):
             raise ValueError(f"{name}: scanned {doc['checkpoint']}, not the planned checkpoint {checkpoint}")
-        refs.add((doc["reference"]["checkpoint"], doc["reference"]["texts_sha256"]))
+        reference = doc["reference"]
+        refs.add((reference["checkpoint"], reference["texts_sha256"], reference.get("skip")))
         shapes.add(json.dumps([sorted(s.get("groups", [])), sorted(s.get("splits", [])),
                                s.get("layer_prefix"), s.get("source")]))
         for row in doc["rows"]:
@@ -460,7 +472,7 @@ def layer_kl_costs(scans: Mapping[str, Mapping], *, checkpoint: Optional[str] = 
                                  f"not the planned modules {sorted(planned.get(layer, set()))}")
             out.setdefault(layer, {})[fmt.name] = float(row[key])
     if len(refs) != 1:
-        raise ValueError(f"scans use different references: {sorted(refs)}")
+        raise ValueError(f"scans use different references: {sorted(refs, key=repr)}")
     if len(shapes) != 1:
         raise ValueError(f"scans differ in groups/splits/layer prefix/source: {sorted(shapes)}")
     ref_ckpt = next(iter(refs))[0]

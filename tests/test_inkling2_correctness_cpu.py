@@ -264,6 +264,14 @@ def test_developer_role_renders_as_system(adapter):
 
 # ----- 7. numeric reasoning effort -----
 
+@pytest.mark.parametrize("effort", [10**400, 1e200])
+def test_large_numeric_effort_is_a_request_error(effort):
+    from mlx2.adapters.inkling2 import Inkling2Adapter
+
+    with pytest.raises(ValueError, match="reasoning_effort"):
+        Inkling2Adapter._reasoning_effort({"reasoning_effort": effort})
+
+
 def test_numeric_effort_rounds_to_two_decimals(adapter):
     from mlx2.adapters.inkling2 import Inkling2Adapter
 

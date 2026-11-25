@@ -39,8 +39,11 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts" / "research"))
 from maxwell_overnight import memory, needle_prompt, normalize_code, revision, write_atomic  # noqa: E402
 
+sys.path.insert(0, str(ROOT / "scripts"))
+from qualify_prefill_handoff import near_tie_passes  # noqa: E402
+from run_guarded_benchmark import owns_listener  # noqa: E402
+
 PORT = 18321
-CEILING = 0.5
 ARMS = {
     "A": {"label": "current default (ordinary route, bf16 head)", "flags": [], "policy": None, "env": {}},
     "B": {"label": "native MTP depth 2 + bf16 indexer kernel + masked long prefill + fused q/k/v",
@@ -92,14 +95,14 @@ def stream(base, model_name, message, max_tokens):
                 receipt = event["mlx2"]
             for choice in event.get("choices", ()):
                 for item in (choice.get("logprobs") or {}).get("content", ()) or ():
-                    top = [[int(t["id"]) if "id" in t else t.get("token"), round(float(t["logprob"]), 5)]
+                    top = [[int(t["id"]) if "id" in t else t.get("token"), float(t["logprob"])]
                            for t in item.get("top_logprobs", [])[:2]]
                     tokens.append({"id": int(item["id"]) if "id" in item else item.get("token"),
-                                   "logprob": round(float(item["logprob"]), 5), "top2": top})
+                                   "logprob": float(item["logprob"]), "top2": top})
                     arrivals.append(time.perf_counter() - started)
                 parts.append((choice.get("delta") or {}).get("content") or "")
-    if not done:
-        raise ValueError("incomplete generation stream")
+    if not done or receipt is None or not tokens:
+        raise ValueError("incomplete generation stream, token trace or terminal receipt")
     decode = ((len(arrivals) - 1) / (arrivals[-1] - arrivals[0])
               if len(arrivals) > 1 and arrivals[-1] > arrivals[0] else None)
     return {"text": "".join(parts), "tokens": tokens, "ttft_s": arrivals[0] if arrivals else None,
@@ -109,6 +112,8 @@ def stream(base, model_name, message, max_tokens):
 def classify(a, b):
     """First-divergence verdict for two streamed rows (AGENTS.md near-tie contract)."""
     ta, tb = a["tokens"], b["tokens"]
+    if not ta or not tb or "error" in a or "error" in b:
+        return {"verdict": "unclassified", "reason": "missing token trace or failed request"}
     for i, (x, y) in enumerate(zip(ta, tb)):
         if x["id"] != y["id"]:
             break
@@ -121,11 +126,11 @@ def classify(a, b):
     if len(top_a) < 2 or len(top_b) < 2:
         return {"verdict": "unclassified", "reason": "no top-2 window", "index": i}
     ma, mb = top_a[0][1] - top_a[1][1], top_b[0][1] - top_b[1][1]
-    same_pair = {top_a[0][0], top_a[1][0]} == {top_b[0][0], top_b[1][0]}
-    near = same_pair and max(ma, mb) <= CEILING
-    exact_tie = (ma == 0 and x["id"] in (top_a[0][0], top_a[1][0]) and mb <= CEILING) or \
-                (mb == 0 and y["id"] in (top_b[0][0], top_b[1][0]) and ma <= CEILING)
-    ok = (near or exact_tie) and oracle
+    ok = near_tie_passes({
+        "shared_prefix": True, "ref_selected": x["id"], "arm_selected": y["id"],
+        "ref_top2": [t[0] for t in top_a], "arm_top2": [t[0] for t in top_b],
+        "ref_margin": ma, "arm_margin": mb, "ref_window": top_a, "arm_window": top_b,
+    }, functional_pass=oracle)
     return {"verdict": "near_tie_equivalent" if ok else "unclassified", "index": i,
             "margins": [ma, mb], "top2": [top_a, top_b], "oracle": oracle}
 
@@ -148,7 +153,7 @@ class Server:
             cmd += ["--execution-policy", str(out / "policy.json")]
         self.command, self.env = cmd, spec["env"]
         self.log = (out / "server.log").open("w")
-        self.proc = subprocess.Popen(cmd, stdout=self.log, stderr=subprocess.STDOUT, start_new_session=True,
+        self.proc = subprocess.Popen(cmd, stdout=self.log, stderr=subprocess.STDOUT, process_group=0,
                                      cwd=ROOT, env={**os.environ, "PYTHONPATH": str(ROOT / "src"), **spec["env"]})
         self.base = f"http://127.0.0.1:{PORT}"
 
@@ -167,9 +172,10 @@ class Server:
             if self.proc.poll() is not None:
                 raise RuntimeError("server exited before readiness")
             try:
-                status = self.call("/v1/status", timeout=10)
-                if status.get("healthy"):
-                    return status
+                if owns_listener(self.proc.pid, PORT):
+                    status = self.call("/v1/status", timeout=10)
+                    if status.get("healthy"):
+                        return status
             except Exception:
                 pass
             time.sleep(1)
@@ -315,7 +321,7 @@ def main():
     if args.arms:
         ARMS.clear()
         ARMS.update(json.loads(args.arms.read_text()))
-    if "A" not in ARMS or set(order) - set(ARMS):
+    if "A" not in order or set(order) - set(ARMS):
         raise SystemExit(f"order {order} needs reference arm A and only defined arms {sorted(ARMS)}")
     out = args.out.resolve()
     if out.exists() and any(out.iterdir()):
@@ -349,12 +355,17 @@ def main():
             write_atomic(out / "ladder.json", receipt)
             raise SystemExit(receipt["aborted"])
     segments = [json.loads((out / s["dir"] / "segment.json").read_text()) for s in receipt["segments"]]
+    receipt["request_failures"] = [
+        {"segment": seg["segment"], "cell": cell["cell"], "lane": lane, "error": row.get("error", "needle missing")}
+        for seg in segments for cell in seg["cells"] for lane, row in enumerate(cell["requests"])
+        if "error" in row or not row["found"]
+    ]
     if order != ORDER:
         receipt["attribution"] = attribute(segments)
         write_atomic(out / "ladder.json", receipt)
         for row in receipt["attribution"]:
             print(json.dumps(row), flush=True)
-        return
+        return int(bool(receipt["request_failures"]))
     receipt["summary"] = summarize(segments)
     write_atomic(out / "ladder.json", receipt)
     for row in receipt["summary"]:
@@ -362,6 +373,8 @@ def main():
                                               "B/A_ttft_s")} | {"B_vs_A": [v["verdict"] for v in row["B_vs_A"]]}),
               flush=True)
 
+    return int(bool(receipt["request_failures"]))
+
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

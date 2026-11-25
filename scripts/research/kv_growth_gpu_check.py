@@ -372,8 +372,8 @@ def build_verdict(runs: list[dict]) -> dict:
     for name in names:
         per_arm = {}
         for arm in arms:
-            rows = [next(r for r in run["requests"] if r["name"] == name)
-                    for run in runs if run["arm"] == arm]
+            rows = [row for run in runs if run["arm"] == arm
+                    for row in run["requests"] if row["name"] == name]
             ttft = [r["ttft_s"] for r in rows if r.get("ttft_s") is not None]
             decode = [r["decode_tok_s"] for r in rows if r.get("decode_tok_s") is not None]
             # Headline = mean over every run of the arm. Arms run in ABBA order

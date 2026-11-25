@@ -273,6 +273,7 @@ class StepSite:
 
     def _refuse(self, st, code):
         st.state, st.refusal, st.program = "refused", code, None
+        st.recordings.clear()
         self.refusals[code] = self.refusals.get(code, 0) + 1
 
     def _key(self, backend, geometry, inputs):
@@ -345,11 +346,11 @@ class StepSite:
         finally:
             recording = backend.end_recording()
         self._route("recording")
-        st.recordings.append((recording, outputs))
+        st.recordings.append((recording, tuple(inputs), outputs, tuple(written), tuple(pinned)))
         if len(st.recordings) < 2:
             return outputs
-        (a, _), (b, b_out) = st.recordings[-2:]
-        verdict = backend.compare(a, b)
+        earlier, latest = st.recordings[-2:]
+        verdict = backend.compare(earlier[0], latest[0])
         if verdict == "different":
             st.recordings = st.recordings[-1:]
             st.attempts += 1
@@ -364,13 +365,13 @@ class StepSite:
         if self.mode == "record_only":
             st.recordings = st.recordings[-1:]
             return outputs
-        sealed, st.checks_needed = b, 1
+        sealed, st.checks_needed = latest, 1
         if verdict == "copy_superset_a":  # a = b + copies: b is the program
             st.checks_needed = 2
         elif verdict == "copy_superset_b":
-            sealed, st.checks_needed = a, 2
+            sealed, st.checks_needed = earlier, 2
         try:
-            st.program = backend.seal(sealed, inputs, b_out, written, pinned)
+            st.program = backend.seal(*sealed)
         except Refusal as exc:
             self._refuse(st, exc.code)
             return outputs
@@ -381,10 +382,11 @@ class StepSite:
     def _replay_checked(self, fn, inputs, st, backend, written):
         """MLX serves; the program replays on private copies and must match
         bit for bit. Returns (mlx outputs, passed)."""
-        outputs = fn(inputs)
-        mx.eval(outputs)
+        # Snapshot before the reference step can update a written input.
         trial = [private_copy(a) if i in written else a for i, a in enumerate(inputs)]
         mx.eval(trial)
+        outputs = fn(inputs)
+        mx.eval(outputs)
         reason = backend.legality(st.program, trial)
         if reason is not None:
             return outputs, reason

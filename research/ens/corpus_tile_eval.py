@@ -31,10 +31,15 @@ NEUTRAL = "Answer:"
 
 def _norm(s):
     s = (s or "").lower()
-    s = re.sub(r"[\u2010-\u2015\u2212\-]", " ", s)            # every dash or hyphen -> space, both sides (review)
+    # Distinguish unary numeric signs from punctuation in names and ranges.
+    s = re.sub(r"(?<![a-z0-9])[-−](?=\d|\.\d)", "−", s)
+    s = re.sub(r"[\u2010-\u2015-]", " ", s)
     s = re.sub(r"(\d)\s*percent\b", r"\1%", s)               # "60 percent" = "60%"
     s = re.sub(r"(?<=\d),(?=\d{3}\b)", "", s)                  # 1,700 -> 1700
-    s = re.sub(r"[^a-z0-9.%$# ]+", " ", s)
+    s = re.sub(r"(?<![a-z0-9])\.(?=\d)", "0.", s)
+    # Remove insignificant fractional zeros before testing whole-token equality.
+    s = re.sub(r"\b(\d+)\.(\d+)\b", lambda m: (m[1] + "." + m[2].rstrip("0")).rstrip("."), s)
+    s = re.sub(r"[^a-z0-9.−%$# ]+", " ", s)
     s = re.sub(r"(?<!\d)\.|\.(?!\d)", " ", s)                  # keep decimal points only
     return " ".join(s.split())
 
@@ -43,7 +48,7 @@ def _has(text_n, phrase):
     p = _norm(phrase)
     if not p:
         return False
-    return re.search(r"(?<![a-z0-9])" + re.escape(p) + r"(?![a-z0-9])", text_n) is not None
+    return re.search(r"(?<![a-z0-9.−])" + re.escape(p) + r"(?![a-z0-9.])", text_n) is not None
 
 
 def _parts(ans):
@@ -111,15 +116,32 @@ def choice_pick(model, tok, tile, zv, q, choices):
 def qa_eval(W, tile, targs, qdir: Path, run: Path, batch=8):
     model, tok = W["model"], W["tok"]
     files = [qdir / "recall.jsonl", qdir / "crossdoc.jsonl"]
-    qhash = hashlib.sha256(b"".join(f.read_bytes() for f in files if f.exists())).hexdigest()[:12]
+    digest = hashlib.sha256()
+    for f in files:
+        if f.is_file():
+            digest.update(f.name.encode() + b"\0" + hashlib.sha256(f.read_bytes()).digest())
+    if not any(f.is_file() for f in files):
+        raise FileNotFoundError(f"{qdir}: missing recall.jsonl and crossdoc.jsonl")
+    qhash = digest.hexdigest()[:12]
+    cell_prefix = f"{qhash}.score2."
     cells = PB.EvalCells(run, None)
-    outs = (run / f"outputs-{qhash}.jsonl").open("a")
+    output_path = run / f"outputs-{qhash}.score2.jsonl"
+    # Cell totals commit after their outputs are flushed. Drop only uncommitted
+    # rows on a retry, including a partial last line from an interrupted write.
+    if output_path.exists():
+        tmp = output_path.with_suffix(".tmp")
+        with output_path.open("rb") as previous, tmp.open("wb") as kept:
+            for line in previous:
+                if line.endswith(b"\n") and cells.done(json.loads(line)["cell"]):
+                    kept.write(line)
+        tmp.replace(output_path)
+    outs = output_path.open("a")
     arms = (("base", None, False), ("tile", tile, False), ("lora_only", tile, True))
     rec = [json.loads(l) for l in open(files[0])] if files[0].exists() else []
     xd = [json.loads(l) for l in open(files[1])] if files[1].exists() else []
 
     def gen_cell(key, rows, field):
-        key = f"{qhash}.{key}"
+        key = f"{cell_prefix}{key}"
         if cells.done(key) or not rows:
             return
         tally = {a: 0 for a, _, _ in arms}
@@ -147,7 +169,7 @@ def qa_eval(W, tile, targs, qdir: Path, run: Path, batch=8):
             gen_cell(f"synthesis.{mix}.{field}", rows, field)
         grows = [r for r in graph if r.get("split_mix") == mix]
         for field in ("question", "rephrase"):
-            key = f"{qhash}.graph_mc.{mix}.{field}"
+            key = f"{cell_prefix}graph_mc.{mix}.{field}"
             if cells.done(key) or not grows:
                 continue
             tally = {a: 0 for a, _, _ in arms}
@@ -159,6 +181,6 @@ def qa_eval(W, tile, targs, qdir: Path, run: Path, batch=8):
                     outs.write(json.dumps({"cell": key, "qid": r["qid"], "arm": arm, "pick": pick,
                                            "correct": pick == r["choice_answer"]}) + "\n")
             outs.flush()
-            cells.put(key, {a: round(v / len(grows), 4) for a, v in tally.items()} | {"n": len(grows), "chance": 0.25})
+            cells.put(key, {a: round(v / len(grows), 4) for a, v in tally.items()} | {"n": len(grows), "chance": sum(1 / len(r["choices"]) for r in grows) / len(grows)})
     outs.close()
-    return {"qa": {k: v for k, v in cells.cells.items() if k.startswith(qhash)}, "questions_sha12": qhash}
+    return {"qa": {k: v for k, v in cells.cells.items() if k.startswith(cell_prefix)}, "questions_sha12": qhash}

@@ -116,37 +116,24 @@ if MOE_NAX not in ("off", "gather"):
     raise ValueError("MLX2_MAXWELL_MOE_NAX must be off or gather")
 
 
-def apply_policy_levers(*, index_kernel=None, sparse_prefill=None) -> dict:
-    """Set the index-kernel and long-chunk-prefill levers from an execution policy.
-
-    A route default (the single-lane best-route entry) carries these as policy
-    keys.  An operator's environment variable always wins: a lever whose
-    variable is set (non-empty) is left alone and reported as ``"environment"``.  An
-    applied lever is also written to the process environment, so the APCv2
-    execution-numerics identity (read from it after the adapter loads) binds
-    the value the model actually runs.
-    """
-    global INDEX_KERNEL, SPARSE_PREFILL
-    applied = {}
+def resolve_policy_levers(*, index_kernel=None, sparse_prefill=None):
+    """Resolve the loaded adapter's attention settings without mutating process state."""
+    if index_kernel is not None and type(index_kernel) is not bool:
+        raise ValueError("Maxwell index_kernel policy must be true or false")
+    if sparse_prefill is not None and sparse_prefill not in ("union", "masked"):
+        raise ValueError("Maxwell sparse_prefill policy must be union or masked")
+    index_env = os.environ.get("MLX2_MAXWELL_INDEX_KERNEL")
+    prefill_env = os.environ.get("MLX2_MAXWELL_SPARSE_PREFILL")
+    effective = {"index_kernel": index_env == "1" if index_env else bool(index_kernel),
+                 "sparse_prefill": prefill_env or sparse_prefill or "union"}
+    if effective["sparse_prefill"] not in ("union", "masked"):
+        raise ValueError("MLX2_MAXWELL_SPARSE_PREFILL must be union or masked")
+    sources = {}
     if index_kernel is not None:
-        if type(index_kernel) is not bool:
-            raise ValueError("Maxwell index_kernel policy must be true or false")
-        if os.environ.get("MLX2_MAXWELL_INDEX_KERNEL"):
-            applied["index_kernel"] = "environment"
-        else:
-            INDEX_KERNEL = index_kernel
-            os.environ["MLX2_MAXWELL_INDEX_KERNEL"] = "1" if index_kernel else "0"
-            applied["index_kernel"] = "policy"
+        sources["index_kernel"] = "environment" if index_env else "policy"
     if sparse_prefill is not None:
-        if sparse_prefill not in ("union", "masked"):
-            raise ValueError("Maxwell sparse_prefill policy must be union or masked")
-        if os.environ.get("MLX2_MAXWELL_SPARSE_PREFILL"):
-            applied["sparse_prefill"] = "environment"
-        else:
-            SPARSE_PREFILL = sparse_prefill
-            os.environ["MLX2_MAXWELL_SPARSE_PREFILL"] = sparse_prefill
-            applied["sparse_prefill"] = "policy"
-    return applied
+        sources["sparse_prefill"] = "environment" if prefill_env else "policy"
+    return effective, sources
 
 
 # Up to this many rows a multi-row call of the fused table runs each row with
@@ -197,12 +184,14 @@ def _kernel_call(key, fn, *args, **kwargs):
     return out
 
 
-def maxwell_stats(reset: bool = False) -> dict:
+def maxwell_stats(reset: bool = False, *, attention_levers=None) -> dict:
     out = dict(STATS, levers={"compile": COMPILE_SPANS, "mhc_kernel": MHC_KERNEL, "head": HEAD_MODE,
                               "fused_qkv": FUSED_QKV, "index_kernel": INDEX_KERNEL,
                               "canonical_pick": CANONICAL_PICK, "row_exact_verify": ROW_EXACT_VERIFY,
                               "gather_rows": SPARSE_GATHER_ROWS, "moe_nax": MOE_NAX,
                               "sparse_prefill": SPARSE_PREFILL})
+    if attention_levers is not None:
+        out["levers"].update(attention_levers)
     from . import gemv_rows_exact
 
     try:
@@ -550,7 +539,7 @@ class Attention(nn.Module):
             # bytes) and widen inside the scoring kernel.  A 1-wide value slice
             # keeps the plane an ordinary KVCache without a copy.
             ik = self.rope(ik, offset=offset)
-            if not INDEX_KERNEL:
+            if not getattr(self, "index_kernel", INDEX_KERNEL):
                 ik = ik.astype(mx.float32)
             if index_cache is not None:
                 ik, _ = index_cache.update_and_fetch(ik, ik[..., :1])
@@ -707,7 +696,7 @@ class Attention(nn.Module):
         slot = mx.where(route >= 0, route, nb)                               # [1, G, t, R]
         member = mx.zeros((1, groups, t, nb + 1), dtype=mx.bool_)
         member = mx.put_along_axis(member, slot, mx.array(True), axis=-1)[..., :nb]
-        if SPARSE_PREFILL == "union":
+        if getattr(self, "sparse_prefill", SPARSE_PREFILL) == "union":
             return self._sparse_union(q, k, v, member, qpos, length)
         STATS["sparse_masked_calls"] += 1
         causal = mx.arange(length)[None, :] <= qpos[:, None]                 # [t, L]

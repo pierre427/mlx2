@@ -53,7 +53,7 @@ def setup(args):
         raise SystemExit("base checkpoint or facts differ from the bus receipt")
     s = brec["port"]
     port = PB.RecordPort(model, s["site"], s["rank"], s["tau"])
-    port.load_weights(str(Path(args.bus) / "port.safetensors"))
+    C.load_checkpoint_weights(port, Path(args.bus) / "port.safetensors", brec["port_checkpoint"])
     port.freeze()
     allp = [p for p in facts["papers"] if "'" not in p["title"]]
     prng = random.Random(123 + args.world_seed)
@@ -81,7 +81,7 @@ def load_tile(d: Path, cfg, voc):
         t = PT.Tile(cfg.hidden_size, dense_h, n_out, sparse=False)
     else:
         t = PT.Tile(cfg.hidden_size, sparse_h, n_out, sparse=True, density1=0.1)
-    t.load_weights(str(d / "tile.safetensors"))
+    C.load_checkpoint_weights(t, d / "tile.safetensors", rec["tile_checkpoint"])
     t.freeze()
     return t, rec
 

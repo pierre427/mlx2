@@ -146,3 +146,20 @@ def test_serving_counts_the_refusal_and_does_not_raise():
     assert engine._publish_checkpoint(apc, APCKey("served"), TOKENS[:4], [_kv(4)])
     assert engine.counts["apcv2_store_refused_alignment"] == 1
     apc.clear()
+
+
+def test_store_honors_cache_list_subclass_transaction_before_publishing():
+    from mlx2.runtime.models.cache import CacheList
+
+    class PendingCommit(CacheList):
+        def checkpoint_publication_refusal(self):
+            return "uncommitted wrapper state"
+
+    apc = _apc()
+    key = APCKey("wrapper")
+    result = apc.store(key, TOKENS[:4], [PendingCommit(_kv(4))])
+    assert result.stored is False
+    assert result.reason == "publication_alignment:uncommitted_transaction"
+    assert "uncommitted wrapper state" in apc.last_alignment_refusal["detail"]
+    assert not apc.lookup(key, TOKENS).hit
+    apc.clear()

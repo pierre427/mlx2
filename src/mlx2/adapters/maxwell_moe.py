@@ -301,7 +301,7 @@ class MaxwellMoeAdapter:
     default_mtp_ordinary_handoff_max_width = 1
     # Policy keys an operator environment variable overrides (best-route
     # defaults drop a defaulted key whose variable is set; see
-    # runtime.models.maxwell_moe.apply_policy_levers).
+    # runtime.models.maxwell_moe.resolve_policy_levers).
     policy_env_overrides = {"index_kernel": "MLX2_MAXWELL_INDEX_KERNEL",
                             "sparse_prefill": "MLX2_MAXWELL_SPARSE_PREFILL"}
     prompt_lookup_default = False
@@ -346,18 +346,11 @@ class MaxwellMoeAdapter:
         # masked-prefill levers as policy keys; an operator's env var wins.
         from ..runtime.models import maxwell_moe as M
 
-        self.policy_levers = M.apply_policy_levers(index_kernel=policy.get("index_kernel"),
-                                                   sparse_prefill=policy.get("sparse_prefill"))
-        from .process_globals import claim_stock_moe
+        self.attention_levers, self.policy_levers = M.resolve_policy_levers(
+            index_kernel=policy.get("index_kernel"), sparse_prefill=policy.get("sparse_prefill"))
+        from .process_globals import claim_moe
 
-        from ..runtime.models import maxwell_moe as _M
-
-        if _M.MOE_NAX == "gather":
-            from .process_globals import claim_moe
-
-            claim_moe(self, "the Maxwell adapter (moe_nax gather)", nax_mode="gather")
-        else:
-            claim_stock_moe(self, "the Maxwell adapter")
+        claim_moe(self, "the Maxwell adapter", nax_mode=M.MOE_NAX)
 
         import mlx.core as mx
         from transformers import AutoTokenizer
@@ -373,6 +366,11 @@ class MaxwellMoeAdapter:
         config = dict(self.config)
         config["mtp_num_layers"] = 1 if has_mtp else 0
         self.model = Model(ModelArgs.from_dict(config))
+        # Only the trunk has indexer keys and sparse attention. Keep policy
+        # on each live layer so loading another adapter cannot change its KV law.
+        for layer in self.model.model.layers:
+            layer.self_attn.index_kernel = self.attention_levers["index_kernel"]
+            layer.self_attn.sparse_prefill = self.attention_levers["sparse_prefill"]
         self.storage_format = artifact["storage_format"]
         if artifact["quantization"] is not None:
             self.model.apply_quantization(artifact["quantization"], artifact["quantized_names"])
@@ -491,10 +489,17 @@ class MaxwellMoeAdapter:
 
     # ------------------------------------------------------------ receipts
 
+    def execution_numerics_contract(self):
+        levers = getattr(self, "attention_levers", {})
+        if levers.get("index_kernel") or levers.get("sparse_prefill", "union") != "union":
+            return {"maxwell_attention": dict(levers)}
+        return None
+
     def route_capability_contract(self):
         from ..runtime.models import maxwell_moe as M
 
         has_mtp = Capability.MTP in self.descriptor.capabilities
+        sparse_prefill = getattr(self, "attention_levers", {}).get("sparse_prefill", M.SPARSE_PREFILL)
         unq = {"qualified": False, "selected": None, "selection_authority": "serving_route_receipt"}
         return {
             "schema": "mlx2.maxwell-route-capability-contract.v1",
@@ -505,9 +510,9 @@ class MaxwellMoeAdapter:
             "qualification": "unqualified",
             "block_sparse_gqa": {"implemented": True, "dense_regime_tokens": self.model.args.dense_context_limit,
                                  "decode_gather_rows": M.SPARSE_GATHER_ROWS,
-                                 "long_chunk_route": M.SPARSE_PREFILL,
+                                 "long_chunk_route": sparse_prefill,
                                  "routes": (f"dense-sdpa<={self.model.args.dense_context_limit}",
-                                            f"gather<={M.SPARSE_GATHER_ROWS}-rows", M.SPARSE_PREFILL),
+                                            f"gather<={M.SPARSE_GATHER_ROWS}-rows", sparse_prefill),
                                  "batch": "per-row (left and right padding)",
                                  "max_positions": self.max_context, **unq},
             "apcv2": {"implemented": True, "exact_only": True, "cache_layout": self.descriptor.cache_layout,
@@ -545,7 +550,7 @@ class MaxwellMoeAdapter:
             "max_context": getattr(self, "max_context", None),
             "mtp_head_present": Capability.MTP in self.descriptor.capabilities,
             "num_draft": getattr(self, "_num_draft", None),
-            "maxwell_attention": maxwell_stats(),
+            "maxwell_attention": maxwell_stats(attention_levers=getattr(self, "attention_levers", None)),
             "policy_levers": dict(getattr(self, "policy_levers", {}) or {}),
             "moe_nax_gather": self._moe_nax_receipt(),
             "target_forward_observed": getattr(getattr(self, "model", None), "completed_forwards", 0) > 0,
