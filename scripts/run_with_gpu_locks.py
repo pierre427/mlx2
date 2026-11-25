@@ -125,15 +125,45 @@ def earlier_waiter(mine: Path, mine_time: int) -> str | None:
     return None
 
 
+def own_ancestor_pids() -> set[int]:
+    """This wrapper and every live ancestor (its launcher chain).
+
+    Launchers above the wrapper (a cpg_job runner, a step script) carry the
+    unit's own command in their argv. On 2026-11-25 a head-to-head unit whose
+    command named ``--rapid-bin .../rapid-mlx`` matched MODEL_PROCESS through
+    its grandparent cpg_job and waited behind itself until the night ended.
+    """
+    mine = {os.getpid(), os.getppid()}
+    try:
+        rows = subprocess.check_output(["ps", "-axo", "pid=,ppid="], text=True)
+    except (OSError, subprocess.SubprocessError):
+        return mine
+    parent = {}
+    for row in rows.splitlines():
+        fields = row.split()
+        if len(fields) == 2 and fields[0].isdigit() and fields[1].isdigit():
+            parent[int(fields[0])] = int(fields[1])
+    pid = os.getpid()
+    for _ in range(64):
+        if pid <= 1 or pid not in parent:
+            break
+        mine.add(pid)
+        pid = parent[pid]
+    return mine
+
+
 def foreign_model_processes() -> list[str]:
+    ancestors = own_ancestor_pids()
     rows = subprocess.check_output(["ps", "-axo", "pid=,command="], text=True)
     foreign = []
     for row in rows.splitlines():
         fields = row.strip().split(None, 1)
-        if len(fields) != 2 or int(fields[0]) in {os.getpid(), os.getppid()}:
+        if len(fields) != 2 or int(fields[0]) in ancestors:
             continue
         executable = fields[1].split(None, 1)[0]
-        if executable.endswith(("/zsh", "/bash", "/sh", "/git", "/git-remote-https")):
+        if Path(executable).name in {"zsh", "bash", "sh", "git", "git-remote-https"}:
+            # Shells by bare name too: a step script started as `zsh x.sh`
+            # names the unit's command in its argv.
             continue
         arguments = fields[1].split()
         if len(arguments) > 1 and Path(arguments[1]).name == "run_with_gpu_locks.py":

@@ -44,7 +44,8 @@ def test_verdict_identical_arms():
     assert v["kv_planned_growth_observed"] == {"0": [False], "1": [True]}
     assert v["peak_memory"]["0"]["metal_peak_bytes"] == 100
     assert v["peak_memory_delta_bytes"]["metal_peak_bytes"] == -10
-    assert v["timing_delta"]["long"] == {"ttft_s": -0.5, "decode_tok_s": 1.0}
+    d = v["timing_delta"]["long"]
+    assert (d["ttft_s"], d["decode_tok_s"], d["ttft_pct"], d["decode_pct"]) == (-0.5, 1.0, -25.0, 2.5)
     assert v["same_checkpoint"] and v["checkpoints"] == ["M@abc"]
     assert v["apc_warm_reuse"] == {"0": True, "1": True}
 
@@ -205,3 +206,16 @@ def test_ask_against_a_stub_server():
     runs = [{"index": i, "arm": arm, "checkpoint": "M@f", "kv_planned_growth": arm == "1",
              "requests": got, "stop": "stopped"} for i, arm in enumerate("01")]
     assert K.build_verdict(runs)["tokens_identical"]
+
+
+def test_timing_delta_averages_abba_runs_so_drift_cancels():
+    # Arms 0,1,1,0 with TTFT drifting +1 s per run and no real difference:
+    # best-of would report arm 1 as 1 s slower; the ABBA mean reports 0.
+    runs = [_run(i, arm, TOKENS, ttft=10.0 + i, decode=50.0 - i)
+            for i, arm in enumerate(("0", "1", "1", "0"))]
+    v = K.build_verdict(runs)
+    d = v["timing_delta"]["long"]
+    assert d["ttft_s"] == 0.0 and d["decode_tok_s"] == 0.0 and d["ttft_pct"] == 0.0
+    arm0 = v["timing"]["long"]["0"]
+    assert arm0["ttft_s"] == 11.5 and arm0["ttft_s_best"] == 10.0
+    assert arm0["ttft_s_runs"] == [10.0, 13.0] and arm0["decode_tok_s_best"] == 50.0

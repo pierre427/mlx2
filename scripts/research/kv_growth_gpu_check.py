@@ -324,6 +324,14 @@ def _delta(new, old):
     return None if new is None or old is None else round(new - old, 4)
 
 
+def _mean(values):
+    return round(sum(values) / len(values), 4) if values else None
+
+
+def _pct(new, old):
+    return None if new is None or not old else round(100.0 * (new - old) / old, 2)
+
+
 def build_verdict(runs: list[dict]) -> dict:
     if not runs:
         raise ValueError("no runs to compare")
@@ -368,8 +376,14 @@ def build_verdict(runs: list[dict]) -> dict:
                     for run in runs if run["arm"] == arm]
             ttft = [r["ttft_s"] for r in rows if r.get("ttft_s") is not None]
             decode = [r["decode_tok_s"] for r in rows if r.get("decode_tok_s") is not None]
-            per_arm[arm] = {"ttft_s": min(ttft) if ttft else None,
-                            "decode_tok_s": max(decode) if decode else None,
+            # Headline = mean over every run of the arm. Arms run in ABBA order
+            # and a cell drifts slower as it goes, so best-of favours arm 0
+            # (its first run is the earliest of all); the mean cancels a linear
+            # drift. Best-of and the per-run values stay for inspection.
+            per_arm[arm] = {"ttft_s": _mean(ttft), "decode_tok_s": _mean(decode),
+                            "ttft_s_best": min(ttft) if ttft else None,
+                            "decode_tok_s_best": max(decode) if decode else None,
+                            "ttft_s_runs": ttft, "decode_tok_s_runs": decode,
                             "cached_tokens": [r.get("cached_tokens") for r in rows],
                             "prompt_tokens": [r.get("prompt_tokens") for r in rows]}
         timing[name] = per_arm
@@ -398,7 +412,10 @@ def build_verdict(runs: list[dict]) -> dict:
         }
         verdict["timing_delta"] = {
             name: {"ttft_s": _delta(t["1"]["ttft_s"], t["0"]["ttft_s"]),
-                   "decode_tok_s": _delta(t["1"]["decode_tok_s"], t["0"]["decode_tok_s"])}
+                   "decode_tok_s": _delta(t["1"]["decode_tok_s"], t["0"]["decode_tok_s"]),
+                   "ttft_pct": _pct(t["1"]["ttft_s"], t["0"]["ttft_s"]),
+                   "decode_pct": _pct(t["1"]["decode_tok_s"], t["0"]["decode_tok_s"]),
+                   "basis": "mean over all runs of each arm (ABBA)"}
             for name, t in timing.items()
         }
     return verdict

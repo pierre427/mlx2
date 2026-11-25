@@ -134,10 +134,14 @@ def make_code(rng_seed: int) -> str:
     return f"{letters}-{int(digest[:8], 16) % 90000 + 10000}-{digest[8:10]}"
 
 
-def build_prompt(tokenizer, cell: int, depth: float, code: str, offset: int):
+LONG_ANSWER = (" First give the code on its own line, then write a detailed summary of the reference "
+               "material in about 300 words.")
+
+
+def build_prompt(tokenizer, cell: int, depth: float, code: str, offset: int, long_answer: bool = False):
     fact = f"The access code for the north archive vault is {code}."
-    question = ("\n\nQuestion: What is the access code for the north archive vault? "
-                "Reply with the code only.")
+    question = ("\n\nQuestion: What is the access code for the north archive vault?"
+                + (LONG_ANSWER if long_answer else " Reply with the code only."))
     intro = "Read the reference material below, then answer the question at the end.\n\n"
     chars = int(cell * 4.0)
     for _ in range(4):  # calibrate the length to the tokenizer
@@ -203,11 +207,14 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--model", type=Path, required=True)
     parser.add_argument("--out-dir", type=Path, required=True)
-    parser.add_argument("--execution-policy", type=Path, required=True)
+    parser.add_argument("--execution-policy", type=Path, default=None,
+                        help="omit to let the server pick its own policy (with --route default: the best-route default)")
     parser.add_argument("--cache-dir", help="APCv2 disk tier directory for the server (default: --no-cache-dir)")
     parser.add_argument("--server-arg", action="append", default=[],
                         help="extra mlx2.server argument (repeatable), e.g. --server-arg=--prefill-step --server-arg=1024")
-    parser.add_argument("--route", choices=("ordinary", "ast"), default="ordinary",
+    parser.add_argument("--long-answer", action="store_true",
+                        help="ask for the code plus a ~300-word summary, so decode is timed over a long reply")
+    parser.add_argument("--route", choices=("ordinary", "ast", "native-mtp", "default"), default="ordinary",
                         help="server route flag (ast: the artifact's embedded DFly2 drafter)")
     parser.add_argument("--cells", default="1024,2048,4096,8192,16384,32768,65536,131072")
     parser.add_argument("--port", type=int, default=8285)
@@ -265,7 +272,7 @@ def main(argv=None) -> int:
         "source": {"commit": git("rev-parse", "HEAD"),
                    "tracked_dirty": bool(git("status", "--porcelain", "--untracked-files=no")),
                    "harness_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest()},
-        "model_path": str(model), "execution_policy": json.loads(a.execution_policy.read_text()),
+        "model_path": str(model), "execution_policy": json.loads(a.execution_policy.read_text()) if a.execution_policy else None, "route": a.route,
         "cells_requested": cells, "max_tokens": a.max_tokens, "swap_used_mb_start": swap0,
         "sampling": a.sampling, "seed": a.seed, "reasoning_effort": a.reasoning_effort,
         "started_at": datetime.now(UTC).isoformat(), "cells": [], "status": "running",
@@ -279,10 +286,10 @@ def main(argv=None) -> int:
     server = None
     try:
         command = [sys.executable, "-u", "-m", "mlx2.server", "--model", str(model),
-                   "--host", "127.0.0.1", "--port", str(a.port), f"--{a.route}",
+                   "--host", "127.0.0.1", "--port", str(a.port), *([] if a.route == "default" else [f"--{a.route}"]),
                    "--max-lanes", "1", "--max-inflight", "1",
                    "--max-context", str(max(cells) + 4096),
-                   "--execution-policy", str(a.execution_policy.expanduser().resolve()),
+                   *(["--execution-policy", str(a.execution_policy.expanduser().resolve())] if a.execution_policy else []),
                    "--admin-token-file", str(token_file), *(["--cache-dir", str(Path(a.cache_dir).expanduser().resolve())] if a.cache_dir else ["--no-cache-dir"]),
                    *a.server_arg]
         if a.prefill_step is not None:
@@ -314,7 +321,7 @@ def main(argv=None) -> int:
         for i, cell in enumerate(cells):
             depth = DEPTHS[i % len(DEPTHS)]
             code = make_code(cell)
-            prompt, est = build_prompt(tokenizer, cell, depth, code, offset)
+            prompt, est = build_prompt(tokenizer, cell, depth, code, offset, a.long_answer)
             offset += 50_000  # a different stretch of corpus per cell
             row = {"cell": cell, "needle_depth": depth, "code": code, "prompt_tokens_estimate": est,
                    "prompt_sha256": hashlib.sha256(prompt.encode()).hexdigest()}
@@ -373,7 +380,7 @@ def main(argv=None) -> int:
         report["verdict"] = ladder_verdict(report["cells"])
         # The fp8 latent-KV route declares no APCv2 and never publishes: a warm arm that restored nothing is
         # its expected behaviour, not a miss.
-        apc = report["execution_policy"].get("latent_kv") != "fp8"
+        apc = (report["execution_policy"] or {}).get("latent_kv") != "fp8"
         report["verdict"]["warm_restore_expected"] = apc
         failed = [k for k in ("oracle_failures", "warm_misses") if report["verdict"][k] and (apc or k != "warm_misses")]
         if failed and report["status"] == "completed":  # an early stop keeps its own reason

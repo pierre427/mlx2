@@ -63,6 +63,36 @@ def test_agent_cli_prompt_that_quotes_a_server_does_not_block(monkeypatch):
     ]
 
 
+def test_own_launcher_chain_that_names_a_server_does_not_block(monkeypatch):
+    # 2026-11-25: cpg_job (grandparent) carried --rapid-bin .../rapid-mlx and the
+    # step script ran as bare `zsh`; the unit waited behind itself all night.
+    module = _load_module()
+    monkeypatch.setattr(module.os, "getpid", lambda: 10)
+    monkeypatch.setattr(module.os, "getppid", lambda: 9)
+    monkeypatch.setattr(module, "own_ancestor_pids", lambda: {10, 9, 8})
+
+    def ps(argv, **kwargs):
+        return (
+            "8 /venv/bin/python /lab/cpg_job.py run --label h2h -- env x.py --rapid-bin /v/bin/rapid-mlx\n"
+            "7 zsh /tmp/window/gstep.sh h2h x.py --rapid-bin /v/bin/rapid-mlx\n"
+            "31 /v/bin/rapid-mlx serve --port 8400\n"
+        )
+
+    monkeypatch.setattr(module.subprocess, "check_output", ps)
+    assert module.foreign_model_processes() == ["31 /v/bin/rapid-mlx serve --port 8400"]
+
+
+def test_ancestor_walk_follows_the_parent_chain(monkeypatch):
+    module = _load_module()
+    monkeypatch.setattr(module.os, "getpid", lambda: 10)
+    monkeypatch.setattr(module.os, "getppid", lambda: 9)
+    monkeypatch.setattr(
+        module.subprocess, "check_output",
+        lambda *a, **k: "10 9\n9 8\n8 7\n7 1\n30 1\n",
+    )
+    assert module.own_ancestor_pids() == {10, 9, 8, 7}
+
+
 def test_exclusive_receipt_refuses_to_overwrite(tmp_path: Path) -> None:
     module = _load_module()
     receipt = tmp_path / "attempt.json"
