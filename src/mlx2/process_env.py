@@ -98,6 +98,8 @@ PROCESS_RUNTIME_DEFAULTS = {"MLX_METAL_FAST_SYNCH": "1"}
 #   "ops100_v1"              commit every 100 kernels; no byte trigger
 #                            (MLX_MAX_OPS_PER_BUFFER=100,
 #                            MLX_MAX_MB_PER_BUFFER=1000000).
+#   "mb200_v1"               byte trigger raised to 200 MB; MLX's kernel cap
+#                            unchanged (MLX_MAX_MB_PER_BUFFER=200 only).
 #
 # Evidence for ops100_v1 (GLM-5.3-Flash-REAP50-Q3_K_M.gguf@5a865918, mlx2
 # 1892dab2a, process-level ABBA of recorded 2K/32K decode replays,
@@ -113,10 +115,22 @@ PROCESS_RUNTIME_DEFAULTS = {"MLX_METAL_FAST_SYNCH": "1"}
 # qualification/runs/flash-next-cmdbuf-20261124): native-MTP decode at 32K
 # -10%, ordinary -7%, cold TTFT +17-34%, text identical. The byte trigger only
 # hurts where whole weight banks are billed per launch, as on GLM-5.3.
+#
+# mb200_v1 is the cheap half of that experiment: only the byte cap moves (to
+# 200 MB, 4x MLX's M5 Max 50 MB), the 50-kernel cap stays. Peers raised the
+# byte cap alone this month (Lay-X 256 MB, 2026-11-18: Qwen3-Coder-Next 4-bit
+# decode +6-14% on M5 Max, Qwen3.6-35B-A3B unchanged) or both caps
+# (local-llm-server 300 ops / 1000 MB for Inkling 2 Mini, 2026-11-23). It is
+# not "raised" for prefill chunk planning (RAISED_BYTE_CAP_MB = 512): at
+# 200 MB a prefill chunk's buffers stay bounded. Opt-in and unqualified,
+# default off: nothing measured it on mlx2 yet; the A/B is
+# scripts/research/cmdbuf_mb200_ab.sh (Flash-Next, Inkling 2; ordinary route,
+# token-exact). No computed bit changes, so APCv2 state is unaffected.
 COMMAND_BUFFER_POLICY_ENV = "MLX2_COMMAND_BUFFERS"
 COMMAND_BUFFER_POLICIES = {
     "mlx_default": {},
     "ops100_v1": {"MLX_MAX_OPS_PER_BUFFER": "100", "MLX_MAX_MB_PER_BUFFER": "1000000"},
+    "mb200_v1": {"MLX_MAX_MB_PER_BUFFER": "200"},
 }
 
 

@@ -81,6 +81,25 @@ def test_command_buffer_policy_is_opt_in_and_explicit_values_win():
         apply_process_runtime_defaults({"MLX2_COMMAND_BUFFERS": "one_buffer"})
 
 
+def test_mb200_policy_raises_only_the_byte_cap():
+    from mlx2.process_env import (
+        COMMAND_BUFFER_POLICIES,
+        apply_process_runtime_defaults,
+        raised_command_buffer_byte_cap,
+    )
+
+    assert COMMAND_BUFFER_POLICIES["mb200_v1"] == {"MLX_MAX_MB_PER_BUFFER": "200"}
+    env = {"MLX2_COMMAND_BUFFERS": "mb200_v1"}
+    applied = apply_process_runtime_defaults(env)
+    assert env["MLX_MAX_MB_PER_BUFFER"] == "200" and applied["MLX_MAX_MB_PER_BUFFER"] == "200"
+    assert "MLX_MAX_OPS_PER_BUFFER" not in env  # MLX keeps its own kernel cap
+    # 200 MB still bounds a prefill chunk's buffers (below RAISED_BYTE_CAP_MB).
+    assert not raised_command_buffer_byte_cap(env)
+    env = {"MLX2_COMMAND_BUFFERS": "mb200_v1", "MLX_MAX_MB_PER_BUFFER": "80"}
+    apply_process_runtime_defaults(env)
+    assert env["MLX_MAX_MB_PER_BUFFER"] == "80"  # an explicit value wins
+
+
 def test_raised_byte_cap_is_detected_however_it_was_set():
     from mlx2.process_env import raised_command_buffer_byte_cap
 
