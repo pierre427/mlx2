@@ -784,7 +784,12 @@ PREFILL_STEP_CAP_DEFAULT = 2048
 # capped schedule's own step (prefill_step_cap above), so the 128K admission
 # math is unchanged.  Scheduling only, the same on both routes.  An operator
 # ``--prefill-step`` still wins.  Opt-out: ``"prefill_step_fixed": 0`` (the
-# autoscale, bounded by ``prefill_step_cap``).
+# autoscale, bounded by ``prefill_step_cap``).  Admission limit (2026-11-25):
+# a 2048-row chunk prices 5-8 GiB of prefill transient, more than a fresh
+# server has left at the host-scaled 16 GiB service reserve, so these bare
+# defaults refuse from about 4K there; the measurements above ran with
+# MLX2_SERVICE_RESERVE_GIB=8.  Pierre kept the default (docs/research/
+# model-feature-decisions.tsv, prefill_step_fixed).
 PREFILL_STEP_FIXED_DEFAULT = 2048
 # Hy4-flash default AST controller (Pierre 2026-11-24; unqualified): the
 # deterministic mode (runtime/external_speculative.CONTROLLER_MODES) with a

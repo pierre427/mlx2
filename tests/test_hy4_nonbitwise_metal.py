@@ -47,6 +47,12 @@ def teardown_module(_module):
 
 @pytest.fixture(autouse=True)
 def gpu():
+    # The tests import helpers from test_hy_v4_flash_cpu, whose first import
+    # selects the CPU (module-level set_default_device).  Import it before
+    # choosing the GPU, as the sibling Metal tests do, or the first model test
+    # runs on the CPU and fails in GatherMM (bf16 is float32-only there).
+    import test_hy_v4_flash_cpu  # noqa: F401
+
     previous = mx.default_device()
     mx.set_default_device(mx.gpu)
     try:

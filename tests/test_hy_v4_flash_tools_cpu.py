@@ -542,3 +542,51 @@ def test_eos_immediately_after_call_opener_obeys_marker_policy(separate_finish):
     required = output_parser({**request, "tool_choice": "required"}, suffix=S)
     assert finish(required, "length") == []
     assert required.truncated_tool_call == {"function": None, "cause": "max_tokens"}
+
+
+# vllm#69174 (read, not copied): an argument whose schema is only ``allOf``
+# used to fall back to string (an object came back as "{...}", true as "true").
+ALL_OF_DEFS = {"Obj": {"type": "object"}, "Flag": {"type": "boolean"},
+               "Wrapped": {"allOf": [{"$ref": "#/$defs/Obj"}]}}
+ALL_OF_CASES = [
+    ({"allOf": [{"$ref": "#/$defs/Obj"}]}, '{"x": 1}', {"x": 1}),
+    ({"allOf": [{"type": "boolean"}]}, "true", True),
+    ({"allOf": [{"$ref": "#/$defs/Flag"}, {"description": "a flag"}]}, "false", False),
+    ({"$ref": "#/$defs/Wrapped"}, '{"y": [2]}', {"y": [2]}),
+    ({"allOf": [{"allOf": [{"type": "integer"}]}, {"minimum": 0}]}, "7", 7),
+    ({"allOf": [{"type": "number"}, {"type": "integer"}]}, "7", 7),
+    # Must not change: narrowing to string, no type information, a plain
+    # string, and a $ref beside an annotation-only allOf (resolves the $ref).
+    ({"allOf": [{"type": ["string", "integer"]}, {"type": "string"}]}, "7", "7"),
+    ({"allOf": [{"description": "anything"}]}, "abc", "abc"),
+    ({"allOf": [{"type": "string"}]}, "true", "true"),
+    ({"$ref": "#/$defs/Obj", "allOf": [{"description": "d"}]}, '{"z": 3}', {"z": 3}),
+    # ``type`` / ``anyOf`` keep priority over ``allOf``.
+    ({"type": "string", "allOf": [{"type": "integer"}]}, "7", "7"),
+    ({"anyOf": [{"type": "integer"}], "allOf": [{"type": "string"}]}, "7", 7),
+]
+
+
+def _all_of_tools(schema):
+    return [{"type": "function", "function": {"name": "f", "parameters": {
+        "type": "object", "$defs": ALL_OF_DEFS, "properties": {"a": schema}}}}]
+
+
+@pytest.mark.parametrize("schema,raw,want", ALL_OF_CASES)
+@pytest.mark.parametrize("chunks", [None, 1, 5])
+def test_all_of_schema_resolves_value_type(schema, raw, want, chunks):
+    tools = _all_of_tools(schema)
+    body = f"f{K}a{K_END}{V}{raw}{V_END}"
+    assert make_parser(S)(body, tools)["arguments"] == {"a": want}
+    _, calls = run(CALLS + CALL + body + CALL_END + CALLS_END, chunks=chunks, request={"tools": tools})
+    assert [json.loads(c["function"]["arguments"]) for c in calls] == [{"a": want}]
+
+
+def test_all_of_types_narrow_the_value_grammar_like_the_parser():
+    import re
+
+    from mlx2.runtime.tool_parsers.hy_v4 import _arg_schema, value_pattern
+
+    tools = _all_of_tools({"allOf": [{"$ref": "#/$defs/Flag"}]})
+    pattern = value_pattern(_arg_schema("f", "a", tools), suffix=S)
+    assert re.fullmatch(pattern, "true") and not re.fullmatch(pattern, "yes")

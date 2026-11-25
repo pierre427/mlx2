@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Original mlx2 code; behaviour follows vLLM's hy_v4 tool parser (PR 68296,
-# read not copied) and its fixes vllm#65851 / vllm#55550.  See
+# read not copied) and its fixes vllm#65851 / vllm#55550, plus ``allOf``
+# typing after vllm#69174 (provenance/hy-v4-flash-tool-allof.json).  See
 # provenance/hy-v4-flash.json.
 """Tencent Hy4 tool calls.
 
@@ -72,6 +73,11 @@ _TYPE_ALIASES = {"str": "string", "text": "string", "varchar": "string", "char":
 
 
 _SCHEMA_TYPE_KEYS = ("type", "anyOf", "oneOf")
+# Keys that carry type information.  ``allOf`` is kept out of
+# ``_SCHEMA_TYPE_KEYS``: ``_is_ref_type`` reads that tuple, and a ``$ref``
+# beside an annotation-only ``allOf`` must still resolve through the ``$ref``
+# (vllm#69174).
+_TYPED_KEYS = _SCHEMA_TYPE_KEYS + ("allOf",)
 _MAX_REF_HOPS = 3
 _MAX_ANCHOR_DEPTH = 8
 
@@ -153,7 +159,7 @@ def _resolve_ref(schema, root, seen=frozenset(), hops=0):
     target = _local_ref(root, ref)
     if target is None:
         return {}
-    typed = {key: copy.deepcopy(target[key]) for key in _SCHEMA_TYPE_KEYS if target.get(key)}
+    typed = {key: copy.deepcopy(target[key]) for key in _TYPED_KEYS if target.get(key)}
     if typed:
         return _resolve_unions(typed, root, seen | {ref}, hops + 1) or typed
     if _is_ref_type(target):
@@ -163,7 +169,7 @@ def _resolve_ref(schema, root, seen=frozenset(), hops=0):
 
 def _resolve_unions(schema, root, seen=frozenset(), hops=0):
     resolved = None
-    for key in ("anyOf", "oneOf"):
+    for key in ("anyOf", "oneOf", "allOf"):
         branches = schema.get(key)
         if not isinstance(branches, list) or not any(_is_ref_type(b) for b in branches):
             continue
@@ -198,14 +204,43 @@ def _arg_schema(tool_name, arg, tools):
 
 def _options(schema):
     """vLLM ``_get_schema_options``: ``type`` first, then recursive unions,
-    else string."""
+    then ``allOf`` (vllm#69174), else string."""
     if "type" in schema:
         kind = schema["type"]
         return [{"type": k} for k in kind] if isinstance(kind, list) else [schema]
     for key in ("anyOf", "oneOf"):
         if isinstance(schema.get(key), list):
             return [o for branch in schema[key] if isinstance(branch, dict) for o in _options(branch)]
+    if isinstance(schema.get("allOf"), list):
+        common = _all_of_types(schema["allOf"])
+        if common:
+            return [{"type": k} for k in common]
     return [{"type": "string"}]
+
+
+def _all_of_types(branches):
+    """Types every typed ``allOf`` branch allows, in first-branch order.
+
+    A branch with no type information (only a ``description``, a bound, an
+    unresolved ``$ref``) does not narrow the set; ``integer`` satisfies a
+    ``number`` branch.  Empty when no branch is typed or nothing is shared
+    (the caller then falls back to string)."""
+    common = None
+    for branch in branches:
+        if not isinstance(branch, dict) or not any(key in branch for key in _TYPED_KEYS):
+            continue
+        kinds = []
+        for option in _options(branch):
+            kind = _normalize_type(option.get("type", "string"))
+            if kind not in kinds:
+                kinds.append(kind)
+        if common is None:
+            common = kinds
+            continue
+        allowed = set(kinds) | ({"integer"} if "number" in kinds else set())
+        common = [k for k in common if k in allowed] + (
+            ["integer"] if "number" in common and "integer" in kinds and "integer" not in common else [])
+    return common or []
 
 
 def _types(schema):
