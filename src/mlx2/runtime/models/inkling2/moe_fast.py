@@ -46,6 +46,7 @@ from mlx import nn
 from .. import invariant_prefill as _invariant
 from . import act_quant as _act_quant
 from .. import switch_grouped_experts as _grouped
+from ...technologies.nvfp4_linear import _scale_law as _tech_scale_law
 from ..switch_layers import (
     QuantizedSwitchLinear,
     SwitchLinear,
@@ -77,9 +78,7 @@ route_logdomain_compiled = mx.compile(_route_logdomain)
 
 def _scale_law(y, scale):
     # ``technologies.nvfp4_linear._scale_law``: FP32 multiply, rounded back.
-    from ...technologies.nvfp4_linear import _scale_law as law
-
-    return law(y, scale)
+    return _tech_scale_law(y, scale)
 
 
 def _swiglu_law(up, gate, gate_cap, up_cap):

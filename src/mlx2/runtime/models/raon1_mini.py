@@ -46,6 +46,8 @@ from .base import BaseModelArgs
 from .cache import ArraysCache, KVCache
 from ..technologies import linear_recurrence as _lr
 from .switch_layers import SwitchGLU
+from ..nvfp4_linear import GLOBAL_SCALED_SPEC
+from ..technologies.nvfp4_linear import reference as _nvfp4_reference
 from ..technologies.moe_router import cached_spec, route as _route_reference
 
 MODEL_TYPE = "raon1_mini"
@@ -221,10 +223,8 @@ class MergedProjection:
             y = mx.quantized_matmul(x, self.weight, scales=self.scales, biases=self.biases, transpose=True,
                                     group_size=self.group_size, bits=self.bits, mode="affine")
         else:
-            from ..nvfp4_linear import GLOBAL_SCALED_SPEC
-            from ..technologies.nvfp4_linear import reference
-
-            y = reference(x, self.weight, self.scales, self.column_scale, None, GLOBAL_SCALED_SPEC)
+            y = _nvfp4_reference(x, self.weight, self.scales, self.column_scale, None,
+                                 GLOBAL_SCALED_SPEC)
         return mx.split(y, self.splits, axis=-1)
 
 
