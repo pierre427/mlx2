@@ -350,7 +350,14 @@ class MaxwellMoeAdapter:
                                                    sparse_prefill=policy.get("sparse_prefill"))
         from .process_globals import claim_stock_moe
 
-        claim_stock_moe(self, "the Maxwell adapter")
+        from ..runtime.models import maxwell_moe as _M
+
+        if _M.MOE_NAX == "gather":
+            from .process_globals import claim_moe
+
+            claim_moe(self, "the Maxwell adapter (moe_nax gather)", nax_mode="gather")
+        else:
+            claim_stock_moe(self, "the Maxwell adapter")
 
         import mlx.core as mx
         from transformers import AutoTokenizer
@@ -540,9 +547,21 @@ class MaxwellMoeAdapter:
             "num_draft": getattr(self, "_num_draft", None),
             "maxwell_attention": maxwell_stats(),
             "policy_levers": dict(getattr(self, "policy_levers", {}) or {}),
+            "moe_nax_gather": self._moe_nax_receipt(),
             "target_forward_observed": getattr(getattr(self, "model", None), "completed_forwards", 0) > 0,
             "capability_receipts": self.capability_receipts(),
         }
+
+    @staticmethod
+    def _moe_nax_receipt():
+        from ..runtime.models import maxwell_moe as M
+        from ..runtime.models import moe_nax_gather
+
+        status = moe_nax_gather.status() if M.MOE_NAX != "off" else None
+        engaged = sum((status or {}).get("calls", {}).values())
+        return {"implemented": True, "qualified": False, "selected": M.MOE_NAX != "off", "mode": M.MOE_NAX,
+                "scope": "prefill forwards (trunk forward_scope); quantized sorted expert gathers",
+                "observed_used": engaged > 0, **({"status": status} if status is not None else {})}
 
     def close(self):
         from .process_globals import release

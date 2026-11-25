@@ -1690,7 +1690,8 @@ _MAXWELL_ROUTES = (("dense", "dense_calls"), ("gather", "sparse_gather_calls"),
 _MAXWELL_LEVERS = {"compile": {"True", "False"}, "mhc_kernel": {"True", "False"},
                    "index_kernel": {"True", "False"},
                    "head": {"fp32", "bf16"}, "fused_qkv": {"True", "False"},
-                   "sparse_prefill": {"union", "masked"}, "gemv_rows_kernel": {"loop", "fused"}}
+                   "sparse_prefill": {"union", "masked"}, "gemv_rows_kernel": {"loop", "fused"},
+                   "moe_nax": {"off", "gather"}}
 
 
 def _add_maxwell(builder: PrometheusBuilder, execution: Mapping[str, Any]) -> None:

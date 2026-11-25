@@ -958,3 +958,46 @@ def test_native_mtp_hands_off_to_ordinary_above_one_lane():
     # An operator's explicit policy still wins.
     assert resolve_execution_policy_defaults({"mtp_ordinary_handoff": None}, mtp, with_mtp,
                                              max_lanes=4)["mtp_ordinary_handoff"] is None
+
+
+def test_moe_nax_gather_scope_reaches_quantized_prefill_and_falls_back_on_cpu():
+    # MLX2_MAXWELL_MOE_NAX=gather (opt-in): prefill forwards open the NAX scope
+    # around the trunk, so quantized sorted expert gathers reach the NAX hook;
+    # on a CPU host it declines (counted) and the stock gather runs bit for bit.
+    from mlx2.runtime.models import moe_nax_gather as nax
+    mx.random.seed(21)
+    # hidden 64: a quantized sorted gather below the 64-wide K tile takes the
+    # dense-tail path and never reaches the NAX hook (switch_layers).
+    model = Model(ModelArgs.from_dict({**TINY, "hidden_size": 64}))
+    from mlx import nn
+    nn.quantize(model, group_size=32, bits=8,      # routed experts whose input width fits a 32-group
+                class_predicate=lambda p, m: "switch_mlp" in p and hasattr(m, "to_quantized")
+                and m.weight.shape[-1] % 32 == 0)
+    ids = mx.array(np.random.default_rng(4).integers(4, TINY["vocab_size"], size=(1, 40)))
+    old = nax.set_mode("off")
+    try:
+        reference = model(ids)
+        nax.status(reset=True)
+        nax.set_mode("gather")
+        out = model(ids)
+        status = nax.status(reset=True)
+    finally:
+        nax.set_mode(old)
+    assert mx.array_equal(out, reference).item()
+    assert sum(status["fallbacks"].values()) > 0, status     # the hook was reached in prefill
+    assert set(status["fallbacks"]) <= {"not_nax_host", "cpu_device"}
+    assert sum(status["calls"].values()) == 0
+
+
+def test_moe_nax_lever_is_reported_and_validated(monkeypatch):
+    from mlx2.prometheus import PrometheusBuilder, _add_execution
+    from mlx2.runtime.models import maxwell_moe as M
+    assert M.maxwell_stats()["levers"]["moe_nax"] == "off"
+    builder = PrometheusBuilder()
+    _add_execution(builder, {"maxwell_attention": M.maxwell_stats()})
+    assert 'mlx2_maxwell_lever_info{lever="moe_nax",value="off"} 1' in builder.render()
+    monkeypatch.setenv("MLX2_MAXWELL_MOE_NAX", "bogus")
+    with pytest.raises(ValueError, match="MOE_NAX"):
+        importlib.reload(M)
+    monkeypatch.delenv("MLX2_MAXWELL_MOE_NAX")
+    importlib.reload(M)

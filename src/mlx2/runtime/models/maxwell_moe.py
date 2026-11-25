@@ -109,6 +109,11 @@ MHC_KERNEL_MAX_ROWS = int(os.environ.get("MLX2_MAXWELL_MHC_KERNEL_MAX_ROWS", "16
 HEAD_MODE = os.environ.get("MLX2_MAXWELL_HEAD", "bf16")
 INDEX_KERNEL = os.environ.get("MLX2_MAXWELL_INDEX_KERNEL", "0") == "1"
 FUSED_QKV = os.environ.get("MLX2_MAXWELL_FUSED_QKV", "0") == "1"
+# Prefill expert gathers through the NAX sorted gather (moe_nax_gather):
+# "off" (default) or "gather".  The adapter claims the process NAX mode.
+MOE_NAX = os.environ.get("MLX2_MAXWELL_MOE_NAX", "off")
+if MOE_NAX not in ("off", "gather"):
+    raise ValueError("MLX2_MAXWELL_MOE_NAX must be off or gather")
 
 
 def apply_policy_levers(*, index_kernel=None, sparse_prefill=None) -> dict:
@@ -196,7 +201,7 @@ def maxwell_stats(reset: bool = False) -> dict:
     out = dict(STATS, levers={"compile": COMPILE_SPANS, "mhc_kernel": MHC_KERNEL, "head": HEAD_MODE,
                               "fused_qkv": FUSED_QKV, "index_kernel": INDEX_KERNEL,
                               "canonical_pick": CANONICAL_PICK, "row_exact_verify": ROW_EXACT_VERIFY,
-                              "gather_rows": SPARSE_GATHER_ROWS,
+                              "gather_rows": SPARSE_GATHER_ROWS, "moe_nax": MOE_NAX,
                               "sparse_prefill": SPARSE_PREFILL})
     from . import gemv_rows_exact
 
@@ -914,10 +919,16 @@ class Decoder(nn.Module):
         h = self.expand(inputs)
         mask = create_attention_mask(h, main[0])
         padding = _row_padding(main[0], inputs.shape[1], self.args.dense_context_limit)
-        for i, (layer, c, ic) in enumerate(zip(self.layers, main, index, strict=True)):
-            h = layer(h, mask, c, ic, padding)
-            if capture is not None and i in capture:
-                capture[i] = h          # multi-stream residual after block i
+        # Opt-in MLX2_MAXWELL_MOE_NAX=gather: prefill forwards admit the
+        # segmented NAX sorted expert gather (bit-identical to the stock sorted
+        # kernel, canary-proven per instantiation, M5 only); a no-op while off.
+        from . import moe_nax_gather
+
+        with moe_nax_gather.forward_scope(inputs, cache):
+            for i, (layer, c, ic) in enumerate(zip(self.layers, main, index, strict=True)):
+                h = layer(h, mask, c, ic, padding)
+                if capture is not None and i in capture:
+                    capture[i] = h          # multi-stream residual after block i
         out = self.norm(h)
         return (out, h) if return_streams else out
 

@@ -84,6 +84,7 @@ CANDIDATE_ENV = {
     # Verify rows written with one-token decode arithmetic (KV bits of
     # accepted rows differ from the batched verify's).
     "MLX2_MAXWELL_ROW_EXACT_VERIFY": "default=off",
+    "MLX2_MAXWELL_MOE_NAX": "default=off",
     "MLX2_MAXWELL_SPARSE_PREFILL": "default=union",
     "MLX2_MAXWELL_SPARSE_GATHER_ROWS": "default=16",
     "MLX2_MAXWELL_UNION_QUERY_CHUNK": "default=64",
