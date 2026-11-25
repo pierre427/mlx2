@@ -106,10 +106,30 @@ class DFlash2DecoderLayer(DFlashDecoderLayer):
         return residual + self.mlp_conv.finish(self.mlp(x), kernel)
 
 
+def selector_post_softcap(config) -> float | None:
+    """The cap applied to selector path scores, or None (today's law).
+
+    ``selector_softcap_mode == "after_correction"`` moves
+    ``final_logit_softcapping`` from the drafter logits onto the selector
+    score ``unary + correction``; see ``DFlash2Config``.
+    """
+    if getattr(config, "selector_softcap_mode", "before_correction") == "after_correction":
+        return float(config.final_logit_softcapping)
+    return None
+
+
+def cap_selector_scores(scores, cap):
+    """``cap * tanh(scores / cap)``; identity when ``cap`` is None."""
+    if cap is None:
+        return scores
+    return mx.tanh(scores / cap) * cap
+
+
 class CandidateSelector(nn.Module):
     def __init__(self, config: DFlash2Config):
         super().__init__()
         self.top_k = config.selector_top_k
+        self.post_softcap = selector_post_softcap(config)
         self.predecessor_codebook = nn.Embedding(
             config.vocab_size, config.selector_rank
         )
@@ -143,7 +163,7 @@ class CandidateSelector(nn.Module):
                 * self.successor_codebook(candidates[:, position]),
                 axis=-1,
             )
-            scores = unary[:, position] + edges
+            scores = cap_selector_scores(unary[:, position] + edges, self.post_softcap)
             selected = (
                 sample_candidate(scores, candidates[:, position], vocab_size)
                 if callable(sample_candidate)
@@ -178,6 +198,12 @@ class DFlash2DraftModel(DFlashDraftModel):
     def __init__(self, config: DFlash2Config):
         super().__init__(config)
         self.candidate_selector = CandidateSelector(config)
+        if self.candidate_selector.post_softcap is not None:
+            # The continuation-tree lattice and the best-first tree search
+            # score paths on the host from the uncapped unary; they do not
+            # implement the post-correction cap, so this drafter offers
+            # neither (``_start_tree`` and lattice capture refuse it too).
+            object.__setattr__(self, "supports_continuation_tree_reuse", False)
 
     @property
     def receipt_settings(self):
@@ -212,6 +238,17 @@ class DFlash2DraftModel(DFlashDraftModel):
         vocab = self.__dict__.get("draft_vocab_receipt")
         if vocab is not None:
             settings["draft_vocab"] = dict(vocab)
+        # Target-declared embedding / vocabulary terms and the selector
+        # softcap placement (mlx2), present only when not today's law so
+        # every existing receipt is unchanged.
+        if self.candidate_selector.post_softcap is not None:
+            settings["selector_softcap_mode"] = self.config.selector_softcap_mode
+        embedding = self.__dict__.get("target_embedding_receipt")
+        if embedding is not None:
+            settings["target_token_embedding"] = embedding
+        rows = self.__dict__.get("_target_vocab_rows")
+        if rows is not None:
+            settings["target_vocab_rows"] = int(rows)
         from .fold import status as fold_status
 
         fold = fold_status(self)
@@ -225,24 +262,72 @@ class DFlash2DraftModel(DFlashDraftModel):
         for field in ("hidden_size", "vocab_size"):
             if getattr(args, field) != getattr(self.config, field):
                 raise ValueError(f"DFlash2 target {field} mismatch")
-        if args.num_hidden_layers != self.config.num_target_layers:
-            raise ValueError("DFlash2 target layer count mismatch")
+        from ...adapters.dflash2 import check_target_taps
+
+        # A looped target declares its tap space in layer visits (mlx2).
+        check_target_taps(
+            self.config,
+            layer_count=args.num_hidden_layers,
+            tap_count=getattr(target_model, "speculative_tap_count", None),
+            final_norm_tap=getattr(target_model, "speculative_final_norm_tap", False) is True,
+        )
 
     def bind(self, target_model) -> "DFlash2DraftModel":
         self.validate_target_compatibility(target_model)
         super().bind(target_model)
+        # Target-declared draft input terms (mlx2).  A target whose own
+        # forward normalizes token embeddings (Inkling 2's embedding RMSNorm)
+        # declares ``speculative_token_embedding``: the drafter then embeds
+        # through it, exactly as the target does.  A target with padded head
+        # rows declares ``speculative_vocab_rows``: drafter logits keep only
+        # the real rows.  Targets that declare neither bind as before.
+        embed = getattr(target_model, "speculative_token_embedding", None)
+        if embed is not None:
+            if not callable(embed):
+                raise ValueError("DFlash2 target speculative_token_embedding must be callable")
+            object.__setattr__(self, "_target_token_embedding", embed)
+            object.__setattr__(
+                self, "target_embedding_receipt",
+                str(getattr(target_model, "speculative_token_embedding_law", "target_declared")),
+            )
+        rows = getattr(target_model, "speculative_vocab_rows", None)
+        if rows is not None:
+            if type(rows) is not int or not 0 < rows <= self.config.vocab_size:
+                raise ValueError("DFlash2 target speculative_vocab_rows must lie inside the vocabulary")
+            if not 0 <= self.config.mask_token_id < rows:
+                raise ValueError("DFlash2 mask_token_id lies in the target's padded head rows")
+            if self.config.selector_top_k > rows:
+                raise ValueError("DFlash2 selector_top_k exceeds the target's real vocabulary")
+            if rows != self.config.vocab_size:
+                object.__setattr__(self, "_target_vocab_rows", rows)
         return self
 
+    def use_raw_token_embedding(self) -> None:
+        """Diagnostic opt-out: embed with the raw target table (no target norm)."""
+        self.__dict__.pop("_target_token_embedding", None)
+        object.__setattr__(self, "target_embedding_receipt", "raw_table_diagnostic")
+
+    @property
+    def proposal_vocab_size(self) -> int:
+        """Width of the proposal laws: the target's real vocabulary rows."""
+        rows = self.__dict__.get("_target_vocab_rows")
+        return int(self.config.vocab_size if rows is None else rows)
+
     def _embed_input_tokens(self, inputs: mx.array) -> mx.array:
-        return (
-            self.embed_tokens(inputs)
-            * self.embed_scale
-            * self.config.input_embedding_scale
-        )
+        embed = self.__dict__.get("_target_token_embedding")
+        raw = self.embed_tokens(inputs) if embed is None else embed(inputs)
+        return raw * self.embed_scale * self.config.input_embedding_scale
 
     def _logits(self, hidden: mx.array, head=None) -> mx.array:
         logits = (self.lm_head if head is None else head)(hidden) * self.config.output_multiplier
-        if self.config.final_logit_softcapping is not None:
+        rows = self.__dict__.get("_target_vocab_rows")
+        if rows is not None and head is None:
+            # Padded head rows are storage, not tokens: crop before top-k.
+            logits = logits[..., :rows]
+        if (
+            self.config.final_logit_softcapping is not None
+            and self.candidate_selector.post_softcap is None
+        ):
             softcap = self.config.final_logit_softcapping
             logits = mx.tanh(logits / softcap) * softcap
         return logits
@@ -333,6 +418,13 @@ def _draft_distributions(
     processors and sample sequentially while retaining the one-pass features.
     """
     object.__setattr__(self, "last_continuation_lattice", None)
+    post_cap = self.candidate_selector.post_softcap
+    if capture_continuation_tree and post_cap is not None:
+        raise ValueError(
+            "DFlash2 continuation lattices do not implement selector_softcap_mode "
+            "'after_correction'"
+        )
+    law_vocab = self.proposal_vocab_size
     if capture_lattice_only and (not capture_continuation_tree or any(logits_processors or ())):
         raise ValueError("lattice-only drafting requires an unprocessed continuation-tree capture")
     import numpy as np
@@ -392,7 +484,7 @@ def _draft_distributions(
         for row in range(batch):
             row_laws = []
             for position in range(proposal_length):
-                law = np.zeros(self.config.vocab_size, dtype=np.float64)
+                law = np.zeros(law_vocab, dtype=np.float64)
                 law[candidate_values[row, position]] = probability_values[
                     row, position
                 ]
@@ -410,7 +502,9 @@ def _draft_distributions(
             active[row] and logits_processors[row] for row in range(batch)
         )
         hosted_edges = np.asarray(edges.astype(mx.float32)) if needs_processor_rows else None
-        scores = np.asarray((unary[:, position] + edges).astype(mx.float32))
+        scores = np.asarray(
+            cap_selector_scores(unary[:, position] + edges, post_cap).astype(mx.float32)
+        )
         dense_scores = (
             np.asarray(logits[:, position].astype(mx.float32))
             if needs_processor_rows else None
@@ -437,6 +531,13 @@ def _draft_distributions(
                     np.asarray(value[0].astype(mx.float32))[ids[row]]
                     + hosted_edges[row]
                 )
+                if post_cap is not None:
+                    # The cap is monotonic, so a masked -inf stays -inf.
+                    candidate_scores = np.asarray(
+                        cap_selector_scores(
+                            mx.array(candidate_scores.astype(np.float32)), post_cap
+                        ).astype(mx.float32)
+                    )
                 if not np.isfinite(candidate_scores).any():
                     # The target still has a legal dense continuation, but the
                     # selector cannot propose it. End this lane's draft here;
@@ -453,14 +554,14 @@ def _draft_distributions(
                     raise RuntimeError("finite DFlash2 candidates produced no law") from error
                 column = rngs[row].sample(q)
                 token = int(ids[row, column])
-                full_q = np.zeros(self.config.vocab_size, dtype=np.float64)
+                full_q = np.zeros(law_vocab, dtype=np.float64)
                 full_q[ids[row]] = q
                 q = full_q
             else:
                 restricted = softmax(scores[row], temperatures[row])
                 column = rngs[row].sample(restricted)
                 token = int(ids[row, column])
-                q = np.zeros(self.config.vocab_size, dtype=np.float64)
+                q = np.zeros(law_vocab, dtype=np.float64)
                 q[ids[row]] = restricted
             selected.append(token)
             tokens[row].append(token); laws[row].append(q)
@@ -576,7 +677,9 @@ def pairwise_score_table(self, anchors, features, candidates, unary):
         * selector.successor_codebook(candidates)[:, :, None],
         axis=-1,
     )
-    return (unary[:, :, None, :] + edges).astype(mx.float32)
+    return cap_selector_scores(
+        unary[:, :, None, :] + edges, selector.post_softcap
+    ).astype(mx.float32)
 
 
 def pairwise_walk(candidates, scores, uniforms, temperatures):
@@ -861,6 +964,11 @@ def _start_tree(
     otherwise nothing is evaluated here.
     """
 
+    if self.candidate_selector.post_softcap is not None:
+        raise ValueError(
+            "DFlash2 tree drafting does not implement selector_softcap_mode "
+            "'after_correction'"
+        )
     anchors_list = [int(value) for value in anchors]
     anchors_array = mx.array(anchors_list, dtype=mx.int32)
     batch = int(anchors_array.shape[0])

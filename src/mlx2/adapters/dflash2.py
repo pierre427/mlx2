@@ -201,10 +201,34 @@ def _validate_weight_headers(files, mapping, args, configured_dtype):
     return header_digests
 
 
-def inspect_drafter(path, target, *, config_type=DFlash2Config, target_text=None):
+def check_target_taps(args, *, layer_count, tap_count=None, final_norm_tap=False):
+    """Refuse a drafter whose tap space differs from the target's.
+
+    ``tap_count`` is a target-supplied count of tappable positions in
+    execution order (a looped target's layer visits); None means the
+    physical layer count, today's rule.  ``final_norm_tap`` says the target
+    serves tap index ``tap_count`` as its final-normed hidden; without it a
+    drafter that taps that index is refused.
+    """
+    expected = layer_count if tap_count is None else tap_count
+    if type(expected) is not int or expected <= 0:
+        raise ValueError('DFlash2 target tap count must be a positive integer')
+    if expected != args.num_target_layers:
+        raise ValueError(
+            'DFlash2 target layer count mismatch'
+            if tap_count is None
+            else f'DFlash2 target visit count mismatch ({args.num_target_layers} != {expected})'
+        )
+    if getattr(args, 'taps_final_norm', False) and not final_norm_tap:
+        raise ValueError('DFlash2 drafter taps the final-norm state; the target declares no such tap')
+
+
+def inspect_drafter(path, target, *, config_type=DFlash2Config, target_text=None,
+                    target_tap_count=None, target_final_norm_tap=False):
     """``target_text``: the target's text geometry when its adapter has already
     validated it (a hybrid whose config does not nest ``text_config``); the
-    target ``config.json`` is then not re-read."""
+    target ``config.json`` is then not re-read.  ``target_tap_count`` and
+    ``target_final_norm_tap``: see ``check_target_taps`` (looped targets)."""
     path = Path(path).expanduser().resolve()
     config_raw, config_binding = _read_bytes_with_binding(path/'config.json')
     config = _decode_unique_json(config_raw, 'draft config.json')
@@ -218,8 +242,8 @@ def inspect_drafter(path, target, *, config_type=DFlash2Config, target_text=None
         text = target_text
     for name in ('hidden_size','vocab_size'):
         if text[name] != getattr(args,name): raise ValueError(f'DFlash2 target {name} mismatch')
-    if text['num_hidden_layers'] != args.num_target_layers:
-        raise ValueError('DFlash2 target layer count mismatch')
+    check_target_taps(args, layer_count=text['num_hidden_layers'],
+                      tap_count=target_tap_count, final_norm_tap=target_final_norm_tap)
     digest=hashlib.sha256(); digest.update(config_raw)
     index=path/'model.safetensors.index.json'
     source_bindings = [('config.json', *config_binding)]

@@ -784,7 +784,13 @@ class ComposedDraftModel:
                     raise ValueError(
                         "composed source returned an invalid proposal length"
                     )
-                vocab = int(self.backend.config.vocab_size)
+                # A backend whose laws are narrower than its config's padded
+                # vocabulary (DFlash2 bound to a padded target head) publishes
+                # that width; copied point masses must match it.
+                vocab = int(
+                    getattr(self.backend, "proposal_vocab_size", None)
+                    or self.backend.config.vocab_size
+                )
                 if any(
                     type(token) is not int or not 0 <= token < vocab for token in copied
                 ):

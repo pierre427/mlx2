@@ -35,6 +35,10 @@ def _refuse_other_draft_contracts(flat: Mapping, dflash: Mapping) -> None:
         raise ValueError("DFlash2 supports full-head RoPE only (partial_rotary_factor).")
 
 
+# Known selector softcap placements; anything else is refused.
+SELECTOR_SOFTCAP_MODES = ("before_correction", "after_correction")
+
+
 @dataclass
 class DFlash2Config(DFlashConfig):
     # Existing sixteen-position anchor/mask lattice.  Keep block_size as the
@@ -59,6 +63,14 @@ class DFlash2Config(DFlashConfig):
     # are dropped by ``from_dict``, so this must be a declared field: a silent
     # drop would rotate a NoPE layer and cut acceptance without any error.
     no_rope_layers: list[int] = field(default_factory=list)
+    # Where ``final_logit_softcapping`` applies (mlx2, Inkling 2 DFlash2
+    # release).  "before_correction" (also the absent key) caps the drafter
+    # logits, so the selector's unary term is already capped: today's law.
+    # "after_correction" leaves the drafter logits uncapped and caps the
+    # selector's path score (unary plus the pairwise correction) instead.
+    # A declared field: ``from_dict`` drops unknown keys, and a silent drop
+    # would serve the wrong selector law with no error.
+    selector_softcap_mode: str = "before_correction"
 
     def __post_init__(self) -> None:
         if not self.layer_types:
@@ -119,7 +131,7 @@ class DFlash2Config(DFlashConfig):
             not self.target_layer_ids
             or not _is_strictly_increasing_ints(self.target_layer_ids)
             or any(
-                layer_id < 0 or layer_id >= self.num_target_layers
+                layer_id < 0 or layer_id > self.num_target_layers
                 for layer_id in self.target_layer_ids
             )
         ):
@@ -127,6 +139,11 @@ class DFlash2Config(DFlashConfig):
                 "DFlash2 target_layer_ids must be unique, increasing indices "
                 "inside the target layer range."
             )
+        # An id equal to ``num_target_layers`` is the target's final-normed
+        # hidden (the Inkling 2 release taps visit 48 of 48).  The config
+        # admits it; binding admits it only for a target that declares the
+        # final-norm tap (``adapters/dflash2.py``), so every other target
+        # still refuses it.
         if (
             not isinstance(self.no_rope_layers, (list, tuple))
             or any(type(i) is not int or not 0 <= i < self.num_hidden_layers for i in self.no_rope_layers)
@@ -140,8 +157,26 @@ class DFlash2Config(DFlashConfig):
             raise ValueError(
                 "DFlash2 runtime_block_size must be between 2 and block_size."
             )
+        if self.selector_softcap_mode not in SELECTOR_SOFTCAP_MODES:
+            raise ValueError(
+                "DFlash2 selector_softcap_mode must be one of "
+                f"{list(SELECTOR_SOFTCAP_MODES)}, got {self.selector_softcap_mode!r}."
+            )
+        if (
+            self.selector_softcap_mode == "after_correction"
+            and not self.final_logit_softcapping
+        ):
+            raise ValueError(
+                "DFlash2 selector_softcap_mode 'after_correction' needs a "
+                "positive final_logit_softcapping."
+            )
         if self.is_causal and not self.supports_causal_blocks:
             raise ValueError("DFlash2 causal draft blocks are not currently supported.")
+
+    @property
+    def taps_final_norm(self) -> bool:
+        """Whether the last tap is the target's final-normed hidden."""
+        return self.target_layer_ids[-1] == self.num_target_layers
 
     @classmethod
     def from_dict(cls, params: dict) -> "DFlash2Config":
@@ -183,6 +218,7 @@ class DFlash2Config(DFlashConfig):
             "selector_rank",
             "selector_top_k",
             "target_streams_per_layer",
+            "selector_softcap_mode",
         ):
             if key in dflash:
                 flat[key] = dflash[key]
@@ -203,4 +239,4 @@ class DFlash2Config(DFlashConfig):
     from_hf_dict = from_dict
 
 
-__all__ = ["DFlash2Config"]
+__all__ = ["DFlash2Config", "SELECTOR_SOFTCAP_MODES"]
