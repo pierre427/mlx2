@@ -4710,6 +4710,7 @@ class ServingEngine(KernelReloadMixin):
         apc_session_max_ttl_seconds=3600,
         apc_session_pinned_disk_bytes=64 << 30,
         apc_session_pinned_disk_bytes_global=64 << 30,
+        apc_disk_max_bytes=64 << 30,
         apc_session_pinned_resident_bytes=12 << 30,
         apc_session_prefetch_ttl_seconds=30,
         apc_quarantine_max_entries=128,
@@ -5138,9 +5139,14 @@ class ServingEngine(KernelReloadMixin):
         self.apc_persist_corruption = apc_persist_corruption
         self.apc_session_max_ttl_seconds = apc_session_max_ttl_seconds
         self.apc_session_pinned_disk_bytes = apc_session_pinned_disk_bytes
-        if apc_session_pinned_disk_bytes_global > 64 << 30:
+        if isinstance(apc_disk_max_bytes, bool) or not isinstance(apc_disk_max_bytes, int) \
+                or apc_disk_max_bytes <= 0:
+            raise ValueError("apc_disk_max_bytes must be a positive integer")
+        self.apc_disk_max_bytes = apc_disk_max_bytes
+        if apc_session_pinned_disk_bytes_global > apc_disk_max_bytes:
             raise ValueError(
-                "apc_session_pinned_disk_bytes_global must not exceed the 64 GiB disk tier cap"
+                "apc_session_pinned_disk_bytes_global must not exceed the disk tier cap "
+                f"({apc_disk_max_bytes} bytes)"
             )
         self.apc_session_pinned_disk_bytes_global = (
             apc_session_pinned_disk_bytes_global
@@ -11117,6 +11123,16 @@ class ServingEngine(KernelReloadMixin):
                 # metadata budget; an offer is not a publication receipt.
                 count_add(self.counts, "apc_expert_hints_offered", 1)
             capabilities = apc.store(key, tokens, prompt_cache, **kwargs)
+            refusal = getattr(capabilities, "reason", None)
+            if isinstance(refusal, str) and refusal.startswith("publication_alignment:"):
+                # Tokens and cached state disagree (e.g. a speculative route
+                # one token short): a route-visible refusal, never a raise.
+                count_add(self.counts, "apcv2_store_refused_alignment", 1)
+                count_add(
+                    self.counts,
+                    "apcv2_store_refused_" + refusal.split(":", 1)[1],
+                    1,
+                )
             return getattr(capabilities, "stored", None) is not False
         except Exception:  # noqa: BLE001 - the worker must outlive one bad checkpoint
             count_add(self.counts, "apcv2_store_failures", 1)
@@ -11985,6 +12001,7 @@ class ServingEngine(KernelReloadMixin):
                 "cache_bytes_clamped_from": self.cache_bytes_clamped_from,
                 "cache_bytes_headroom": self.cache_bytes_headroom,
                 "disk_cache": bool(self.cache_dir or self.apc_persist_dir),
+                "apc_disk_max_bytes": self.apc_disk_max_bytes,
                 "apc_persistence": bool(self.apc_persist_dir),
                 "apc_persist_on_shutdown": self.apc_persist_on_shutdown,
                 "apc_persist_shutdown_seconds": self.apc_persist_shutdown_seconds,
@@ -13141,7 +13158,7 @@ class ServingEngine(KernelReloadMixin):
                 max_tokens=self.max_context,
                 idle_disk_seconds=180 if disk_dir else 0,
                 idle_disk_dir=disk_dir,
-                idle_disk_max_bytes=64 << 30,
+                idle_disk_max_bytes=self.apc_disk_max_bytes,
                 persistent_block_bytes=self.persistent_block_bytes,
                 persist_dir=self.apc_persist_dir,
                 persist_identity=(persistent_identity if self.apc_persist_dir else None),

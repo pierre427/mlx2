@@ -6996,6 +6996,17 @@ def build_parser():
         ),
     )
     parser.add_argument(
+        "--cache-dir-max-bytes",
+        type=int,
+        default=None,
+        help=(
+            "byte cap of the APCv2 disk tier (idle/pressure spills and the "
+            "persistent tier); the oldest unpinned entries are evicted past it. "
+            "Default: 20%% of the free space on the tier's volume at startup, "
+            "between 4 GiB and 64 GiB"
+        ),
+    )
+    parser.add_argument(
         "--no-cache-dir",
         action="store_true",
         help="disable the default APCv2 disk tier (pressure evictions drop entries)",
@@ -7018,7 +7029,8 @@ def build_parser():
         "--apc-session-pinned-disk-bytes", type=int, default=64 << 30
     )
     parser.add_argument(
-        "--apc-session-pinned-disk-bytes-global", type=int, default=64 << 30
+        "--apc-session-pinned-disk-bytes-global", type=int, default=None,
+        help="global pinned-session disk bytes (default: the disk tier cap)",
     )
     parser.add_argument(
         "--apc-session-pinned-resident-bytes", type=int, default=12 << 30
@@ -8191,6 +8203,53 @@ def resolve_cache_dir(args):
     return str(path), "default_per_port"
 
 
+CACHE_DISK_DEFAULT_FRACTION = 0.20
+CACHE_DISK_DEFAULT_MIN = 4 << 30
+CACHE_DISK_DEFAULT_MAX = 64 << 30
+
+
+def resolve_cache_disk_cap(args, *, disk_usage=None):
+    """``(cap_bytes, source)`` for the APCv2 disk tier byte cap.
+
+    The tier evicts its oldest unpinned entries past this cap.  Before
+    2026-11-25 it was a fixed 64 GiB whatever the volume held, which let one
+    long-running loopback server reach 63 GiB of spill on a disk with ~270 GiB
+    free.  The default now takes a fifth of the free space on the tier's
+    volume at startup, clamped to 4..64 GiB; ``--cache-dir-max-bytes`` sets
+    it exactly.  An unset pinned-session global cap follows the tier cap.
+    """
+    explicit = getattr(args, "cache_dir_max_bytes", None)
+    if explicit is not None:
+        if isinstance(explicit, bool) or not isinstance(explicit, int) or explicit <= 0:
+            raise ValueError("--cache-dir-max-bytes must be a positive integer")
+        cap, source = explicit, "explicit"
+    else:
+        tier = getattr(args, "apc_persist_dir", None) or getattr(args, "cache_dir", None)
+        cap, source = CACHE_DISK_DEFAULT_MAX, "default_max"
+        if tier:
+            import shutil
+
+            probe = Path(tier).expanduser()
+            while not probe.exists() and probe != probe.parent:
+                probe = probe.parent
+            try:
+                free = (disk_usage or shutil.disk_usage)(probe).free
+            except OSError:
+                free = None
+            if free is not None:
+                cap = int(min(CACHE_DISK_DEFAULT_MAX,
+                              max(CACHE_DISK_DEFAULT_MIN, free * CACHE_DISK_DEFAULT_FRACTION)))
+                source = "default_free_fraction"
+    pinned = getattr(args, "apc_session_pinned_disk_bytes_global", None)
+    if pinned is None:
+        args.apc_session_pinned_disk_bytes_global = cap
+    elif pinned > cap:
+        raise ValueError(
+            f"--apc-session-pinned-disk-bytes-global {pinned} exceeds the disk tier cap {cap}"
+        )
+    return cap, source
+
+
 def _default_cache_dir_unusable(path):
     """``None`` when ``path`` is (or can become) a writable 0700 directory we own."""
     try:
@@ -8301,9 +8360,14 @@ def serving_engine_kwargs(
         "apc_persist_corruption": args.apc_persist_corruption,
         "apc_session_max_ttl_seconds": args.apc_session_max_ttl_seconds,
         "apc_session_pinned_disk_bytes": args.apc_session_pinned_disk_bytes,
+        # Callers that skip main()'s resolve_cache_disk_cap (tests, embedders)
+        # keep the historical 64 GiB cap and a pinned global equal to it.
         "apc_session_pinned_disk_bytes_global": (
             args.apc_session_pinned_disk_bytes_global
+            if getattr(args, "apc_session_pinned_disk_bytes_global", None) is not None
+            else (getattr(args, "cache_dir_max_bytes", None) or CACHE_DISK_DEFAULT_MAX)
         ),
+        "apc_disk_max_bytes": getattr(args, "cache_dir_max_bytes", None) or CACHE_DISK_DEFAULT_MAX,
         "apc_session_pinned_resident_bytes": (
             args.apc_session_pinned_resident_bytes
         ),
@@ -8487,6 +8551,7 @@ def main():
         )
     try:
         args.cache_dir, args.cache_dir_source = resolve_cache_dir(args)
+        args.cache_dir_max_bytes, args.cache_dir_max_bytes_source = resolve_cache_disk_cap(args)
     except ValueError as error:
         parser.error(str(error))
     try:
@@ -8681,9 +8746,11 @@ def main():
         level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
     )
     logging.getLogger("mlx2.server").info(
-        "APCv2 disk tier: %s (%s)",
+        "APCv2 disk tier: %s (%s), cap %.1f GiB (%s)",
         args.cache_dir or getattr(args, "apc_persist_dir", None) or "off",
         args.cache_dir_source,
+        args.cache_dir_max_bytes / (1 << 30),
+        args.cache_dir_max_bytes_source,
     )
     from .exit_trace import ExitTrace
 

@@ -492,24 +492,87 @@ def _snapshot_buffer_keys(prompt_cache: Iterable[Any]) -> dict:
     return keys
 
 
-def _positions_disagree(prompt_cache: Iterable[Any], length: int) -> bool:
-    """Whether a positional cache holds other than exactly ``length`` tokens.
+@dataclass(frozen=True)
+class PublicationAlignmentRefusal:
+    """Why a checkpoint's tokens and its cached state do not describe one prefix.
 
-    A lookup reports the stored token count as cached and resumes after it,
-    so a cache stored short of its tokens would silently skip them (and a
-    longer one would repeat them).  Recurrent state has no position; it is
-    stored beside the KV it was captured with.
+    ``reason`` is one of ``undeclared_cache_family``, ``uncommitted_transaction``
+    (a speculation or rollback transaction is open, so rejected draft rows may
+    still be in KV or recurrent state), ``position_indeterminate`` (a
+    positional plane has no host integer position), ``position_mismatch`` (a
+    positional plane holds other than the saved token count).  The store
+    itself also records
+    ``sidecar_coverage_mismatch`` when draft state claims another boundary;
+    that drops only the sidecar.  ``layer`` is the flattened leaf index.
     """
-    for cache in _walk_cache_entries(prompt_cache):
+
+    reason: str
+    layer: Optional[int] = None
+    cache: Optional[str] = None
+    tokens: int = 0
+    position: Optional[int] = None
+    detail: Optional[str] = None
+
+    def receipt(self) -> dict:
+        return {
+            "event": "apcv2_publication_alignment_refused",
+            "reason": self.reason,
+            "layer": self.layer,
+            "cache": self.cache,
+            "tokens": self.tokens,
+            "position": self.position,
+            "detail": self.detail,
+        }
+
+
+def publication_alignment_refusal(
+    prompt_cache: Iterable[Any], length: int
+) -> Optional[PublicationAlignmentRefusal]:
+    """Fail-closed save-time check that ``length`` tokens match every plane.
+
+    APCv2 resumes a hit after every stored token, so an entry whose cache is
+    one token short of its key (for example a speculative route that has not
+    fed the bonus token through the target) silently skips that token on the
+    next request, and one with rejected draft rows still in KV or recurrent
+    state repeats or corrupts them.  Every positional plane must hold exactly
+    ``length`` tokens as a host integer.  Recurrent state has no position: it
+    is bound by being captured beside positional planes at the same commit,
+    which the provider's publication conditions (no open speculation or live
+    rollback record) certify.  A purely recurrent cache has no plane that
+    records a token count, so only those conditions bind it (a known gap: an
+    ``ArraysCache`` does not track how many tokens it absorbed).  Host
+    bookkeeping only; no device synchronization.
+    """
+    from .checkpoint_publication import checkpoint_publication_refusal
+
+    length = int(length)
+    leaves = list(_walk_cache_entries(prompt_cache))
+    for index, cache in enumerate(leaves):
         contract = cache_operations(
-            cache, capability="APCv2 exact-prefix position inspection", required=False
+            cache, capability="APCv2 publication alignment", required=False
         )
+        name = type(cache).__name__
         if contract is None:
-            return True
-        offset = contract.position(cache)
-        if offset is not None and offset != length:
-            return True
-    return False
+            return PublicationAlignmentRefusal(
+                "undeclared_cache_family", index, name, length
+            )
+        if contract.offset_field is None:
+            continue
+        position = contract.position(cache)
+        if position is None:
+            return PublicationAlignmentRefusal(
+                "position_indeterminate", index, name, length
+            )
+        if position != length:
+            return PublicationAlignmentRefusal(
+                "position_mismatch", index, name, length, position
+            )
+    transaction = checkpoint_publication_refusal(leaves)
+    if transaction is not None:
+        return PublicationAlignmentRefusal(
+            "uncommitted_transaction", None, None, length, detail=transaction
+        )
+    return None
 
 
 def _iter_trie_entries(trie: PromptTrie):
@@ -1193,6 +1256,10 @@ class APCv2(PrefixIndex):
         self._apc_clears = 0
         self._interior_reused_entries = 0
         self.boundary_rejections = 0
+        # Save-time token/state alignment refusals, by reason, and the last
+        # one as a receipt (``publication_alignment_refusal``).
+        self.alignment_refusals: dict = {}
+        self.last_alignment_refusal: Optional[dict] = None
         # Stores refused for a non-finite fp16 recurrent state.
         self.nonfinite_state_rejections = 0
         age_buckets = (1, 5, 30, 120, 600, 3600)
@@ -2242,6 +2309,18 @@ class APCv2(PrefixIndex):
             self._apc_stats["rolling_hits"] += 1
         elif role == self._RETENTION_JUNCTION:
             self._apc_stats["junction_hits"] += 1
+
+    def _note_alignment_refusal_locked(self, refusal) -> None:
+        """Count one save-time alignment refusal and keep it as a receipt."""
+        self.alignment_refusals[refusal.reason] = (
+            self.alignment_refusals.get(refusal.reason, 0) + 1
+        )
+        self.last_alignment_refusal = refusal.receipt()
+        log.info(
+            "APCv2 refused a %d-token checkpoint: %s (layer %s, %s, position %s%s)",
+            refusal.tokens, refusal.reason, refusal.layer, refusal.cache,
+            refusal.position, "" if refusal.detail is None else ", " + refusal.detail,
+        )
 
     def _note_drop_locked(self, tokens, entry, reason) -> None:
         """Keep the last drops: which entry, why, and who asked (diagnostic)."""
@@ -5866,9 +5945,34 @@ class APCv2(PrefixIndex):
         if self.max_tokens is not None and len(tokens) > self.max_tokens:
             self.overlength_rejections += 1
             return replace(capabilities, stored=False)
-        if _positions_disagree(prompt_cache, len(tokens)):
-            self.boundary_rejections += 1
-            return replace(capabilities, stored=False)
+        alignment = publication_alignment_refusal(prompt_cache, len(tokens))
+        if alignment is not None:
+            # Refuse the publication, never the request: the live lane's
+            # state is untouched and only this reuse opportunity is lost.
+            if alignment.reason == "position_mismatch":
+                self.boundary_rejections += 1
+            self._note_alignment_refusal_locked(alignment)
+            return replace(
+                capabilities,
+                stored=False,
+                reason="publication_alignment:" + alignment.reason,
+            )
+        covered = getattr(sidecar, "covered_tokens", None)
+        if sidecar is not None and (
+            type(covered) is not int or covered != len(tokens)
+        ):
+            # Draft state is resumable only at exactly the target boundary
+            # it was stored with; the exact target prefix is still published.
+            self._note_alignment_refusal_locked(
+                PublicationAlignmentRefusal(
+                    "sidecar_coverage_mismatch",
+                    None,
+                    type(sidecar).__name__,
+                    len(tokens),
+                    covered if type(covered) is int else None,
+                )
+            )
+            sidecar = None
         if not self._state_codec_key_ok(key):
             return replace(capabilities, stored=False)
         if self._state_codec.enabled:
@@ -6542,6 +6646,12 @@ class APCv2(PrefixIndex):
             stats["max_entry_tokens"] = self.max_entry_tokens
             stats["overlength_rejections"] = self.overlength_rejections
             stats["boundary_rejections"] = self.boundary_rejections
+            stats["alignment_refusals"] = dict(self.alignment_refusals)
+            stats["last_alignment_refusal"] = (
+                None
+                if self.last_alignment_refusal is None
+                else dict(self.last_alignment_refusal)
+            )
             stats["nonfinite_state_rejections"] = self.nonfinite_state_rejections
             # Entries a lookup found unable to branch and removed at once.
             stats["stale_entry_drops"] = int(getattr(self, "_apc_stale_drops", 0))
