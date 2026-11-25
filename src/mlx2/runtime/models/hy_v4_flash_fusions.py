@@ -97,7 +97,7 @@ _PARTIAL_SRC = """
         for (int e = 0; e < EPT; ++e) {
             int k = kb * (TG * EPT) + e * TG + tid;
             if (k < K) {
-                float s = float(residual[r * K + k]);
+                float s = float(residual[size_t(r) * K + k]);
                 /*MERGE*/
                 acc[OUT] += s * s;
                 for (int o = 0; o < OUT; ++o) acc[o] += s * w[e][o];
@@ -158,7 +158,7 @@ _FINALIZE_SRC = """
         if (d < D) {
             float acc = 0.0f;
             for (int j = 0; j < N; ++j) {
-                float t = pre[j] * float(streams[r * K + j * D + d]);
+                float t = pre[j] * float(streams[size_t(r) * K + j * D + d]);
                 acc += t;
             }
             v = float(static_cast<T>(acc));
@@ -175,7 +175,7 @@ _FINALIZE_SRC = """
     float nrm = metal::precise::rsqrt(mean + consts[3]);
     for (int p = 0; p < PER; ++p) {
         int d = p * TG + tid;
-        if (d < D) normed[r * D + d] = static_cast<T>(c[p] * nrm) * norm_w[d];
+        if (d < D) normed[size_t(r) * D + d] = static_cast<T>(c[p] * nrm) * norm_w[d];
     }
 """
 
@@ -186,9 +186,9 @@ _MERGE_SRC = """
                     // Separate statements: Metal contracts a*b+c inside one
                     // expression into an fma; MLX's compiled merge rounds the
                     // product first (bitwise checked on M5 Max).
-                    float t = post_prev[r * N + j] * float(branch[r * D + d]);
+                    float t = post_prev[r * N + j] * float(branch[size_t(r) * D + d]);
                     T m = static_cast<T>(t + s);
-                    merged[r * K + k] = m;
+                    merged[size_t(r) * K + k] = m;
                     s = float(m);
                 }
 """

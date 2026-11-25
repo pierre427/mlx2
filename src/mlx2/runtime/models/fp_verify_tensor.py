@@ -73,7 +73,7 @@ SOURCE = r"""
             for(short tn=0;tn<2;++tn) for(short i=0;i<2;++i) {
                 const int t=tile+tn*16+fm+i*8;
                 for(short j=0;j<4;++j)
-                    kb[tn*8+i*4+j]=t<end ? k[((b*HK+hk)*N+t)*128+kk+fn+j] : T(0);
+                    kb[tn*8+i*4+j]=t<end ? k[((ulong(b)*HK+hk)*N+t)*128+kk+fn+j] : T(0);
             }
             qkop.run(qa,kb,sc);
         }
@@ -86,7 +86,7 @@ SOURCE = r"""
                 const int t=tile+tn*16+fn+j;
                 bool live=f<L*G && t<end;
                 if(CAUSAL) live=live && t<=N-L+row;
-                if(MASKED && live) live=mask[((b*HQ+h)*L+row)*N+t];
+                if(MASKED && live) live=mask[((ulong(b)*HQ+h)*L+row)*N+t];
                 ok[tn][j]=live;
                 if(live) mm=max(mm,float(sc[tn*8+i*4+j])*scale[0]);
             }
@@ -117,7 +117,7 @@ SOURCE = r"""
                 for(short tn=0;tn<2;++tn) for(short i=0;i<2;++i) {
                     const int t=tile+ks*16+fm+i*8;
                     for(short j=0;j<4;++j) vb[tn*8+i*4+j]=t<end ?
-                        v[((b*HK+hk)*N+t)*128+np*32+tn*16+fn+j] : T(0);
+                        v[((ulong(b)*HK+hk)*N+t)*128+np*32+tn*16+fn+j] : T(0);
                 }
                 if(np==0) {pvop.run(pa,vb,o0);pvop.run(pl,vb,o0);}
                 if(np==1) {pvop.run(pa,vb,o1);pvop.run(pl,vb,o1);}
