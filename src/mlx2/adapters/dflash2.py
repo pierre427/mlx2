@@ -3,7 +3,7 @@ from pathlib import Path
 import hashlib
 import json
 import struct
-from ..runtime.drafters.dflash2_config import DFlash2Config
+from ..runtime.drafters.dflash2_config import DFlash2Config, check_target_taps
 
 
 _SAFETENSORS_HEADER_LIMIT = 64 << 20
@@ -199,28 +199,6 @@ def _validate_weight_headers(files, mapping, args, configured_dtype):
             f"(missing={missing}, extra={extra}, wrong_shapes={wrong})"
         )
     return header_digests
-
-
-def check_target_taps(args, *, layer_count, tap_count=None, final_norm_tap=False):
-    """Refuse a drafter whose tap space differs from the target's.
-
-    ``tap_count`` is a target-supplied count of tappable positions in
-    execution order (a looped target's layer visits); None means the
-    physical layer count, today's rule.  ``final_norm_tap`` says the target
-    serves tap index ``tap_count`` as its final-normed hidden; without it a
-    drafter that taps that index is refused.
-    """
-    expected = layer_count if tap_count is None else tap_count
-    if type(expected) is not int or expected <= 0:
-        raise ValueError('DFlash2 target tap count must be a positive integer')
-    if expected != args.num_target_layers:
-        raise ValueError(
-            'DFlash2 target layer count mismatch'
-            if tap_count is None
-            else f'DFlash2 target visit count mismatch ({args.num_target_layers} != {expected})'
-        )
-    if getattr(args, 'taps_final_norm', False) and not final_norm_tap:
-        raise ValueError('DFlash2 drafter taps the final-norm state; the target declares no such tap')
 
 
 def inspect_drafter(path, target, *, config_type=DFlash2Config, target_text=None,

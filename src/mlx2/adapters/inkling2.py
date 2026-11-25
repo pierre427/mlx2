@@ -1095,7 +1095,7 @@ class Inkling2Adapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
         dflash2_route = self._select_dflash2_route(external)
         self.dspark_options = dspark_options(external)
         if dflash2_route and self.dspark_options:
-            _count_dflash2_refusal("dspark_option")
+            self._dflash2_refusal("dspark_option")
             raise ValueError(f"Inkling 2 {sorted(DSPARK_OPTIONS)} require the DSpark route")
         cost_depth = self.dspark_options.pop("cost_depth", None)
         self.dspark_cost_depth = None
@@ -1117,7 +1117,7 @@ class Inkling2Adapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             raise ValueError(f"Inkling 2 {PREFILL_WIDE_OPTION} is ordinary-route only (the DSpark "
                              "prefill slicer has no adapter width plan)")
         if dflash2_route and self.kernel_policy["dspark_predraft"]:
-            _count_dflash2_refusal("dspark_option")
+            self._dflash2_refusal("dspark_option")
             raise ValueError(f"Inkling 2 {PREDRAFT_OPTION} requires the DSpark route")
         if self.kernel_policy["dspark_prefill_reclaim"] is None:
             # On by default for DSpark only; the DFlash2 route takes it explicitly.
@@ -1131,15 +1131,24 @@ class Inkling2Adapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             from . import inkling2_dflash2
 
             if self._composition_long_copies():
-                _count_dflash2_refusal("unsupported_policy_key")
+                self._dflash2_refusal("unsupported_policy_key")
                 raise ValueError("Inkling 2 DFlash2 route refuses prompt_lookup_max_span "
                                  "(copies past the trained block)")
             # Fail closed on the drafter before the target is loaded.
-            record = inkling2_dflash2.inspect_drafter(
-                external["draft_model"], target_path=artifact["identity"]["path"],
-                text_config=artifact["text_config"],
-                target_fingerprint=artifact["identity"]["fingerprint"])
-            self._check_num_draft(record)
+            try:
+                record = inkling2_dflash2.inspect_drafter(
+                    external["draft_model"], target_path=artifact["identity"]["path"],
+                    text_config=artifact["text_config"],
+                    target_fingerprint=artifact["identity"]["fingerprint"],
+                    embed_norm=self.dflash2_embed_norm)
+            except inkling2_dflash2.DFlash2Refusal as error:
+                self._dflash2_refusal(error.reason, counted=True)
+                raise
+            try:
+                self._check_num_draft(record)
+            except ValueError:
+                self._dflash2_refusal("num_draft")
+                raise
         elif external:
             if not artifact["has_mtp"]:
                 raise ValueError("Inkling 2 artifact carries no mtp.safetensors")
@@ -1283,17 +1292,17 @@ class Inkling2Adapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
         selected = (isinstance(draft, str) and draft not in DSPARK_DRAFT_NAMES
                     and inkling2_dflash2.is_dflash2_artifact(draft))
         if embed_norm is not None and not selected:
-            _count_dflash2_refusal("embed_norm_without_route")
+            self._dflash2_refusal("embed_norm_without_route")
             raise ValueError(f"Inkling 2 {inkling2_dflash2.EMBED_NORM_OPTION} requires the "
                              "DFlash2 route")
         if not selected:
             return False
         if embed_norm is not None and type(embed_norm) is not bool:
-            _count_dflash2_refusal("embed_norm_type")
+            self._dflash2_refusal("embed_norm_type")
             raise TypeError(f"Inkling 2 {inkling2_dflash2.EMBED_NORM_OPTION} must be a boolean")
         extra = sorted(set(external) - inkling2_dflash2.ALLOWED_POLICY_KEYS - set(DSPARK_OPTIONS))
         if extra:
-            _count_dflash2_refusal("unsupported_policy_key")
+            self._dflash2_refusal("unsupported_policy_key")
             raise ValueError(f"Inkling 2 DFlash2 route does not implement {extra} (chain "
                              f"route only: {sorted(inkling2_dflash2.ALLOWED_POLICY_KEYS)})")
         self.dflash2_route = True
@@ -1306,28 +1315,34 @@ class Inkling2Adapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
         self.EXTERNAL_ROUTE_TAG = inkling2_dflash2.ROUTE_TAG
         self.identity = {**self.identity, "draft_revision": record["draft_revision"],
                          "target_revision": record["target_revision"]}
-        embed_norm = self.dflash2_embed_norm
         try:
-            self._bind_external_drafter(
-                record,
-                lambda rec, model: inkling2_dflash2.load_drafter(rec, model, embed_norm=embed_norm),
-                self.descriptor,
-            )
-        except ValueError:
-            _count_dflash2_refusal("bind")
+            # The record fixes the embedding law (and with it the draft
+            # fingerprint, so the diagnostic arm has its own identity/layout).
+            self._bind_external_drafter(record, inkling2_dflash2.load_drafter, self.descriptor)
+        except inkling2_dflash2.DFlash2Refusal as error:
+            self._dflash2_refusal(error.reason, counted=True)
             raise
-        if not embed_norm:
-            # The diagnostic arm is a different drafter law: its own layout.
-            self.layout += ":dflash2-raw-embedding"
+        except (ValueError, TypeError, OSError):
+            self._dflash2_refusal("bind")
+            raise
         self.profile_name = self._dflash2_profile_name
         self.dflash2_record_config = record["config"]
         self.dflash2_record_receipt = {k: record[k] for k in (
             "checkpoint", "fingerprint", "config_sha256", "source_repository", "source_revision",
-            "tap_convention", "embedding_law")}
+            "tap_convention", "embedding_law", "embed_norm", "draft_revision")}
         self.descriptor = replace(
             self.descriptor, cache_layout=self.layout,
             metadata={**self.descriptor.metadata, "qualification": "unqualified",
                       "speculative_route": "external_inkling2_dflash2_chain"})
+
+    def _dflash2_refusal(self, reason, *, counted=False):
+        """Record one DFlash2 refusal on this adapter (and process-wide)."""
+        from .inkling2_dflash2 import REFUSALS
+
+        if not counted:
+            REFUSALS[reason] += 1
+        mine = self.__dict__.setdefault("dflash2_refusals", {})
+        mine[reason] = mine.get(reason, 0) + 1
 
     @staticmethod
     def _dflash2_profile_name(mtp):
@@ -1498,6 +1513,8 @@ class Inkling2Adapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             if max_lanes != 1:
                 # Verify over sliding-window rings beside recurrent state is
                 # B1 only (HybridVerifyRows); fail at startup, not mid-round.
+                if getattr(self, "dflash2_route", False):
+                    self._dflash2_refusal("max_lanes")
                 raise ValueError("Inkling 2 DSpark serving is B1 only: start with --max-lanes 1")
             return self._external_execution_config(max_lanes=max_lanes, prefill_step=prefill_step)
         return {
@@ -1755,43 +1772,43 @@ class Inkling2Adapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             "native_replay": self._native_replay_receipt(),
             "experts": getattr(self, "expert_receipt", None),
             "target_forward_observed": bool(getattr(getattr(self, "model", None), "completed_forwards", 0)),
-            "dspark": {
-                "implemented": True,
-                "selected": (getattr(self, "draft_model", None) is not None
-                             and not getattr(self, "dflash2_route", False)),
-                "qualified": False,
-                "weights_present": bool(getattr(self, "has_mtp", False)),
-                "num_draft": self._external_num_draft() if getattr(self, "draft_model", None) is not None else None,
-                # prompt_copy_round only: the engine depth above is the copy
-                # span; DSpark rounds draft at most this many tokens.
-                **({"dspark_draft_depth": _dspark_backend_depth(self.draft_model)}
-                   if getattr(self, "draft_model", None) is not None
-                   and getattr(self, "_prompt_copy_long", lambda: False)() else {}),
-                "stats": _drafter_stats(getattr(self, "draft_model", None)),
-                "prefill_reclaim": bool(getattr(self, "dspark_prefill_reclaim", False)),
-                "predraft": bool(getattr(self, "dspark_predraft", False)),
-                "options": _drafter_options(getattr(self, "draft_model", None)),
-                "cost_depth": getattr(self, "dspark_cost_depth", None),
-            },
+            "dspark": _dspark_receipt(self),
             "media": "weights present; native text route refuses media",
-            # Present only once the opt-in DFlash2 route was selected or
-            # refused in this process, so other routes' receipts are unchanged.
+            # Present only when this adapter selected the opt-in DFlash2
+            # route or recorded a refusal of it, so other routes' receipts
+            # are unchanged.
             **({"dflash2": _dflash2_receipt(self)} if _dflash2_seen(self) else {}),
         }
 
 
-def _count_dflash2_refusal(reason):
-    from .inkling2_dflash2 import REFUSALS
-
-    REFUSALS[reason] += 1
+def _dspark_receipt(self):
+    if getattr(self, "dflash2_route", False):
+        # The DFlash2 route's drafter counters live under "dflash2".
+        return {"implemented": True, "selected": False, "qualified": False,
+                "weights_present": bool(getattr(self, "has_mtp", False)),
+                "not_selected_reason": "dflash2_route_selected"}
+    return {
+        "implemented": True,
+        "selected": getattr(self, "draft_model", None) is not None,
+        "qualified": False,
+        "weights_present": bool(getattr(self, "has_mtp", False)),
+        "num_draft": self._external_num_draft() if getattr(self, "draft_model", None) is not None else None,
+        # prompt_copy_round only: the engine depth above is the copy
+        # span; DSpark rounds draft at most this many tokens.
+        **({"dspark_draft_depth": _dspark_backend_depth(self.draft_model)}
+           if getattr(self, "draft_model", None) is not None
+           and getattr(self, "_prompt_copy_long", lambda: False)() else {}),
+        "stats": _drafter_stats(getattr(self, "draft_model", None)),
+        "prefill_reclaim": bool(getattr(self, "dspark_prefill_reclaim", False)),
+        "predraft": bool(getattr(self, "dspark_predraft", False)),
+        "options": _drafter_options(getattr(self, "draft_model", None)),
+        "cost_depth": getattr(self, "dspark_cost_depth", None),
+    }
 
 
 def _dflash2_seen(adapter):
-    import sys
-
-    module = sys.modules.get(__package__ + ".inkling2_dflash2")
     return bool(getattr(adapter, "dflash2_route", False)) or bool(
-        module is not None and module.REFUSALS)
+        adapter.__dict__.get("dflash2_refusals"))
 
 
 def _dflash2_receipt(adapter):
@@ -1802,13 +1819,19 @@ def _dflash2_receipt(adapter):
         adapter, "draft_model", None) is not None
     # observed-used is the engine's speculative counters, not this receipt.
     out = {"implemented": True, "selected": selected, "qualified": False,
-           "refusals": dict(sorted(inkling2_dflash2.REFUSALS.items()))}
+           "refusals": dict(sorted(adapter.__dict__.get("dflash2_refusals", {}).items())),
+           "process_refusals": dict(sorted(inkling2_dflash2.REFUSALS.items()))}
     if selected:
         draft = adapter.draft_model
+        backend = draft
+        while hasattr(backend, "backend"):
+            backend = backend.backend
         out.update(num_draft=adapter._external_num_draft(),
                    record=getattr(adapter, "dflash2_record_receipt", None),
+                   drafter=getattr(backend, "inkling2_dflash2_receipt", None),
                    settings=getattr(draft, "receipt_settings", None),
-                   embed_norm=bool(getattr(adapter, "dflash2_embed_norm", True)))
+                   embed_norm=bool(getattr(adapter, "dflash2_embed_norm", True)),
+                   prefill_reclaim=bool(getattr(adapter, "dspark_prefill_reclaim", False)))
     return out
 
 

@@ -239,4 +239,26 @@ class DFlash2Config(DFlashConfig):
     from_hf_dict = from_dict
 
 
-__all__ = ["DFlash2Config", "SELECTOR_SOFTCAP_MODES"]
+def check_target_taps(args, *, layer_count, tap_count=None, final_norm_tap=False):
+    """Refuse a drafter whose tap space differs from the target's.
+
+    ``tap_count`` is a target-supplied count of tappable positions in
+    execution order (a looped target's layer visits); None means the
+    physical layer count, today's rule.  ``final_norm_tap`` says the target
+    serves tap index ``tap_count`` as its final-normed hidden; without it a
+    drafter that taps that index is refused.
+    """
+    expected = layer_count if tap_count is None else tap_count
+    if type(expected) is not int or expected <= 0:
+        raise ValueError("DFlash2 target tap count must be a positive integer")
+    if expected != args.num_target_layers:
+        raise ValueError(
+            "DFlash2 target layer count mismatch"
+            if tap_count is None
+            else f"DFlash2 target visit count mismatch ({args.num_target_layers} != {expected})"
+        )
+    if getattr(args, "taps_final_norm", False) and not final_norm_tap:
+        raise ValueError("DFlash2 drafter taps the final-norm state; the target declares no such tap")
+
+
+__all__ = ["DFlash2Config", "SELECTOR_SOFTCAP_MODES", "check_target_taps"]

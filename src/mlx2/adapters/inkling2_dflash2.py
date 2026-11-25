@@ -41,6 +41,8 @@ SELECTOR_SOFTCAP_MODE = "after_correction"
 # law, ``Model.tap_outputs``); tap == visits: the final-normed hidden.
 TAP_CONVENTION = "inkling2-visit-taps-entering-visit-final-norm-v1"
 EMBEDDING_LAW = "inkling2-embed-rmsnorm-v1"
+# inkling2_dflash2_embed_norm: false (diagnostic A/B arm only).
+RAW_EMBEDDING_LAW = "inkling2-raw-embed-table-diagnostic-v1"
 RECEIPT_SCHEMA = "mlx2.inkling2-dflash2-drafter.v1"
 ROUTE_TAG = "inkling2-dflash2-v1"
 PROFILE = "inkling2-apcv2-dflash2"
@@ -52,15 +54,27 @@ ALLOWED_POLICY_KEYS = frozenset({
     "draft_model", "num_draft", "adaptive_verification", "proposal_composition",
 })
 EMBED_NORM_OPTION = "inkling2_dflash2_embed_norm"
-# Fail-closed admission refusals of this route, by reason (process-wide;
-# reported in the adapter's diagnostics()["dflash2"]["refusals"]).
+# Fail-closed admission refusals of this route, by reason, process-wide.
+# The adapter keeps its own per-instance count (diagnostics()["dflash2"]).
 REFUSALS = Counter()
+
+
+class DFlash2Refusal(ValueError):
+    """A counted refusal of the Inkling 2 DFlash2 route (``reason``)."""
+
+    def __init__(self, reason, message):
+        super().__init__(f"{message} [dflash2_refusal={reason}]")
+        self.reason = reason
 
 
 def refuse(reason, message):
     """Count one refusal and return the error to raise."""
     REFUSALS[reason] += 1
-    return ValueError(f"{message} [dflash2_refusal={reason}]")
+    return DFlash2Refusal(reason, message)
+
+
+def embedding_law(embed_norm):
+    return EMBEDDING_LAW if embed_norm else RAW_EMBEDDING_LAW
 
 
 def target_visit_count(text_config):
@@ -98,12 +112,33 @@ def _check_declared_contract(config, text):
         if config.get(name) != text.get(name):
             raise refuse("geometry", f"Inkling 2 DFlash2 {name} does not match the target")
     rows = text.get("unpadded_vocab_size")
-    if type(rows) is not int or not 0 <= int(nested.get("mask_token_id", -1)) < rows:
+    mask = nested.get("mask_token_id")
+    if type(rows) is not int or type(mask) is not int or not 0 <= mask < rows:
         raise refuse("mask_token", "Inkling 2 DFlash2 mask token lies outside the real vocabulary")
 
 
-def inspect_drafter(path, *, target_path, text_config, target_fingerprint):
-    """Fail-closed, pre-load inspection of the pinned release against the target."""
+def inspect_drafter(path, *, target_path, text_config, target_fingerprint, embed_norm=True):
+    """Fail-closed, pre-load inspection of the pinned release against the target.
+
+    Every failure is a counted ``DFlash2Refusal`` (I/O and malformed
+    metadata included).  ``embed_norm`` False (the diagnostic arm) is a
+    different drafter law: it changes the record fingerprint, draft
+    revision and embedding law.
+    """
+    try:
+        return _inspect(path, target_path=target_path, text_config=text_config,
+                        target_fingerprint=target_fingerprint, embed_norm=embed_norm)
+    except DFlash2Refusal:
+        raise
+    except (OSError, ValueError, TypeError, KeyError, AttributeError) as error:
+        raise refuse("inspection_error", f"Inkling 2 DFlash2 inspection failed: "
+                     f"{type(error).__name__}: {error}") from error
+
+
+def _inspect(path, *, target_path, text_config, target_fingerprint, embed_norm):
+    if type(embed_norm) is not bool:
+        raise refuse("embed_norm_type", "Inkling 2 DFlash2 embed_norm must be a boolean")
+    law = embedding_law(embed_norm)
     path = Path(path).expanduser().resolve()
     raw = (path / "config.json").read_bytes()
     config = dflash2._decode_unique_json(raw, "draft config.json")
@@ -120,7 +155,7 @@ def inspect_drafter(path, *, target_path, text_config, target_fingerprint):
     if record["weight_sha256"] != [WEIGHT_SHA256]:
         raise refuse("weight_pin", "DFlash2 weights are not the pinned Inkling-2-Mini-DFlash2 release")
     fingerprint = hashlib.sha256(json.dumps(
-        [record["fingerprint"], TAP_CONVENTION, EMBEDDING_LAW, target_fingerprint],
+        [record["fingerprint"], TAP_CONVENTION, law, target_fingerprint],
         separators=(",", ":")).encode()).hexdigest()
     return {**record, "fingerprint": fingerprint, "artifact_fingerprint": record["fingerprint"],
             "draft_revision": fingerprint,
@@ -128,7 +163,7 @@ def inspect_drafter(path, *, target_path, text_config, target_fingerprint):
             "checkpoint": f"Inkling-2-Mini-DFlash2@sha256:{WEIGHT_SHA256}",
             "target_path": str(Path(target_path).expanduser().resolve()),
             "target_fingerprint": target_fingerprint, "target_revision": target_fingerprint,
-            "tap_convention": TAP_CONVENTION, "embedding_law": EMBEDDING_LAW,
+            "tap_convention": TAP_CONVENTION, "embedding_law": law, "embed_norm": embed_norm,
             "source_repository": SOURCE_REPOSITORY, "source_revision": SOURCE_REVISION}
 
 
@@ -177,8 +212,12 @@ def declare_target(target_model):
             "embedding_law": EMBEDDING_LAW}
 
 
-def load_drafter(record, target_model, *, embed_norm=True):
-    if (record.get("config_sha256") != CONFIG_SHA256
+def load_drafter(record, target_model):
+    """Load the inspected release; the embedding law comes from the record."""
+    embed_norm = record.get("embed_norm")
+    if (type(embed_norm) is not bool
+            or record.get("embedding_law") != embedding_law(embed_norm)
+            or record.get("config_sha256") != CONFIG_SHA256
             or record.get("tap_convention") != TAP_CONVENTION
             or DFlash2Config.from_dict(record["config"]) != record["args"]
             or tuple(record["args"].target_layer_ids) != TARGET_LAYER_IDS
@@ -189,14 +228,15 @@ def load_drafter(record, target_model, *, embed_norm=True):
         raise refuse("visit_count", "Inkling 2 DFlash2 visit count differs from the loaded target")
     drafter = dflash2.load_drafter(record, target_model)
     if not embed_norm:
-        # Diagnostic arm only (inkling2_dflash2_embed_norm: false).
+        # Diagnostic arm only (inkling2_dflash2_embed_norm: false); sticky
+        # across a later bind/reset.
         drafter.use_raw_token_embedding()
     object.__setattr__(drafter, "inkling2_dflash2_receipt", {
         "schema": RECEIPT_SCHEMA, "checkpoint": record["checkpoint"],
         "source_repository": SOURCE_REPOSITORY, "source_revision": SOURCE_REVISION,
         "tap_convention": TAP_CONVENTION, "target_layer_ids": list(TARGET_LAYER_IDS),
         "selector_softcap_mode": SELECTOR_SOFTCAP_MODE,
-        "embedding": EMBEDDING_LAW if embed_norm else "raw_table_diagnostic",
+        "embedding_law": record["embedding_law"], "draft_revision": record["draft_revision"],
         "vocab_rows": declared["vocab_rows"], "qualified": False,
     })
     return drafter

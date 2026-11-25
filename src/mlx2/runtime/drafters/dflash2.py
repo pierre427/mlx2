@@ -14,7 +14,7 @@ from .dflash_base import (
     append_context_kv,
 )
 
-from .dflash2_config import DFlash2Config
+from .dflash2_config import DFlash2Config, check_target_taps
 
 
 def _grouped_dynamic_convolve(
@@ -119,10 +119,26 @@ def selector_post_softcap(config) -> float | None:
 
 
 def cap_selector_scores(scores, cap):
-    """``cap * tanh(scores / cap)``; identity when ``cap`` is None."""
+    """``cap * tanh(scores / cap)`` in float32; identity when ``cap`` is None.
+
+    The cap runs in float32: in bfloat16, tanh saturates the top of the
+    range into ties (scores 45 and 46 both cap to 27.25 at cap 30).
+    """
     if cap is None:
         return scores
+    scores = scores.astype(mx.float32)
     return mx.tanh(scores / cap) * cap
+
+
+def selector_scores(unary, edges, cap):
+    """Selector path score ``unary + correction``, capped when ``cap`` is set.
+
+    ``cap`` None is today's expression exactly (activation-dtype sum).  With
+    a cap both terms are widened to float32 before the sum and the cap.
+    """
+    if cap is None:
+        return unary + edges
+    return cap_selector_scores(unary.astype(mx.float32) + edges.astype(mx.float32), cap)
 
 
 class CandidateSelector(nn.Module):
@@ -163,7 +179,7 @@ class CandidateSelector(nn.Module):
                 * self.successor_codebook(candidates[:, position]),
                 axis=-1,
             )
-            scores = cap_selector_scores(unary[:, position] + edges, self.post_softcap)
+            scores = selector_scores(unary[:, position], edges, self.post_softcap)
             selected = (
                 sample_candidate(scores, candidates[:, position], vocab_size)
                 if callable(sample_candidate)
@@ -262,8 +278,6 @@ class DFlash2DraftModel(DFlashDraftModel):
         for field in ("hidden_size", "vocab_size"):
             if getattr(args, field) != getattr(self.config, field):
                 raise ValueError(f"DFlash2 target {field} mismatch")
-        from ...adapters.dflash2 import check_target_taps
-
         # A looped target declares its tap space in layer visits (mlx2).
         check_target_taps(
             self.config,
@@ -282,6 +296,9 @@ class DFlash2DraftModel(DFlashDraftModel):
         # rows declares ``speculative_vocab_rows``: drafter logits keep only
         # the real rows.  Targets that declare neither bind as before.
         embed = getattr(target_model, "speculative_token_embedding", None)
+        if self.__dict__.get("_raw_token_embedding"):
+            # Diagnostic opt-out survives a re-bind (``reset``).
+            embed = None
         if embed is not None:
             if not callable(embed):
                 raise ValueError("DFlash2 target speculative_token_embedding must be callable")
@@ -303,7 +320,10 @@ class DFlash2DraftModel(DFlashDraftModel):
         return self
 
     def use_raw_token_embedding(self) -> None:
-        """Diagnostic opt-out: embed with the raw target table (no target norm)."""
+        """Diagnostic opt-out: embed with the raw target table (no target norm).
+
+        Sticky: a later ``bind``/``reset`` keeps the raw table."""
+        object.__setattr__(self, "_raw_token_embedding", True)
         self.__dict__.pop("_target_token_embedding", None)
         object.__setattr__(self, "target_embedding_receipt", "raw_table_diagnostic")
 
@@ -503,7 +523,7 @@ def _draft_distributions(
         )
         hosted_edges = np.asarray(edges.astype(mx.float32)) if needs_processor_rows else None
         scores = np.asarray(
-            cap_selector_scores(unary[:, position] + edges, post_cap).astype(mx.float32)
+            selector_scores(unary[:, position], edges, post_cap).astype(mx.float32)
         )
         dense_scores = (
             np.asarray(logits[:, position].astype(mx.float32))
@@ -677,8 +697,8 @@ def pairwise_score_table(self, anchors, features, candidates, unary):
         * selector.successor_codebook(candidates)[:, :, None],
         axis=-1,
     )
-    return cap_selector_scores(
-        unary[:, :, None, :] + edges, selector.post_softcap
+    return selector_scores(
+        unary[:, :, None, :], edges, selector.post_softcap
     ).astype(mx.float32)
 
 

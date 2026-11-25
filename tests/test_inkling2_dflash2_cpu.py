@@ -130,10 +130,34 @@ def test_real_drafter_admitted_against_inkling2_by_visit_count():
         dflash2_adapter.inspect_drafter(DRAFT, TARGET, target_text=text)
     with pytest.raises(ValueError, match="final-norm"):
         dflash2_adapter.inspect_drafter(DRAFT, TARGET, target_text=text, target_tap_count=48)
+    # The raw-embedding diagnostic arm is a different drafter identity.
+    raw = inkling2_dflash2.inspect_drafter(
+        DRAFT, target_path=TARGET, text_config=text, target_fingerprint="t" * 64,
+        embed_norm=False)
+    assert record["embed_norm"] is True and raw["embed_norm"] is False
+    assert raw["embedding_law"] != record["embedding_law"]
+    assert raw["fingerprint"] != record["fingerprint"]
+    assert raw["draft_revision"] != record["draft_revision"]
+    assert raw["artifact_fingerprint"] == record["artifact_fingerprint"]
+
+
+def test_inspection_io_and_type_failures_are_counted_refusals(tmp_path):
+    before = inkling2_dflash2.REFUSALS["inspection_error"]
+    with pytest.raises(inkling2_dflash2.DFlash2Refusal, match="inspection_error"):
+        inkling2_dflash2.inspect_drafter(tmp_path / "missing", target_path=tmp_path,
+                                         text_config={}, target_fingerprint="t")
+    (tmp_path / "config.json").write_text("{not json")
+    with pytest.raises(inkling2_dflash2.DFlash2Refusal, match="inspection_error"):
+        inkling2_dflash2.inspect_drafter(tmp_path, target_path=tmp_path,
+                                         text_config={}, target_fingerprint="t")
+    assert inkling2_dflash2.REFUSALS["inspection_error"] == before + 2
 
 
 @needs_artifacts
 @pytest.mark.parametrize("mutate,reason", [
+    (lambda c: c["dflash_config"].__setitem__("mask_token_id", None), "mask_token"),
+    (lambda c: c["dflash_config"].__setitem__("mask_token_id", "200056"), "mask_token"),
+    (lambda c: c["dflash_config"].__setitem__("mask_token_id", 200100), "mask_token"),
     (lambda c: c.__setitem__("num_target_layers", 47), "visit_count"),
     (lambda c: c["dflash_config"].__setitem__("selector_softcap_mode", "mystery"), "softcap_mode"),
     (lambda c: c["dflash_config"].pop("selector_softcap_mode"), "softcap_mode"),
@@ -283,6 +307,11 @@ def test_declared_target_norms_embeddings_and_crops_padded_rows():
     draft.use_raw_token_embedding()
     np.testing.assert_array_equal(np.asarray(draft._embed_input_tokens(tokens)),
                                   np.asarray(target.model.embed_tokens(tokens)))
+    # Sticky across a later bind/reset.
+    draft.reset(target)
+    np.testing.assert_array_equal(np.asarray(draft._embed_input_tokens(tokens)),
+                                  np.asarray(target.model.embed_tokens(tokens)))
+    assert draft.receipt_settings["target_token_embedding"] == "raw_table_diagnostic"
 
 
 def test_declared_rows_refuse_a_mask_token_in_the_padding():
@@ -443,3 +472,246 @@ def test_after_correction_drafter_serves_greedy_exact_on_the_external_engine(com
     finally:
         batch.close()
     assert output == _greedy_reference(model, prompt, 10)
+
+
+# ---------------------------------------------------------------- review follow-ups
+
+
+def _np_softmax(x, temperature):
+    z = np.asarray(x, dtype=np.float64) / temperature
+    z = np.exp(z - z.max())
+    return z / z.sum()
+
+
+def _reference_walk(draft, hidden, anchor, tokens, *, processor=None):
+    """Independent host law per position: softmax(cap(unary + edges) / T)."""
+    inputs = mx.concatenate([mx.array([[anchor]]), mx.full((1, len(tokens)),
+                             draft.config.mask_token_id, dtype=mx.int32)], axis=1)
+    features = draft._hidden(inputs, hidden, draft.make_cache())[:, 1:]
+    logits = draft._logits(features)
+    candidates = np.asarray(mx.argpartition(logits, -4, axis=-1)[..., -4:])[0]
+    dense = np.asarray(logits.astype(mx.float32))[0]
+    projected = np.asarray(draft.candidate_selector.hidden_projection(features).astype(mx.float32))[0]
+    pred = np.asarray(draft.candidate_selector.predecessor_codebook.weight.astype(mx.float32))
+    succ = np.asarray(draft.candidate_selector.successor_codebook.weight.astype(mx.float32))
+    previous, rows = anchor, []
+    for position, token in enumerate(tokens):
+        ids = candidates[position]
+        row = dense[position] if processor is None else processor(dense[position])
+        edges = (pred[previous] * projected[position] * succ[ids]).sum(-1)
+        raw = row[ids] + edges
+        rows.append((ids, raw, np.tanh(raw / CAP) * CAP))
+        previous = token
+    return rows
+
+
+@pytest.mark.parametrize("processed", [False, True])
+def test_sampled_laws_are_softmax_of_post_correction_cap_at_the_cropped_width(processed):
+    target = _Target()
+    _declare(target, rows=30)
+    draft = _draft("after_correction").bind(target)
+    mx.random.seed(21)
+    hidden = mx.random.normal((1, 3, 16))
+    temperature = 1.3
+    bias = np.zeros(30, dtype=np.float32)
+    bias[[3, 7, 11]] = 12.0
+    processor = (lambda _tokens, logits: logits + mx.array(bias)) if processed else None
+    rng = SimpleNamespace(uniform=lambda: 0.37, sample=lambda q: int(np.argmax(q)))
+    tokens, laws = draft.draft_distributions(
+        [7], hidden, draft.make_cache(), 3, [rng], [temperature],
+        **({"logits_processors": [[processor]], "processor_histories": [[1, 2]]} if processed else {}))
+    assert all(len(law) == 30 for law in laws[0])
+    reference = _reference_walk(draft, hidden, 7, tokens[0],
+                                processor=(lambda row: row + bias) if processed else None)
+    for law, (ids, raw, capped) in zip(laws[0], reference):
+        np.testing.assert_allclose(law[ids], _np_softmax(capped, temperature), rtol=1e-4, atol=1e-6)
+        assert abs(float(law.sum()) - 1.0) < 1e-6
+    # The cap matters here: an uncapped law differs.
+    assert any(np.abs(_np_softmax(raw, temperature) - law[ids]).max() > 1e-3
+               for law, (ids, raw, _capped) in zip(laws[0], reference))
+
+
+class _CaptureSampler:
+    def __init__(self):
+        self.scores = []
+
+    def __call__(self, logits):
+        return mx.argmax(logits, -1)
+
+    def sample_candidate(self, scores, candidates, vocab):
+        self.scores.append(scores)
+        return mx.argmax(scores, axis=-1)
+
+
+def test_select_caps_bf16_scores_in_float32_without_ties():
+    args = DFlash2Config.from_dict(_hf_config(selector_softcap_mode="after_correction"))
+    selector = CandidateSelector(args)
+    # Zero correction: the score is the capped unary alone.
+    selector.predecessor_codebook.weight = mx.zeros((32, 4), dtype=mx.bfloat16)
+    selector.successor_codebook.weight = mx.zeros((32, 4), dtype=mx.bfloat16)
+    selector.hidden_projection.weight = mx.zeros((4, 8), dtype=mx.bfloat16)
+    logits = mx.full((1, 1, 32), -100.0).astype(mx.bfloat16)
+    logits[0, 0, 5] = 45.0
+    logits[0, 0, 9] = 46.0
+    hidden = mx.zeros((1, 1, 8), dtype=mx.bfloat16)
+    sampler = _CaptureSampler()
+    path = selector.select(hidden, logits, mx.array([1]), sampler)
+    scores = sampler.scores[0]
+    assert scores.dtype == mx.float32
+    candidates = np.asarray(mx.argpartition(logits, -4, axis=-1)[..., -4:])[0, 0]
+    values = dict(zip(candidates.tolist(), np.asarray(scores)[0].tolist()))
+    # BF16 tanh would give 27.25 for both; float32 keeps them apart.
+    np.testing.assert_allclose(values[9], np.tanh(46 / CAP) * CAP, rtol=1e-6)
+    np.testing.assert_allclose(values[5], np.tanh(45 / CAP) * CAP, rtol=1e-6)
+    assert values[9] > values[5] and values[9] < CAP
+    assert int(np.asarray(path)[0, 0]) == 9
+
+
+def test_pairwise_scores_cap_bf16_in_float32():
+    target = _Target()
+    draft = _draft("after_correction").bind(target)
+    # A BF16 drafter: codebooks, projection, features and unary all BF16.
+    for module in (draft.candidate_selector.predecessor_codebook,
+                   draft.candidate_selector.successor_codebook,
+                   draft.candidate_selector.hidden_projection):
+        module.weight = mx.zeros_like(module.weight).astype(mx.bfloat16)
+    candidates = mx.array([[[5, 9, 1, 2]]], dtype=mx.uint32)
+    unary = mx.array([[[45.0, 46.0, -100.0, -100.0]]]).astype(mx.bfloat16)
+    features = mx.zeros((1, 1, 8), dtype=mx.bfloat16)
+    scores = draft.pairwise_score_table(mx.array([7]), features, candidates, unary)
+    row = np.asarray(scores)[0, 0, 0]
+    assert row[1] > row[0]
+    np.testing.assert_allclose(row[:2], np.tanh(np.array([45.0, 46.0]) / CAP) * CAP, rtol=1e-6)
+
+
+def _diag_adapter(**attrs):
+    adapter = _adapter()
+    adapter._select_dflash2_route({})
+    adapter.layout = "test-layout"
+    adapter.identity = None
+    adapter.kernel_policy = {}
+    adapter.external_policy = {}
+    for key, value in attrs.items():
+        setattr(adapter, key, value)
+    return adapter
+
+
+def test_ordinary_and_dspark_diagnostics_carry_no_dflash2_key_after_another_refusal(tmp_path):
+    (tmp_path / "config.json").write_text(json.dumps(_hf_config()))
+    refused = _diag_adapter()
+    with pytest.raises(ValueError):
+        refused._select_dflash2_route({"draft_model": str(tmp_path), "device_round": {}})
+    assert inkling2_dflash2.REFUSALS["unsupported_policy_key"] >= 1
+    ordinary = _diag_adapter()
+    dspark = _diag_adapter(draft_model=object(), external_policy={"num_draft": 7})
+    assert "dflash2" not in ordinary.diagnostics()
+    dspark_diagnostics = dspark.diagnostics()
+    assert "dflash2" not in dspark_diagnostics and dspark_diagnostics["dspark"]["selected"] is True
+    receipt = refused.diagnostics()["dflash2"]
+    assert receipt["selected"] is False and receipt["refusals"] == {"unsupported_policy_key": 1}
+
+
+def test_dflash2_route_diagnostics_keep_drafter_counters_out_of_dspark():
+    adapter = _diag_adapter(draft_model=object(), external_policy={"num_draft": 7},
+                            dflash2_route=True, has_mtp=True)
+    diagnostics = adapter.diagnostics()
+    assert diagnostics["dspark"] == {"implemented": True, "selected": False, "qualified": False,
+                                     "weights_present": True,
+                                     "not_selected_reason": "dflash2_route_selected"}
+    assert diagnostics["dflash2"]["selected"] is True
+    assert diagnostics["dflash2"]["num_draft"] == 7
+
+
+# ---------------------------------------------------------------- tiny real Inkling 2
+
+
+def _tiny_inkling_pair():
+    from test_inkling2_cpu import TINY
+
+    from mlx2.runtime.models.inkling2 import Model, TextConfig
+
+    mx.random.seed(0)
+    target = Model(TextConfig.from_dict({**TINY, "final_logit_softcapping": CAP}))
+    weights = []
+    for key, value in tree_flatten(target.parameters()):
+        noise = mx.random.normal(value.shape) * (0.08 if value.ndim > 1 else 0.3)
+        weights.append((key, noise + (1.0 if key.endswith("norm.weight") else 0.0)))
+    target.load_weights(weights, strict=True)
+    mx.eval(target.parameters())
+    config = {
+        "architectures": ["DFlash2DraftModel"], "model_type": "qwen3", "hidden_size": 128,
+        "intermediate_size": 96, "num_hidden_layers": 2, "num_attention_heads": 4,
+        "num_key_value_heads": 2, "head_dim": 32, "vocab_size": 512, "num_target_layers": 48,
+        "max_position_embeddings": 4096, "sliding_window": 16, "rms_norm_eps": 1e-6,
+        "layer_types": ["sliding_attention"] * 2,
+        "dflash_config": {"block_size": 8, "mask_token_id": 499, "target_layer_ids": [5, 23, 41, 48],
+                          "conv_kernel_size": 2, "conv_group_size": 16, "selector_rank": 16,
+                          "selector_top_k": 8, "final_logit_softcapping": CAP,
+                          "selector_softcap_mode": "after_correction"},
+    }
+    draft = DFlash2DraftModel(DFlash2Config.from_dict(config))
+    mx.random.seed(1)
+    draft.load_weights([(key, mx.random.normal(value.shape) * (0.08 if value.ndim > 1 else 0.3)
+                         + (1.0 if key.endswith("norm.weight") else 0.0))
+                        for key, value in tree_flatten(draft.parameters())], strict=True)
+    with pytest.raises(ValueError, match="layer count mismatch"):
+        DFlash2DraftModel(DFlash2Config.from_dict(config)).bind(target)  # undeclared: refused
+    declared = inkling2_dflash2.declare_target(target)
+    draft.bind(target)
+    mx.eval(draft.parameters())
+    return target, draft, declared
+
+
+def test_declare_target_and_bind_against_a_tiny_inkling2_model():
+    target, draft, declared = _tiny_inkling_pair()
+    assert declared == {"tap_count": 48, "final_norm_tap": True, "vocab_rows": 500,
+                        "embedding_law": inkling2_dflash2.EMBEDDING_LAW}
+    assert draft.proposal_vocab_size == 500
+    tokens = mx.array([[3, 17, 499]])
+    np.testing.assert_array_equal(np.asarray(draft._embed_input_tokens(tokens)),
+                                  np.asarray(target.model.embed(tokens)))
+    logits, features = target.forward_with_taps(mx.array([[1, 2, 3, 4]]), target.make_cache(),
+                                                [5, 23, 41, 48])
+    assert logits.shape[-1] == 500 and features.shape[-1] == 4 * 128
+    rng = SimpleNamespace(uniform=lambda: 0.5, sample=lambda q: int(np.argmax(q)))
+    drafted, laws = draft.draft_distributions([3], features, draft.make_cache(), 7, [rng], [0.8])
+    assert len(drafted[0]) == 7 and all(len(law) == 500 for law in laws[0])
+    assert all(0 <= token < 500 for token in drafted[0])
+
+
+def _inkling_run(target, draft, prompt, temperature, count=12):
+    from mlx2.runtime.external_speculative import ExternalDraftBatchGenerator
+
+    batch = ExternalDraftBatchGenerator(target, draft_model=draft, binding="inkling2-dflash2-test",
+                                        num_draft=7, prefill_step_size=16)
+    try:
+        uid = batch.insert([prompt], max_tokens=[count],
+                           sampling_configs=[{"sampling_temp": temperature}])[0]
+        got = []
+        for _ in range(400):
+            _, responses = batch.next()
+            got += [r.token for r in responses if r.uid == uid]
+            if not batch.lanes:
+                break
+        return got, dict(batch.scheduler_stats)
+    finally:
+        batch.close()
+
+
+def test_tiny_inkling2_engine_greedy_exact_and_sampled_through_the_crop():
+    target, draft, _ = _tiny_inkling_pair()
+    mx.random.seed(4)
+    prompt = [int(t) for t in mx.random.randint(1, 400, (24,)).tolist()]
+    cache = target.make_cache()
+    tokens, expect = list(prompt), []
+    for step in range(12):
+        logits = target(mx.array([tokens if step == 0 else [tokens[-1]]]), cache=cache)
+        tokens.append(int(mx.argmax(logits[0, -1]).item()))
+        expect.append(tokens[-1])
+    greedy, _stats = _inkling_run(target, draft, prompt, 0.0)
+    assert greedy == expect
+    # T > 0: the 500-wide drafter laws meet the 500-wide target laws in the
+    # sampled verifier (a 512-wide law would be refused there).
+    sampled, stats = _inkling_run(target, draft, prompt, 1.0)
+    assert len(sampled) == 12 and all(0 <= token < 500 for token in sampled)
+    assert stats.get("external_hybrid_transactions", 0) > 0
