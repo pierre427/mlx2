@@ -92,7 +92,18 @@ def test_requires_moe_fused():
         model.configure_kernels(moe_decode_kernel=True)
     from mlx2.adapters.inkling2 import validate_policy
 
-    assert validate_policy(None)[0]["moe_decode_kernel"] is False
+    from mlx2.adapters.inkling2 import REFERENCE_POLICY
+
+    # Default on (Pierre 2026-11-25); unset it follows moe_fused and stays off
+    # with moe_logdomain_renorm; the reference policy turns it off.
+    assert validate_policy(None)[0]["moe_decode_kernel"] is True
+    assert validate_policy({"inkling2_moe_fused": False})[0]["moe_decode_kernel"] is False
+    assert validate_policy({"inkling2_moe_logdomain_renorm": True})[0]["moe_decode_kernel"] is False
+    assert validate_policy({"inkling2_moe_decode_kernel": False})[0]["moe_decode_kernel"] is False
+    assert REFERENCE_POLICY["inkling2_moe_decode_kernel"] is False
+    assert validate_policy(dict(REFERENCE_POLICY))[0]["moe_decode_kernel"] is False
+    with pytest.raises(ValueError, match="not combined"):
+        validate_policy({"inkling2_moe_logdomain_renorm": True, "inkling2_moe_decode_kernel": True})
     assert validate_policy({"inkling2_moe_decode_kernel": True})[0]["moe_decode_kernel"] is True
     with pytest.raises(ValueError, match="requires inkling2_moe_fused"):
         validate_policy({"inkling2_moe_decode_kernel": True, "inkling2_moe_fused": False})

@@ -119,8 +119,12 @@ COMPOSED = {"inkling2_sink_sdpa": True, "inkling2_sink_slot": True,
             "inkling2_fuse_sconv": True, "inkling2_fuse_attention": True}
 # The reference arm pins the reference path: the composed set became the
 # adapter default on 2026-11-22 (Pierre), so an empty policy is no longer the
-# reference.
-REFERENCE_POLICY = {key: False for key in COMPOSED} | {"inkling2_verify_splitk": False}
+# reference. inkling2_moe_decode_kernel became a default on 2026-11-25 (Pierre)
+# and is pinned off here too, as is inkling2_head_kernel (default on
+# 2026-11-25, Pierre): the reference arm keeps the FP32 GEMM head.
+REFERENCE_POLICY = {key: False for key in COMPOSED} | {"inkling2_verify_splitk": False,
+                                                       "inkling2_moe_decode_kernel": False,
+                                                       "inkling2_head_kernel": False}
 PHASES = (
     {"name": "ordinary_b1", "route": "ordinary", "width": 1, "reference": None,
      "policy": dict(REFERENCE_POLICY), "cells": "full"},

@@ -244,6 +244,32 @@ def top5(row):
     return [[int(i), round(float(logp[i].item()), 5)] for i in idx.tolist()]
 
 
+CEILING = 0.5  # AGENTS.md near-tie ceiling (nats)
+
+
+def classify_flip(off5, on5):
+    """Margin classification of one teacher-forced argmax flip (same prefix by
+    construction).  Each arm's top-5 is ``[[id, logp], ...]``.  ``top2`` is the
+    two-arm contract (same unordered top two, both selected-vs-alternate
+    margins <= CEILING); ``multiway`` the multi-way clause (each arm's selected
+    token within CEILING of the other arm's top log-probability, both read from
+    the windows).  The functional-oracle part of the contract is not run here
+    (no continuation), so this is margin evidence only."""
+    a = {i: v for i, v in off5}
+    b = {i: v for i, v in on5}
+    sel_a, sel_b = off5[0][0], on5[0][0]
+    margin_a = off5[0][1] - off5[1][1]
+    margin_b = on5[0][1] - on5[1][1]
+    top2 = ({off5[0][0], off5[1][0]} == {on5[0][0], on5[1][0]}
+            and margin_a <= CEILING and margin_b <= CEILING)
+    multiway = None
+    if sel_b in a and sel_a in b:
+        multiway = (off5[0][1] - a[sel_b] <= CEILING) and (on5[0][1] - b[sel_a] <= CEILING)
+    return {"off_selected": sel_a, "on_selected": sel_b, "off_margin": round(margin_a, 5),
+            "on_margin": round(margin_b, 5), "top2_near_tie": top2, "multiway_near_tie": multiway,
+            "near_tie_margins": bool(top2 or multiway)}
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("model_dir")
@@ -326,6 +352,7 @@ def main():
                                            "prefill_first_divergence")}, flush=True)
             c_decode = counters(model)
             equal, agree, total, first = True, 0, 0, None
+            flips = []
             for i in range(args.blocks):
                 rows_a, toks_a, own_a, last_a, rate_a = decode_block(
                     model, toggle, cache_a, last_a, False,
@@ -339,6 +366,11 @@ def main():
                 equal &= all(same)
                 agree += sum(a == b for a, b in zip(own_a, own_b))
                 total += len(own_a)
+                for j, (x, y) in enumerate(zip(own_a, own_b)):
+                    if x != y:
+                        o5, n5 = top5(rows_a[j]), top5(rows_b[j])
+                        flips.append({"block": i, "step": j, "token_in": toks_a[j],
+                                      "off_top5": o5, "on_top5": n5, **classify_flip(o5, n5)})
                 if first is None and not all(same):
                     j = same.index(False)
                     first = {"block": i, "step": j, "token_in": toks_a[j],
@@ -355,6 +387,9 @@ def main():
             cell["decode_logits_bitwise"] = equal
             cell["decode_argmax_agreement"] = f"{agree}/{total}"
             cell["first_divergence"] = first
+            cell["argmax_flips"] = flips
+            cell["argmax_flips_near_tie_margins"] = (
+                f"{sum(f['near_tie_margins'] for f in flips)}/{len(flips)}")
             receipt["cells"].append(cell)
             del cache_a, cache_b
             mx.clear_cache()

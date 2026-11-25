@@ -204,17 +204,39 @@ class Guard:
 # -- servers ------------------------------------------------------------------------
 
 
-def stop_group(pgid: int) -> None:
+def _group_gone(pgid: int, proc=None) -> bool:
+    """True once no live process is left in the group.
+
+    ``proc`` (the leader's Popen, when the caller owns it) is reaped here:
+    macOS answers ``killpg`` with EPERM, not ESRCH, while the group holds only
+    an unreaped zombie leader, so a probe without reaping never sees "gone"
+    (2026-11-25: every arm lost its receipt to that PermissionError).
+    """
+    if proc is not None:
+        proc.poll()
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        # Nothing in the group can be signalled: an exited (zombie) leader
+        # with no live members.  With the leader reaped, the group is done.
+        return proc is None or proc.returncode is not None
+    return False
+
+
+def stop_group(pgid: int, proc=None) -> None:
     for sig, wait in ((signal.SIGTERM, 20), (signal.SIGKILL, 5)):
         try:
             os.killpg(pgid, sig)
         except ProcessLookupError:
             return
+        except PermissionError:
+            if _group_gone(pgid, proc):
+                return
         t0 = time.monotonic()
         while time.monotonic() - t0 < wait:
-            try:
-                os.killpg(pgid, 0)
-            except ProcessLookupError:
+            if _group_gone(pgid, proc):
                 return
             time.sleep(0.5)
 
@@ -240,6 +262,21 @@ def server_command(a, arm: str, cache_dir: Path) -> tuple[list[str], dict]:
              "--disable-disk-caches", "--disable-model-downloads"], env)
 
 
+def _healthy(port: int) -> bool:
+    """``/health`` is 200 (or absent).  mlx2 lists its model while the worker is
+    still loading and answers chat 503 until ``/health`` turns 200
+    (2026-11-25: the mlx2 arms died on a 503 warm-up 1.7 s after start)."""
+    try:
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        conn.request("GET", "/health")
+        resp = conn.getresponse()
+        resp.read()
+        conn.close()
+    except (OSError, http.client.HTTPException):
+        return False
+    return resp.status in (200, 404)
+
+
 def wait_ready(port: int, server, timeout: float) -> str:
     t0 = time.monotonic()
     while server.poll() is None and time.monotonic() - t0 < timeout:
@@ -249,7 +286,7 @@ def wait_ready(port: int, server, timeout: float) -> str:
             resp = conn.getresponse()
             data = json.loads(resp.read() or b"{}")
             conn.close()
-            if resp.status == 200 and data.get("data"):
+            if resp.status == 200 and data.get("data") and _healthy(port):
                 return data["data"][0]["id"]
         except (OSError, ValueError, http.client.HTTPException):
             pass
@@ -351,7 +388,7 @@ def run(a) -> int:
     except Exception as exc:  # noqa: BLE001 - the receipt records it
         receipt["errors"].append(repr(exc))
     finally:
-        stop_group(server.pid)
+        stop_group(server.pid, server)
         log.close()
     summary = {}
     for target in TARGETS:

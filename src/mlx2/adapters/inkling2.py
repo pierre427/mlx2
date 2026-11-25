@@ -385,7 +385,9 @@ KERNEL_OPTIONS = {
     # see the inkling2_moe_decode_kernel rows of the decisions TSV. Exact
     # with the module defaults (contraction default, sequential route sum,
     # the default from 09260f5d9; full run at 6b0946589: bitwise, decode
-    # -3.4%/-3.1% at 1K/16K), small gain: default candidate, off pending Pierre.
+    # -3.4%/-3.1% at 1K/16K), small gain. Night retest 98883cc60 (2026-11-24,
+    # quiet GPU): logits bitwise 64/64 at 1K and 16K, +3.4%/+3.0% decode.
+    # DEFAULT ON (Pierre 2026-11-25); see KERNEL_DEFAULTS.
     "inkling2_moe_decode_kernel": "moe_decode_kernel",
     # Expert-grouped verify panels (runtime/models/inkling2/moe_panel_kernel.py;
     # implemented 2026-11-23 from the MTPLX sweep candidate 1, mechanism of
@@ -638,14 +640,30 @@ KERNEL_OPTIONS = {
 # bitwise (max |dlogit| 0.08 at 1K, 0.55 at 16K, argmax 125/128 with the 3
 # margins not captured), decode within noise, prefill 12% slower at 1K.
 # W4A4 (moe_act_quant) stays off.
+# head_kernel is DEFAULT ON (Pierre 2026-11-25, after the Rapid-MLX gap A/B
+# qualification/runs/inkling2-gpu-20261125/566479abc-gaplevers): it reads the
+# BF16 unembedding with FP32 accumulation instead of a cached FP32 copy (1.85
+# GB per token), decode +6.2% at 1K and +6.9% at 16K, argmax 64/64, max logit
+# difference 3.8e-6 (summation order only). It falls back to the FP32 GEMM
+# off GPU, for non-BF16 heads, or widths not a multiple of 128; the reference
+# policy keeps the FP32 GEMM for mlx-vlm parity. head_kernel_wide stays off.
+# moe_decode_kernel is DEFAULT ON (Pierre 2026-11-25, after the night retest
+# 98883cc60 inkk1123-98883cc60-n1124-retest, Inkling-2-Mini@440956c8): decode
+# logits bitwise on 64/64 steps at 1K and 16K, prefill last logits equal,
+# decode +3.4% (1K) / +3.0% (16K); earlier 6b0946589 also bitwise, -3.4%/-3.1%
+# ms/step. Unset, it follows moe_fused and stays off with moe_logdomain_renorm;
+# MXFP8 layers, act-quant and other shapes decline (counted). The reference
+# policy turns it off.
 KERNEL_DEFAULTS = {"moe_fused": True, "moe_weighted_sum": None, "moe_nax_gather": None,
                    "sink_sdpa": True, "sink_slot": True, "verify_splitk": True,
                    "fuse_controllers": True, "fuse_residual": True, "fuse_sconv": True,
-                   "fuse_attention": True, "fuse_sconv_kernel": True}
+                   "fuse_attention": True, "fuse_sconv_kernel": True, "head_kernel": True,
+                   "moe_decode_kernel": True}
 # The policy that selects the reference path for every switch the defaults
 # turn on (comparison scripts and the ladder's reference arm start from it).
 REFERENCE_POLICY = {key: False for key, name in KERNEL_OPTIONS.items()
-                    if KERNEL_DEFAULTS.get(name) is True and not name.startswith("moe_")}
+                    if KERNEL_DEFAULTS.get(name) is True
+                    and (not name.startswith("moe_") or name == "moe_decode_kernel")}
 # Varloop (Pierre 2026-11-21): run the middle
 # block N times instead of the trained 3. The checkpoint has is_varloop
 # false, so every N != 3 is out of distribution; it is a research knob, not a
@@ -813,6 +831,9 @@ def validate_policy(value):
     if passes is not None and (type(passes) is not int or not 1 <= passes <= 8):
         raise TypeError(f"Inkling 2 {LOOP_PASSES_OPTION} must be an integer 1..8")
     kernels["loop_passes"] = passes
+    if "moe_decode_kernel" in defaulted and (not kernels["moe_fused"]
+                                             or kernels["moe_logdomain_renorm"]):
+        kernels["moe_decode_kernel"] = False  # the default follows moe_fused
     if "fuse_sconv_kernel" in defaulted and not kernels["fuse_sconv"]:
         kernels["fuse_sconv_kernel"] = False  # the default follows fuse_sconv
     if kernels["fuse_sconv_kernel"] and not kernels["fuse_sconv"]:

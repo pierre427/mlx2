@@ -320,8 +320,11 @@ def test_head_wide_loads_keep_every_lanes_groups_and_order(k):
 def test_head_kernel_wide_plumbing_and_cpu_reference():
     from mlx2.adapters.inkling2 import validate_policy
 
+    # head_kernel is default on (Pierre 2026-11-25), so wide alone is valid;
+    # wide with head_kernel turned off still fails closed.
+    assert validate_policy({"inkling2_head_kernel_wide": True})[0]["head_kernel_wide"] is True
     with pytest.raises(ValueError, match="requires inkling2_head_kernel"):
-        validate_policy({"inkling2_head_kernel_wide": True})
+        validate_policy({"inkling2_head_kernel_wide": True, "inkling2_head_kernel": False})
     model = _bf16(_tiny_model())
     with pytest.raises(ValueError, match="head_kernel_wide requires head_kernel"):
         model.configure_kernels(head_kernel_wide=True)
