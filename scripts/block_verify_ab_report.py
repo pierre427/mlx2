@@ -34,7 +34,7 @@ def main(path):
             "revision": (arm.get("revision") or {}).get("head"),
             "concurrency": arm.get("concurrency", 1),
             "questions": summary.get("questions"), "accuracy": summary.get("accuracy"),
-            "mean_accepted_length": acceptance.get("mean_accepted_length"),
+            "mean_accepted_length": acceptance.get("mean_acceptance_length"),
             "per_position": acceptance.get("per_position"),
             "decode_tps_median": summary.get("decode_tps_median"),
             "wall_tok_s": wall_throughput(rows),
