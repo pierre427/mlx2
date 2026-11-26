@@ -924,6 +924,16 @@ class Attention(nn.Module):
         if type(kv) in _capacity.FIXED_VIEWS:
             # inkling2_native_replay (default off): the fixed-capacity step.
             return _capacity.attend(self, q, r, gate, sink, k, v, kv, x.dtype)
+        if type(kv) in _segmented_views():
+            return self._segmented_lanes(kv, x, q, r, gate, sink, k, v)
+        return self._attend(x, kv, q, r, gate, sink, k, v)
+
+    def _attend(self, x, kv, q, r, gate, sink, k, v):
+        """The visit after its projections and convolutions: fetch, attend,
+        gate, output. ``x`` only gives the batch, length and dtype."""
+        b, length, _ = x.shape
+        cfg = self.config
+        fa = _fuse.on(self, "fuse_attention")
         ring, ring_start, ring_phys = None, 0, None
         # Which in-place ring read set ring_phys ("splitk" or "onelaunch"),
         # so a declined read's copy is counted by its own route; and a
@@ -1250,6 +1260,39 @@ class Attention(nn.Module):
         out = outputs[0] if len(outputs) == 1 else mx.concatenate(outputs, axis=2)
         return self._finish(out, gate, b, length, x.dtype)
 
+    def _segmented_lanes(self, kv, x, q, r, gate, sink, k, v):
+        """One batched verify visit over independently owned lanes.
+
+        ``kv`` is a ``HybridVerifyRows`` view (``SegmentedBatchRotatingKVCache``
+        for sliding visits, ``SegmentedBatchKVCache`` for global ones) whose
+        authoritative rows are the lanes' own B1 caches. Projections and the
+        short convolutions ran batched (the recurrent view splits their state
+        into the lanes); each lane's valid rows then run this visit's B1
+        attention, kernels and all, on that lane's own cache (``_attend``),
+        so per-lane offsets, ring layout, deferred commits and rollback
+        records are the B1 path's. Padded rows get zeros.
+        """
+        deferred = []
+        counts = self.__dict__.setdefault("segmented_lane_counts", {})
+
+        def lane(index, row, valid):
+            counts["lanes"] = counts.get("lanes", 0) + 1
+            counts["rows"] = counts.get("rows", 0) + valid
+            out = self._attend(
+                x[index : index + 1, :valid], row,
+                q[index : index + 1, :, :valid], r[index : index + 1, :valid],
+                gate[index : index + 1, :valid], sink[index : index + 1, :valid],
+                k[index : index + 1, :, :valid], v[index : index + 1, :, :valid],
+            )
+            if isinstance(out, tuple):  # inkling2_attn_output_kernel: (gated,)
+                deferred.append(True)
+                (out,) = out
+            return out
+
+        out = kv.row_attention(lane, axis=1)
+        counts["visits"] = counts.get("visits", 0) + 1
+        return (out,) if deferred else out
+
     def _finish(self, out, gate, b, length, dtype):
         return self._output(self._gate(out, gate, b, length, dtype))
 
@@ -1266,6 +1309,20 @@ class Attention(nn.Module):
             # its short convolution and residual (attn_output.residual).
             return (gated,)
         return self.o_proj(gated)
+
+
+_SEGMENTED_VIEWS = None
+
+
+def _segmented_views():
+    """Batched verify views ``Attention`` runs lane by lane (imported once)."""
+    global _SEGMENTED_VIEWS
+    if _SEGMENTED_VIEWS is None:
+        from ...segmented_batch_ring import SegmentedBatchRotatingKVCache
+        from ...segmented_plain_kv import SegmentedBatchKVCache
+
+        _SEGMENTED_VIEWS = (SegmentedBatchRotatingKVCache, SegmentedBatchKVCache)
+    return _SEGMENTED_VIEWS
 
 
 def visit_length_check(model, cache):
@@ -1908,6 +1965,11 @@ class TextModel(nn.Module):
 class Model(nn.Module):
     BASE_LAYOUT = "inkling2-kv-four-shortconv-v1"
     supports_speculative_rollback = True
+    # A multi-lane verify over its sliding-window rings (HybridVerifyRows
+    # ``batched_rings``): Attention runs each lane's rows on that lane's own
+    # caches (``Attention._segmented_lanes``). Declares the cache mechanism
+    # only; the adapter decides which routes may serve more than one lane.
+    supports_batched_ring_verify = True
 
     def __init__(self, config: TextConfig):
         super().__init__()
@@ -2337,6 +2399,17 @@ class Model(nn.Module):
             "conv": dict(sorted(conv_prefix.items())),
             "cache": deferred_commit_counts(),
         }
+        lanes = {}
+        for layer in self.model.layers:
+            for key, value in layer.self_attn.__dict__.get("segmented_lane_counts", {}).items():
+                lanes[key] = lanes.get(key, 0) + value
+        # Multi-lane verify visits run lane by lane (Attention._segmented_lanes):
+        # batched visits, lane visits and their verified rows. The per-lane
+        # visits also count in the B1 counters above (deferred commit,
+        # attn_decode declines, ...).
+        out["batched_ring_verify"] = {"visits": lanes.get("visits", 0),
+                                      "lane_visits": lanes.get("lanes", 0),
+                                      "lane_rows": lanes.get("rows", 0)}
         out["visit_length_check"] = {
             "selected": bool(getattr(self, "kernel_policy", {}).get("visit_length_check")),
             **dict(sorted(self.model.__dict__.get("visit_length_counts", {}).items())),

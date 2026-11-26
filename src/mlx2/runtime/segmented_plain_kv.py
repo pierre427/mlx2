@@ -136,6 +136,30 @@ class SegmentedBatchKVCache:
         self._bump("row_state_splits", self.batch_size)
         return None, None
 
+    def row_attention(self, fn, *, axis=2):
+        """Run ``fn(index, row, valid)`` per lane (see the ring view's twin).
+
+        ``fn`` appends exactly ``valid`` rows to the lane's own ``KVCache``
+        through its own B1 code and returns that lane's output with ``valid``
+        rows on ``axis``; any failure rewinds every lane's appends."""
+        from .segmented_batch_ring import _lane_outputs
+
+        if self._step_lengths is None or self._updated:
+            raise RuntimeError("segmented KV attention requires one prepared step")
+        if self._host_offsets() != self._base_lengths:
+            raise RuntimeError("segmented KV row changed after preparation")
+        try:
+            out = _lane_outputs(self.rows, self._step_lengths, self._base_lengths, fn, axis)
+        except BaseException:
+            for row, offset in zip(self.rows, self._base_lengths):
+                if row.offset > offset:
+                    row.trim(row.offset - offset)
+            raise
+        self._updated = True
+        self.offset = mx.array(self._host_offsets())
+        self._bump("row_attention_calls")
+        return out
+
     def row_views(self, mask):
         """Yield ``(index, valid, keys, values, row_mask)`` per batch row.
 

@@ -1515,11 +1515,14 @@ class Inkling2Adapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
     def _route_execution_config(self, *, max_lanes, prefill_step):
         self.bind_prefill_step(prefill_step)
         if getattr(self, "draft_model", None) is not None:
-            if max_lanes != 1:
-                # Verify over sliding-window rings beside recurrent state is
-                # B1 only (HybridVerifyRows); fail at startup, not mid-round.
-                if getattr(self, "dflash2_route", False):
-                    self._dflash2_refusal("max_lanes")
+            if max_lanes != 1 and not getattr(self, "dflash2_route", False):
+                # DSpark drafts one lane at a time (lazy drafts, pre-drafts);
+                # fail at startup, not mid-round. The DFlash2 route verifies
+                # several lanes in one batched round: HybridVerifyRows
+                # ``batched_rings`` with the model's per-lane attention
+                # (Attention._segmented_lanes, supports_batched_ring_verify).
+                # Multi-lane DFlash2 is implemented, not qualified; the
+                # best-route default still selects it only at one lane.
                 raise ValueError("Inkling 2 DSpark serving is B1 only: start with --max-lanes 1")
             return self._external_execution_config(max_lanes=max_lanes, prefill_step=prefill_step)
         return {

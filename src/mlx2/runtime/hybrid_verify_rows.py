@@ -15,11 +15,14 @@ cache topology: a lane whose caches are only plain/rotating KV keeps the
 ``SegmentedKVRows`` owner.
 
 A sliding-window ``RotatingKVCache`` beside recurrent state (Inkling's
-local layers) is handled B1 only, with the ring's own exact record-and-replay
-rollback: it speculates for every round, plain rounds included, so ``trim``
-restores the pre-forward window and re-appends the accepted prefix even once
-the ring has wrapped.  Batched (B>1) verify over rings fails closed: the
-segmented batch views have no ring layout.
+local layers) uses the ring's own exact record-and-replay rollback: it
+speculates for every round, plain rounds included, so ``trim`` restores the
+pre-forward window and re-appends the accepted prefix even once the ring has
+wrapped.  Batched (B>1) verify over rings is opt-in per owner
+(``batched_rings``, which the caller takes from the target's
+``supports_batched_ring_verify``; default off, fail closed): each ring layer
+gets a ``SegmentedBatchRotatingKVCache`` view whose authoritative rows are
+the lanes' own speculating rings, so every rewind is still that B1 ring trim.
 
 Per round: every recurrent row starts a fresh rollback epoch, the verify
 forward records one replay per recurrent layer, commit trims each row to its
@@ -38,6 +41,7 @@ from __future__ import annotations
 from numbers import Integral
 
 from .cache_operations import CacheOperationsUnsupported, cache_operations
+from .models.cache import RotatingKVCache
 
 
 class HybridVerifyUnsupported(TypeError):
@@ -80,7 +84,8 @@ def is_hybrid_rows(rows, *, allow_rings=False) -> bool:
     """True for supported rows needing recurrent or declared KV transactions.
 
     ``allow_rings`` admits sliding-window rings, and only beside recurrent
-    state (B1; see the module note). It is opt-in per caller: the external
+    state (B1 unless the owner is built with ``batched_rings``; see the
+    module note). It is opt-in per caller: the external
     draft route passes it; prompt lookup does not, so its ring+recurrent
     lanes keep their per-lane rounds."""
     rows = [list(row) for row in rows]
@@ -140,11 +145,16 @@ class HybridVerifyRows:
             "rollback_law": "kv_trim_and_recurrent_record_restore",
         }
 
-    def __init__(self, rows, note=None, *, deferred_commit=False):
+    def __init__(self, rows, note=None, *, deferred_commit=False, batched_rings=False):
         """``deferred_commit``: arm each ring that offers it
         (``supports_deferred_commit``) for deferred forwards every round; this
         owner rewinds rings only through ``trim``. Default off; the target
-        model asks for it (``supports_deferred_verify_commit``)."""
+        model asks for it (``supports_deferred_verify_commit``).
+
+        ``batched_rings``: admit more than one lane over ring layers (see the
+        module note). Default off; the target declares that its attention
+        reads ``SegmentedBatchRotatingKVCache`` views
+        (``supports_batched_ring_verify``)."""
         rows = [list(row) for row in rows]
         if not rows or not rows[0] or len({len(row) for row in rows}) != 1:
             raise ValueError("hybrid lanes need the same nonzero layer count")
@@ -182,10 +192,15 @@ class HybridVerifyRows:
                     f"declared exact KV transaction layers; rows={details!r}"
                 )
             if len(rows) > 1 and any(_rotating(cache) for cache in layer):
-                raise HybridVerifyUnsupported(
-                    "batched hybrid verify over rotating KV is not implemented "
-                    "(segmented batch views have no ring layout); B1 only"
-                )
+                if not batched_rings:
+                    raise HybridVerifyUnsupported(
+                        "batched hybrid verify over rotating KV needs a target that "
+                        "reads segmented ring views (supports_batched_ring_verify); B1 only"
+                    )
+                if any(type(cache) is not RotatingKVCache for cache in layer):
+                    raise HybridVerifyUnsupported(
+                        "batched hybrid verify over rings supports exact RotatingKVCache rows"
+                    )
             for cache in layer:
                 if _rotating(cache) and cache.speculating:
                     raise ValueError("rotating row already has a speculation owner")
@@ -207,6 +222,7 @@ class HybridVerifyRows:
         self._recurrent_rows = [[_recurrent(cache) for cache in row] for row in rows]
         self._rotating = [cache for row in rows for cache in row if _rotating(cache)]
         self._deferred_commit = bool(deferred_commit)
+        self._batched_rings = bool(batched_rings)
         self._note = note
         self._active = None
         # Per-layer batched views, kept across this owner's rounds while
@@ -237,7 +253,7 @@ class HybridVerifyRows:
 
         group = self._views
         if group is None:
-            group = build_segmented_batch_cache_group(self.rows, note=self._note)
+            group = self._build_views(build_segmented_batch_cache_group)
             if all(
                 type(view) in (SegmentedBatchArraysCache, SegmentedBatchKVCache)
                 for view in group
@@ -253,6 +269,24 @@ class HybridVerifyRows:
             for view in group:
                 if _recurrent(view):
                     view.speculating = False
+        return group
+
+    def _build_views(self, build):
+        """One batched view per layer: rings get the segmented ring view.
+
+        Ring views are rebuilt every round (they capture the pre-round ring
+        geometry at ``prepare``), so an owner with ring layers keeps no views.
+        """
+        if not any(_rotating(cache) for cache in self.rows[0]):
+            return build(self.rows, note=self._note)
+        from .segmented_batch_ring import SegmentedBatchRotatingKVCache
+
+        group = []
+        for index, layer in enumerate(zip(*self.rows)):
+            if _rotating(layer[0]):
+                group.append(SegmentedBatchRotatingKVCache(layer, note=self._note))
+            else:
+                group.extend(build([[row[index]] for row in self.rows], note=self._note))
         return group
 
     def begin(self, lengths, *, plain_single_token=False):

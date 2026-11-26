@@ -2722,7 +2722,9 @@ class ExternalDraftBatchGenerator:
             # A target that asks for it (default off) has its rings arm
             # deferred verify commits; see RotatingKVCache.deferred_commit_reason.
             return HybridVerifyRows(rows, deferred_commit=bool(
-                getattr(self.model, "supports_deferred_verify_commit", False)))
+                getattr(self.model, "supports_deferred_verify_commit", False)),
+                batched_rings=bool(
+                    getattr(self.model, "supports_batched_ring_verify", False)))
         return SegmentedKVRows(rows)
 
     @staticmethod

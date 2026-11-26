@@ -888,3 +888,205 @@ def test_no_flag_server_selects_dflash2_only_at_one_lane():
     assert resolve()[:2] == ("width_keyed_adapter_default", "ordinary")
     assert resolve("--max-lanes", "1", "--ordinary")[:2] == ("explicit_route", "ordinary")
     assert resolve("--max-lanes", "1", "--no-auto-route")[0] == "opted_out"
+
+
+def _greedy_ordinary(target, prompt, count):
+    cache, tokens, out = target.make_cache(), list(prompt), []
+    for step in range(count):
+        logits = target(mx.array([tokens if step == 0 else [tokens[-1]]]), cache=cache)
+        tokens.append(int(mx.argmax(logits[0, -1]).item()))
+        out.append(tokens[-1])
+    return out
+
+
+def _lane_visits(target):
+    return sum(layer.self_attn.__dict__.get("segmented_lane_counts", {}).get("visits", 0)
+               for layer in target.model.layers)
+
+
+@pytest.mark.parametrize("lengths,stagger", [((24, 9), False), ((30, 12, 20), False),
+                                             ((24, 9, 17), True)])
+def test_tiny_inkling2_engine_serves_several_lanes_greedy_exact(lengths, stagger):
+    """Several lanes verify in one batched round (wrapped and unwrapped rings,
+    lanes joining mid-flight); each lane's greedy output equals ordinary decode."""
+    from mlx2.runtime.external_speculative import ExternalDraftBatchGenerator
+
+    target, draft, _ = _tiny_inkling_pair()
+    mx.random.seed(7)
+    prompts = [[int(t) for t in mx.random.randint(1, 400, (n,)).tolist()] for n in lengths]
+    count = 14
+    expect = [_greedy_ordinary(target, p, count) for p in prompts]
+    batch = ExternalDraftBatchGenerator(target, draft_model=draft, binding="inkling2-dflash2-test",
+                                        num_draft=7, prefill_step_size=16,
+                                        completion_batch_size=4)
+    try:
+        first = prompts[:1] if stagger else prompts
+        uids = list(batch.insert(first, max_tokens=[count] * len(first)))
+        got = {}
+        for step in range(800):
+            if stagger and step == 3:
+                uids += batch.insert(prompts[1:], max_tokens=[count] * (len(prompts) - 1))
+            _, responses = batch.next()
+            for r in responses:
+                got.setdefault(r.uid, []).append(r.token)
+            if len(uids) == len(prompts) and not batch.lanes:
+                break
+        assert [got[u] for u in uids] == expect
+        assert _lane_visits(target) > 0  # some rounds really verified lanes together
+        assert batch.scheduler_stats.get(
+            "external_cohort_target_batched_standard_verify_rounds", 0) > 0
+    finally:
+        batch.close()
+
+
+@pytest.mark.parametrize("lanes", [2, 16])
+def test_dflash2_route_accepts_more_than_one_lane_and_dspark_still_refuses(lanes, monkeypatch):
+    from mlx2.adapters.inkling2 import Inkling2Adapter
+
+    adapter = object.__new__(Inkling2Adapter)
+    adapter.draft_model = object()
+    adapter.dflash2_route = True
+    monkeypatch.setattr(Inkling2Adapter, "bind_prefill_step", lambda self, step: None)
+    monkeypatch.setattr(Inkling2Adapter, "_external_execution_config",
+                        lambda self, *, max_lanes, prefill_step: {"backend": "external_draft",
+                                                                  "segment_aware_cohort_size": max_lanes})
+    config = adapter.execution_config(max_lanes=lanes, prefill_step=512)
+    assert config["backend"] == "external_draft" and config["segment_aware_cohort_size"] == lanes
+    assert "max_lanes" not in adapter.__dict__.get("dflash2_refusals", {})
+    adapter.dflash2_route = False  # the DSpark route drafts one lane at a time
+    with pytest.raises(ValueError, match="B1 only"):
+        adapter.execution_config(max_lanes=lanes, prefill_step=512)
+
+
+class _LaneKey:
+    def __init__(self, seed):
+        self.key = [seed, 7]
+
+
+def _serve_sampled(target, draft, prompts, seeds, count=16):
+    from mlx2.runtime.external_speculative import ExternalDraftBatchGenerator
+
+    batch = ExternalDraftBatchGenerator(target, draft_model=draft, binding="inkling2-dflash2-test",
+                                        num_draft=7, prefill_step_size=16, completion_batch_size=4)
+    try:
+        uids = batch.insert(prompts, max_tokens=[count] * len(prompts),
+                            sampling_configs=[{"sampling_temp": 1.0}] * len(prompts),
+                            lane_rngs=[_LaneKey(s) for s in seeds])
+        got = {}
+        for _ in range(2000):
+            _, responses = batch.next()
+            for r in responses:
+                got.setdefault(r.uid, []).append(r.token)
+            if not batch.lanes:
+                break
+        return [got[u] for u in uids], dict(batch.scheduler_stats)
+    finally:
+        batch.close()
+
+
+def test_tiny_inkling2_engine_sampled_lanes_equal_each_lane_served_alone():
+    """Per-lane keyed draws: a sampled lane's tokens do not depend on its co-lanes."""
+    target, draft, _ = _tiny_inkling_pair()
+    mx.random.seed(9)
+    prompts = [[int(t) for t in mx.random.randint(1, 400, (n,)).tolist()] for n in (24, 11, 30)]
+    seeds = [11, 22, 33]
+    together, stats = _serve_sampled(target, draft, prompts, seeds)
+    assert stats.get("external_cohort_target_batched_standard_verify_rounds", 0) > 0
+    alone = [_serve_sampled(target, draft, [p], [s])[0][0] for p, s in zip(prompts, seeds)]
+    assert together == alone
+
+
+@pytest.mark.parametrize("kernels", [{}, {"verify_deferred_commit": True},
+                                     {"sink_sdpa": True, "sink_slot": True, "fuse_controllers": True,
+                                      "fuse_residual": True, "fuse_sconv": True,
+                                      "fuse_attention": True, "verify_deferred_commit": True}])
+@pytest.mark.parametrize("lengths,stagger", [((30, 12, 20), False), ((40, 33, 5, 60), False),
+                                             ((24, 9, 17), True)])
+def test_tiny_inkling2_engine_partial_accepts_across_lanes_greedy_exact(kernels, lengths, stagger):
+    """An oracle drafter proposes each lane's true greedy continuation for a
+    number of positions that varies by round, then wrong tokens: lanes accept
+    different prefixes in the same batched round (multi-row commits, partial
+    ring trims after a wrap). Output must equal ordinary decode."""
+    import inspect
+
+    from mlx2.runtime.external_speculative import ExternalDraftBatchGenerator
+
+    target, draft, _ = _tiny_inkling_pair()
+    if kernels:
+        target.configure_kernels(**kernels)
+    mx.random.seed(7)
+    prompts = [[int(t) for t in mx.random.randint(1, 400, (n,)).tolist()] for n in lengths]
+    count, num_draft = 30, 7
+    expect = [_greedy_ordinary(target, p, count + num_draft + 2) for p in prompts]
+    full = [p + e for p, e in zip(prompts, expect)]
+    rounds = [0]
+    original = draft.draft_distributions
+
+    def oracle(anchors, hidden, cache, n, rngs, temps, **kw):
+        tokens, laws = original(anchors, hidden, cache, n, rngs, temps, **kw)
+        # The generator's local cohort names each row's lane (history + anchor).
+        lanes = inspect.currentframe().f_back.f_locals.get("lanes")
+        assert lanes is not None and len(lanes) == len(tokens)
+        out_tokens, out_laws = [], []
+        for lane, row in zip(lanes, tokens):
+            seq = list(lane.history) + [lane.anchor]
+            truth = next(f for f in full if f[: len(seq)] == seq)[len(seq) : len(seq) + len(row)]
+            good = (rounds[0] * 3) % (len(row) + 1)
+            row = [truth[j] if j < good else (truth[j] + 1) % 500 for j in range(len(row))]
+            out_tokens.append(row)
+            one_hot = []
+            for token, law in zip(row, laws[len(out_laws)]):
+                q = np.zeros_like(np.asarray(law))
+                q[token] = 1.0
+                one_hot.append(q)
+            out_laws.append(one_hot)
+        return out_tokens, out_laws
+
+    draft.draft_distributions = oracle
+    batch = ExternalDraftBatchGenerator(target, draft_model=draft, binding="inkling2-dflash2-test",
+                                        num_draft=num_draft, prefill_step_size=16,
+                                        completion_batch_size=4)
+    try:
+        first = prompts[:1] if stagger else prompts
+        uids = list(batch.insert(first, max_tokens=[count] * len(first)))
+        got = {}
+        for step in range(3000):
+            if stagger and step == 2:
+                uids += batch.insert(prompts[1:], max_tokens=[count] * (len(prompts) - 1))
+            rounds[0] += 1
+            _, responses = batch.next()
+            for r in responses:
+                got.setdefault(r.uid, []).append(r.token)
+            if len(uids) == len(prompts) and not batch.lanes:
+                break
+        stats = batch.scheduler_stats
+        assert [got[u] for u in uids] == [e[:count] for e in expect]
+        assert stats.get("accepted_proposals", 0) > 0
+        assert stats.get("external_cohort_target_batched_standard_verify_rounds", 0) > 0
+    finally:
+        batch.close()
+
+
+def test_tiny_inkling2_engine_sampled_lanes_complete():
+    from mlx2.runtime.external_speculative import ExternalDraftBatchGenerator
+
+    target, draft, _ = _tiny_inkling_pair()
+    mx.random.seed(9)
+    prompts = [[int(t) for t in mx.random.randint(1, 400, (n,)).tolist()] for n in (24, 11)]
+    batch = ExternalDraftBatchGenerator(target, draft_model=draft, binding="inkling2-dflash2-test",
+                                        num_draft=7, prefill_step_size=16, completion_batch_size=4)
+    try:
+        uids = batch.insert(prompts, max_tokens=[12, 12],
+                            sampling_configs=[{"sampling_temp": 1.0}] * 2)
+        got = {}
+        for _ in range(800):
+            _, responses = batch.next()
+            for r in responses:
+                got.setdefault(r.uid, []).append(r.token)
+            if not batch.lanes:
+                break
+        assert [len(got[u]) for u in uids] == [12, 12]
+        assert all(0 <= t < 500 for u in uids for t in got[u])
+        assert _lane_visits(target) > 0
+    finally:
+        batch.close()
