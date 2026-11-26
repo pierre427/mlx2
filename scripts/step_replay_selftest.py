@@ -128,6 +128,31 @@ def inkling2(module, model_path, pos):
     return out
 
 
+def timeline(module):
+    """GPU timeline (P0): completed handlers file host-clock GPU intervals."""
+    if "timeline" not in getattr(module, "CAPABILITIES", ()):
+        return {"ok": None, "reason": "no timeline capability"}
+    module.timeline_drain()
+    module.set_timeline(True)
+    t0 = module.host_now()
+    a = mx.random.normal((1024, 1024))
+    for _ in range(4):
+        a = a @ a.T / 1024.0
+        mx.eval(a)
+    mx.synchronize()
+    t1 = module.host_now()
+    deadline = time.time() + 2.0
+    while module.timeline_pending() and time.time() < deadline:
+        time.sleep(0.005)
+    module.set_timeline(False)
+    entries = module.timeline_drain()
+    inside = [e for e in entries if t0 <= e[1] <= e[2] <= t1 + 0.05]
+    return {"ok": bool(entries) and len(inside) == len(entries) and all(e[3] == 4 for e in entries),
+            "entries": len(entries), "inside_host_window": len(inside),
+            "pending_after": module.timeline_pending(), "busy_s": sum(e[2] - e[1] for e in entries),
+            "window_s": t1 - t0}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -161,6 +186,7 @@ def main():
         receipt["inkling2"] = inkling2(module, args.model, args.pos)
     probe = mx.arange(6).reshape(2, 3)[:, 1:]
     mx.eval(probe)  # array_layout refuses unevaluated arrays (layout depends on it)
+    receipt["timeline"] = timeline(module)
     receipt["layout_probe"] = module.array_layout(probe)
     receipt["pipelines_filed"] = module.pipeline_count()
     receipt["finished"] = time.time()
@@ -169,7 +195,8 @@ def main():
           and receipt["abi"]["mlx_version"] == receipt["abi"]["runtime"] == mx.__version__
           and receipt["abi"]["api"] == 1
           and all(g["ok"] for g in receipt["graphs"].values())
-          and (not args.model or receipt["inkling2"].get("ok", False)))
+          and (not args.model or receipt["inkling2"].get("ok", False))
+          and receipt["timeline"]["ok"] is not False)
     receipt["hooks_and_recording_ok"] = ok
     Path(args.out).write_text(json.dumps(receipt, indent=1, default=str) + "\n")
     print(json.dumps({k: receipt[k] for k in ("hooks_and_recording_ok", "passed", "reason")}))

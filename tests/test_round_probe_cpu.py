@@ -736,3 +736,96 @@ def test_request_extra_fields_and_output_digest(monkeypatch):
     assert sent[0]["presence_penalty"] == 0 and sent[0]["temperature"] == 0
     assert row["text_sha256"] == __import__("hashlib").sha256(b"abc").hexdigest()
     assert block == {"enabled": True}
+
+
+class _FakeTimeline:
+    """Stands in for the native step_replay timeline (host seconds)."""
+
+    CAPABILITIES = ["timeline"]
+    MLX_VERSION = "test"
+
+    def __init__(self):
+        self.now = 100.0
+        self.entries = []
+        self.pending = 0
+        self.recordings = 0
+
+    def host_now(self):
+        self.now += 0.001
+        return self.now
+
+    def timeline_drain(self):
+        taken, self.entries = self.entries, []
+        return taken
+
+    def timeline_pending(self):
+        return self.pending
+
+    def timeline_dropped(self):
+        return 0
+
+    def set_timeline(self, on):
+        pass
+
+    def gpu_identity(self):
+        return "fake"
+
+
+def test_gpu_timeline_attribution_splits_idle_inside_and_outside_syncs(probe, monkeypatch):
+    fake = _FakeTimeline()
+    monkeypatch.setattr(round_probe, "_native", fake)
+    round_probe._gpu.update(enabled=True)
+    # One round, driven by hand: [t0, t1] = [10.0, 10.010]; one sync window
+    # [10.004, 10.009]; GPU busy [10.001, 10.003] (during host Python) and
+    # [10.005, 10.008] (inside the sync); 10.008 -> 10.009 is completion tail.
+    with round_probe._lock:
+        round_probe._pending.append(("r", 10.0, 10.010, ((10.004, 10.009),)))
+    fake.entries = [(10.0005, 10.001, 10.003, 4), (10.0045, 10.005, 10.008, 4),
+                    (10.0046, 10.0, 10.0, 5)]  # an errored buffer is skipped
+    status = round_probe.status()
+    row = status["routes"]["r"]
+    assert row["gpu_rounds"] == 1
+    assert row["gpu_wall_ns"] == pytest.approx(10_000_000, abs=2)
+    assert row["gpu_busy_ns"] == pytest.approx(5_000_000, abs=2)
+    assert row["gpu_eval_ns"] == pytest.approx(5_000_000, abs=2)
+    assert row["gpu_eval_busy_ns"] == pytest.approx(3_000_000, abs=2)
+    assert row["gpu_eval_tail_ns"] == pytest.approx(1_000_000, abs=2)
+    assert row["gpu_command_buffers"] == 2
+    shares = harness.gpu_per_round(row)
+    assert shares["idle_share"] == pytest.approx(0.5)
+    assert shares["eval_idle_less_tail_share"] == pytest.approx(0.1)  # (5-3-1)/10
+    assert shares["outside_eval_idle_share"] == pytest.approx(0.3)   # (5-2)/10
+    assert status["gpu_timeline"]["errored"] == 1
+
+
+def test_gpu_timeline_waits_for_unsettled_rounds(probe, monkeypatch):
+    fake = _FakeTimeline()
+    monkeypatch.setattr(round_probe, "_native", fake)
+    round_probe._gpu.update(enabled=True)
+    fake.pending = 1  # a command buffer has not completed yet
+    with round_probe._lock:
+        round_probe._pending.append(("r", fake.now, fake.now + 0.001, ()))
+    assert "gpu_rounds" not in round_probe.status()["routes"].get("r", {}) or \
+        round_probe.status()["routes"]["r"]["gpu_rounds"] == 0
+    fake.pending = 0
+    assert round_probe.status()["routes"]["r"]["gpu_rounds"] == 1
+
+
+def test_round_scope_records_windows_with_native(probe, monkeypatch):
+    fake = _FakeTimeline()
+    monkeypatch.setattr(round_probe, "_native", fake)
+    with round_probe.scope("r") as scope:
+        mx.eval(mx.array([1.0]) + 1)
+        scope.tokens(1)
+    (route, t0, t1, windows), = list(round_probe._pending)
+    assert route == "r" and t0 < t1 and len(windows) == 1
+    assert t0 <= windows[0][0] < windows[0][1] <= t1
+
+
+def test_probe_delta_carries_gpu_keys():
+    before = {"enabled": True, "routes": {"r": {"rounds": 1, "gpu_rounds": 1, "gpu_wall_ns": 5}}}
+    after = {"enabled": True, "routes": {"r": {"rounds": 3, "gpu_rounds": 2, "gpu_wall_ns": 9}}}
+    delta = harness.probe_delta(after, before)
+    assert delta["r"]["gpu_rounds"] == 1 and delta["r"]["gpu_wall_ns"] == 4
+    plain = harness.probe_delta({"enabled": True, "routes": {"r": {"rounds": 2}}}, {})
+    assert "gpu_rounds" not in plain["r"]

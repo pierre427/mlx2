@@ -215,6 +215,10 @@ def probe_delta(after, before):
         delta = {key: int(row.get(key) or 0) - int(base.get(key) or 0)
                  for key in ("rounds", "tokens", "wall_ns", "encode_submit_ns",
                              "wait_ns", "host_python_ns", "syncs", "blocking_syncs")}
+        # Replay feasibility P0 (MLX2_ROUND_PROBE_GPU): GPU timeline counters.
+        for key in GPU_KEYS:
+            if key in row:
+                delta[key] = int(row.get(key) or 0) - int(base.get(key) or 0)
         for group in ("explicit_syncs", "implicit_syncs"):
             kinds = {}
             for kind, value in (row.get(group) or {}).items():
@@ -241,6 +245,40 @@ def add_deltas(total, delta):
     return total
 
 
+GPU_KEYS = (
+    "gpu_rounds", "gpu_wall_ns", "gpu_busy_ns", "gpu_eval_ns", "gpu_eval_busy_ns",
+    "gpu_eval_tail_ns", "gpu_command_buffers", "recorded_rounds",
+)
+
+
+def gpu_per_round(row):
+    """P0 shares from the native GPU timeline (round_probe MLX2_ROUND_PROBE_GPU).
+
+    ``idle_share``: GPU idle over attributed round wall time. ``eval_idle_less_tail_share``:
+    idle inside the round's sync windows minus completion latency, the part replaying the
+    command stream could remove (conservative P0 bound). ``outside_eval_idle_share``: idle
+    during host Python, removable only if graph construction moves into the recorded program.
+    """
+    rounds, wall = row.get("gpu_rounds") or 0, row.get("gpu_wall_ns") or 0
+    if not rounds or not wall:
+        return None
+    idle = wall - row.get("gpu_busy_ns", 0)
+    eval_idle = row.get("gpu_eval_ns", 0) - row.get("gpu_eval_busy_ns", 0)
+    removable = max(0, eval_idle - row.get("gpu_eval_tail_ns", 0))
+    return {
+        "rounds": rounds, "recorded_rounds": row.get("recorded_rounds", 0),
+        "wall_ms": round(wall / rounds / 1e6, 4),
+        "busy_ms": round(row.get("gpu_busy_ns", 0) / rounds / 1e6, 4),
+        "eval_ms": round(row.get("gpu_eval_ns", 0) / rounds / 1e6, 4),
+        "eval_idle_ms": round(eval_idle / rounds / 1e6, 4),
+        "eval_tail_ms": round(row.get("gpu_eval_tail_ns", 0) / rounds / 1e6, 4),
+        "command_buffers": round(row.get("gpu_command_buffers", 0) / rounds, 3),
+        "idle_share": round(idle / wall, 4),
+        "eval_idle_less_tail_share": round(removable / wall, 4),
+        "outside_eval_idle_share": round(max(0, idle - eval_idle) / wall, 4),
+    }
+
+
 def per_round(row):
     rounds = row.get("rounds") or 0
     if not rounds:
@@ -248,15 +286,19 @@ def per_round(row):
     ms = lambda key: round(row.get(key, 0) / rounds / 1e6, 4)  # noqa: E731
     calls = lambda group: round(sum(v["calls"] for k, v in row.get(group, {}).items()  # noqa: E731
                                     if k != "async_eval") / rounds, 3)
-    return {"wall_ms": ms("wall_ns"), "encode_submit_ms": ms("encode_submit_ns"),
-            "wait_ms": ms("wait_ns"), "host_python_ms": ms("host_python_ns"),
-            "tokens": round(row.get("tokens", 0) / rounds, 4),
-            "syncs": round(row.get("syncs", 0) / rounds, 3),
-            "blocking_syncs": round(row.get("blocking_syncs", 0) / rounds, 3),
-            "explicit_syncs": calls("explicit_syncs"), "implicit_syncs": calls("implicit_syncs"),
-            "by_kind": {kind: round(v["calls"] / rounds, 3)
-                        for group in ("explicit_syncs", "implicit_syncs")
-                        for kind, v in sorted(row.get(group, {}).items())}}
+    out = {"wall_ms": ms("wall_ns"), "encode_submit_ms": ms("encode_submit_ns"),
+           "wait_ms": ms("wait_ns"), "host_python_ms": ms("host_python_ns"),
+           "tokens": round(row.get("tokens", 0) / rounds, 4),
+           "syncs": round(row.get("syncs", 0) / rounds, 3),
+           "blocking_syncs": round(row.get("blocking_syncs", 0) / rounds, 3),
+           "explicit_syncs": calls("explicit_syncs"), "implicit_syncs": calls("implicit_syncs"),
+           "by_kind": {kind: round(v["calls"] / rounds, 3)
+                       for group in ("explicit_syncs", "implicit_syncs")
+                       for kind, v in sorted(row.get(group, {}).items())}}
+    gpu = gpu_per_round(row)
+    if gpu is not None:
+        out["gpu_timeline"] = gpu
+    return out
 
 
 # ------------------------------------------------------------- GPU trace --
