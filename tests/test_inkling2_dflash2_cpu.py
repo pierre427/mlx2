@@ -1004,6 +1004,8 @@ def test_tiny_inkling2_engine_sampled_lanes_equal_each_lane_served_alone():
 
 
 @pytest.mark.parametrize("kernels", [{}, {"verify_deferred_commit": True},
+                                     {"batched_lane_attention": True},
+                                     {"batched_lane_attention": True, "verify_deferred_commit": True},
                                      {"sink_sdpa": True, "sink_slot": True, "fuse_controllers": True,
                                       "fuse_residual": True, "fuse_sconv": True,
                                       "fuse_attention": True, "verify_deferred_commit": True}])
@@ -1069,6 +1071,9 @@ def test_tiny_inkling2_engine_partial_accepts_across_lanes_greedy_exact(kernels,
         stats = batch.scheduler_stats
         assert [got[u] for u in uids] == [e[:count] for e in expect]
         assert stats.get("accepted_proposals", 0) > 0
+        if kernels.get("batched_lane_attention"):
+            assert sum(layer.self_attn.__dict__.get("segmented_lane_counts", {}).get(
+                "batched_visits", 0) for layer in target.model.layers) > 0
         assert stats.get("external_cohort_target_batched_standard_verify_rounds", 0) > 0
     finally:
         batch.close()
@@ -1211,5 +1216,49 @@ def test_tiny_engine_ready_drain_all_keeps_full_cohorts_greedy_exact():
                 break
         assert [got[u] for u in uids] == expect
         assert batch.scheduler_stats.get("external_decode_draining_lanes_skipped", 0) == 0
+    finally:
+        batch.close()
+
+
+def test_dflash2_route_accepts_reversible_cost_handoff(tmp_path):
+    from mlx2.adapters.inkling2 import Inkling2Adapter
+
+    path = tmp_path / "draft"
+    path.mkdir()
+    (path / "config.json").write_text(json.dumps({"architectures": ["DFlash2DraftModel"]}))
+    external = {"draft_model": str(path), "num_draft": 7,
+                "cost_per_commit_handoff": {"reversible": True}}
+    assert object.__new__(Inkling2Adapter)._select_dflash2_route(external)
+    assert external["cost_per_commit_handoff"] == {"reversible": True}
+
+
+def test_tiny_engine_reversible_handoff_lanes_greedy_exact():
+    from mlx2.runtime.external_speculative import ExternalDraftBatchGenerator
+
+    target, draft, _ = _tiny_inkling_pair()
+    mx.random.seed(7)
+    prompts = [[int(t) for t in mx.random.randint(1, 400, (n,)).tolist()] for n in (24, 9, 17, 30)]
+    count = 20
+    expect = [_greedy_ordinary(target, p, count) for p in prompts]
+    batch = ExternalDraftBatchGenerator(target, draft_model=draft, binding="inkling2-dflash2-test",
+                                        num_draft=7, prefill_step_size=16, completion_batch_size=4,
+                                        ready_drain="all",
+                                        cost_per_commit_handoff={"reversible": True,
+                                                                 "ordinary_samples": 1,
+                                                                 "speculative_samples": 1,
+                                                                 "loss_decisions": 1,
+                                                                 "settle_rounds": 0})
+    try:
+        uids = list(batch.insert(prompts, max_tokens=[count] * len(prompts)))
+        got = {}
+        for _ in range(1500):
+            _, responses = batch.next()
+            for r in responses:
+                got.setdefault(r.uid, []).append(r.token)
+            if not batch.lanes:
+                break
+        assert [got[u] for u in uids] == expect
+        stats = batch.scheduler_stats
+        assert stats.get("external_cost_park_events", 0) > 0  # the random drafter loses: parks
     finally:
         batch.close()

@@ -1272,6 +1272,13 @@ class Attention(nn.Module):
         so per-lane offsets, ring layout, deferred commits and rollback
         records are the B1 path's. Padded rows get zeros.
         """
+        if (self.__dict__.get("_batched_lanes") and not self.__dict__.get("_kv_q8")
+                and type(kv) is _segmented_views()[0]
+                and not any(getattr(row, "deferred_rows", 0) for row in kv.rows)):
+            # Sliding visits only: their histories are window-bounded, so the
+            # transient batch copies at most max_size rows a lane. Global
+            # visits (whole-context histories) stay per lane, read in place.
+            return self._attend_lanes_batched(kv, x, q, r, gate, sink, k, v)
         deferred = []
         counts = self.__dict__.setdefault("segmented_lane_counts", {})
 
@@ -1292,6 +1299,77 @@ class Attention(nn.Module):
         out = kv.row_attention(lane, axis=1)
         counts["visits"] = counts.get("visits", 0) + 1
         return (out,) if deferred else out
+
+    @staticmethod
+    def _lane_history(row):
+        """A lane's pre-append K/V in time order, as its B1 verify reads it:
+        a ring's last ``min(offset, max_size - 1)`` rows (``_update_concat``
+        keeps that many before appending), a plain cache's whole fill."""
+        if row.keys is None or not row.offset:
+            return None
+        if type(row) is RotatingKVCache:
+            keep = min(int(row.offset), row.max_size - 1)
+            keys = row._temporal_order(row.keys)[..., -keep:, :] if keep else None
+            values = row._temporal_order(row.values)[..., -keep:, :] if keep else None
+            return None if keys is None else (keys, values)
+        n = int(row.offset)
+        return row.keys[..., :n, :], row.values[..., :n, :]
+
+    def _attend_lanes_batched(self, kv, x, q, r, gate, sink, k, v):
+        """``inkling2_batched_lane_attention`` (default off): the lanes'
+        attention in one launch per visit.
+
+        State is appended as on the per-lane path: each lane's own ring takes
+        its valid rows through its B1 append (deferred ring commits and
+        rollback records unchanged); the values are near-exact (later layers'
+        K/V follow hidden states that carry the attention's float
+        differences). Sliding visits only (the caller's gate). Compute reads a
+        transient left-padded ``BatchKVCache`` of every lane's pre-append
+        window (what a ring's B1 verify sees) and appends the batched rows to it, so
+        ``_attend`` runs once with per-lane offsets as left padding (window
+        crop, relative bias and log-tau positions are per lane). Near-exact
+        against the per-lane path: split-K's split count follows the batch.
+        Padded rows get zeros."""
+        lengths = list(kv._step_lengths)
+        width = max(lengths)
+        hist = [self._lane_history(row) for row in kv.rows]
+
+        def append(index, row, valid):
+            ki, vi = k[index : index + 1, :, :valid], v[index : index + 1, :, :valid]
+            if self._deferred_update(row, ki, vi) is None:
+                row.update_and_fetch(ki, vi)
+            return mx.zeros((1, valid, 1), dtype=x.dtype)
+
+        kv.row_attention(append, axis=1)
+        sizes = [0 if h is None else int(h[0].shape[2]) for h in hist]
+        longest = max(sizes)
+        view = BatchKVCache([longest - n for n in sizes])
+        if longest:
+            ref = next(h for h in hist if h is not None)
+            parts_k, parts_v = [], []
+            for h, n in zip(hist, sizes):
+                pad = longest - n
+                shape = (1, ref[0].shape[1], pad, ref[0].shape[3])
+                pk = [mx.zeros(shape, ref[0].dtype)] if pad else []
+                pv = [mx.zeros((1, ref[1].shape[1], pad, ref[1].shape[3]), ref[1].dtype)] if pad else []
+                parts_k.append(mx.concatenate(pk + ([h[0]] if h is not None else []), axis=2))
+                parts_v.append(mx.concatenate(pv + ([h[1]] if h is not None else []), axis=2))
+            view.keys = mx.concatenate(parts_k, axis=0)
+            view.values = mx.concatenate(parts_v, axis=0)
+            view._idx = longest
+            view.offset = mx.array(sizes)
+        out = self._attend(x, view, q, r, gate, sink, k, v)
+        packed = isinstance(out, tuple)
+        if packed:
+            (out,) = out
+        valid = mx.arange(width)[None, :] < mx.array(lengths)[:, None]
+        out = mx.where(valid[..., None], out, mx.zeros_like(out))
+        counts = self.__dict__.setdefault("segmented_lane_counts", {})
+        counts["batched_visits"] = counts.get("batched_visits", 0) + 1
+        counts["visits"] = counts.get("visits", 0) + 1
+        counts["lanes"] = counts.get("lanes", 0) + len(lengths)
+        counts["rows"] = counts.get("rows", 0) + sum(lengths)
+        return (out,) if packed else out
 
     def _finish(self, out, gate, b, length, dtype):
         return self._output(self._gate(out, gate, b, length, dtype))
@@ -2091,6 +2169,7 @@ class Model(nn.Module):
                           prefill_mask_bf16_budget=False, prefill_mask_with_sink=False,
                           head_kernel_wide=False, prefill_tiled_attention=False,
                           attn_decode_kernel=False, verify_deferred_commit=False,
+                          batched_lane_attention=False,
                           visit_length_check=False, moe_panel_kernel=False, moe_rows_kernel=False,
                           moe_nax_mxfp8=False, prefill_handover=False, pass_messages=False,
                           stage_a_kernel=False, gate_merge=False, attn_output_kernel=False,
@@ -2217,6 +2296,9 @@ class Model(nn.Module):
             # inkling2_verify_deferred_commit: ring visits (attention) and the
             # four conv histories (decoder layer) commit only kept rows.
             object.__setattr__(layer.self_attn, "_deferred_commit", bool(verify_deferred_commit))
+            # inkling2_batched_lane_attention: multi-lane verify attention in
+            # one launch per visit (Attention._attend_lanes_batched).
+            object.__setattr__(layer.self_attn, "_batched_lanes", bool(batched_lane_attention))
             object.__setattr__(layer, "_deferred_commit", bool(verify_deferred_commit))
             # The MTPLX launch-count set (default off; each proven bitwise
             # per shape on first use, see library_kernels).
@@ -2285,6 +2367,7 @@ class Model(nn.Module):
              "prefill_tiled_attention": bool(prefill_tiled_attention),
              "attn_decode_kernel": bool(attn_decode_kernel),
              "verify_deferred_commit": bool(verify_deferred_commit),
+             "batched_lane_attention": bool(batched_lane_attention),
              "visit_length_check": bool(visit_length_check),
              "pass_messages": bool(pass_messages), "stage_a_kernel": bool(stage_a_kernel),
              "gate_merge": bool(gate_merge), "attn_output_kernel": bool(attn_output_kernel),

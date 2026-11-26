@@ -573,6 +573,17 @@ KERNEL_OPTIONS = {
     # (tokens and committed state; tests/test_inkling2_deferred_commit_cpu.py).
     # Counters: kernel_counters["verify_deferred_commit"].
     "inkling2_verify_deferred_commit": "verify_deferred_commit",
+    # Multi-lane verify attention in one launch per visit (2026-11-26, Pierre:
+    # "batched attention, then width gating"; default off, unqualified). With
+    # several lanes in one verify (HybridVerifyRows batched_rings), each lane's
+    # own cache still takes its rows through its B1 append (the same appends;
+    # values near-exact); the 40 sliding visits' attention reads one transient
+    # left-padded BatchKVCache of the lanes' pre-append windows
+    # (Attention._attend_lanes_batched) instead of one _attend per lane; the 8
+    # global visits (whole-context histories) stay per lane, read in place.
+    # Near-exact against the per-lane path (split-K's split count follows the
+    # batch). Declines to the per-lane path with kv_q8 or pending deferred rows.
+    "inkling2_batched_lane_attention": "batched_lane_attention",
     # Visit length check (MTPLX #710, 2026-11-23; default off): before every
     # forward, every visit's B1 KV plane must hold the same committed length,
     # so an APCv2 restore that landed visits at different positions fails

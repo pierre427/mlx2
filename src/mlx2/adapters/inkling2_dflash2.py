@@ -52,6 +52,11 @@ PROFILE = "inkling2-apcv2-dflash2"
 # implemented on the chain paths only.
 ALLOWED_POLICY_KEYS = frozenset({
     "draft_model", "num_draft", "adaptive_verification", "proposal_composition",
+    # Reversible cost-per-commit handoff (2026-11-26, opt-in, unqualified):
+    # the engine parks a session's speculation where it measurably loses to
+    # plain decode at its width and re-probes later (width priors), the
+    # measured form of width gating for multi-lane DFlash2.
+    "cost_per_commit_handoff",
 })
 EMBED_NORM_OPTION = "inkling2_dflash2_embed_norm"
 # Draft depth (3..num_draft) while more than one lane is active (opt-in, 2026-11-26): the
