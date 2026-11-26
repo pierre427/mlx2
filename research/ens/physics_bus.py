@@ -568,47 +568,50 @@ class EvalCells:
             raise SystemExit(3)
 
 
-def evaluate(model, port, tok, voc, facts, titles, args, cells: EvalCells):
+def evaluate(model, port, tok, voc, facts, titles, args, cells: EvalCells, sets=None, text=True):
     """Adapter ceiling on mock records over outside titles (train / held questions): answers generated freely and
     parsed (physics_qa.score); the base model on the same questions (no record); records rotated to another row
-    (if answers stay correct they did not come from the record); held-text drift. Example generations are kept."""
+    (if answers stay correct they did not come from the record); held-text drift. Example generations are kept.
+    sets (wording_eval): [(name, templates, task)] - one task per set, and every set of a task draws the same papers
+    (paired across wordings); default: the train and held question sets over all tasks, as trained runs use."""
     concepts = voc.values["concept"]
-    for name, temps in (("train_questions", T_TRAIN), ("held_questions", T_HELD)):
-        for task in RETRIEVAL + REASONING:
-            key = f"{name}.{task}"
-            if cells.done(key):
-                continue
-            rng = random.Random(70_000 + args.seed + hash_task(name, task))
-            rows = []
-            while len(rows) < args.eval_n:
-                k = 1 if task in RETRIEVAL else 2
-                ps = balance_same_field(task, [mock_paper(titles, voc, rng) for _ in range(k)], rng, voc)
-                r = make_row(tok, voc, task, ps, rng, temps)
-                if r is not None:
-                    rows.append(r)
-            tally, ex = {}, None
-            for sub in eval_batches(rows):
-                cells.check()
-                prompts = [r[0] for r in sub]
-                M = mx.array([r[2] + [-1] * (2 - len(r[2])) for r in sub])
-                R = {s: mx.array([r[3][s] + [0] * (2 - len(r[3][s])) for r in sub]) for s in SLOTS}
-                Rs = {s: mx.concatenate([R[s][1:], R[s][:1]]) for s in SLOTS} if len(sub) > 1 else None
-                metas = [r[4] for r in sub]
-                mn = QA.MAX_NEW[task]
-                outs = {"base": generate(model, tok, None, prompts, M, None, mn),
-                        "record": generate(model, tok, port, prompts, M, payload_from_ids(model, R), mn)}
-                if Rs is not None:
-                    outs["swapped_record"] = generate(model, tok, port, prompts, M, payload_from_ids(model, Rs), mn)
-                for arm, texts in outs.items():
-                    for sc in score_batch([task] * len(sub), texts, metas, concepts):
-                        for kk, v in sc.items():
-                            tally[f"{arm}.{kk}"] = tally.get(f"{arm}.{kk}", 0) + int(v)
-                if ex is None:
-                    ex = [{"q": tok.t.decode(prompts[i]), "record": outs["record"][i], "base": outs["base"][i]}
-                          for i in range(min(2, len(sub)))]
-            cells.put(key, {k: round(v / len(rows), 4) for k, v in sorted(tally.items())} | {"n": len(rows),
-                                                                                           "examples": ex})
-    if not cells.done("held_text"):
+    plan = [(name, temps, task, name) for name, temps in (("train_questions", T_TRAIN), ("held_questions", T_HELD))
+            for task in RETRIEVAL + REASONING] if sets is None else [(n, tp, tk, "wording") for n, tp, tk in sets]
+    for name, temps, task, seed_name in plan:
+        key = f"{name}.{task}"
+        if cells.done(key):
+            continue
+        rng = random.Random(70_000 + args.seed + hash_task(seed_name, task))
+        rows = []
+        while len(rows) < args.eval_n:
+            k = 1 if task in RETRIEVAL else 2
+            ps = balance_same_field(task, [mock_paper(titles, voc, rng) for _ in range(k)], rng, voc)
+            r = make_row(tok, voc, task, ps, rng, temps)
+            if r is not None:
+                rows.append(r)
+        tally, ex = {}, None
+        for sub in eval_batches(rows):
+            cells.check()
+            prompts = [r[0] for r in sub]
+            M = mx.array([r[2] + [-1] * (2 - len(r[2])) for r in sub])
+            R = {s: mx.array([r[3][s] + [0] * (2 - len(r[3][s])) for r in sub]) for s in SLOTS}
+            Rs = {s: mx.concatenate([R[s][1:], R[s][:1]]) for s in SLOTS} if len(sub) > 1 else None
+            metas = [r[4] for r in sub]
+            mn = QA.MAX_NEW[task]
+            outs = {"base": generate(model, tok, None, prompts, M, None, mn),
+                    "record": generate(model, tok, port, prompts, M, payload_from_ids(model, R), mn)}
+            if Rs is not None:
+                outs["swapped_record"] = generate(model, tok, port, prompts, M, payload_from_ids(model, Rs), mn)
+            for arm, texts in outs.items():
+                for sc in score_batch([task] * len(sub), texts, metas, concepts):
+                    for kk, v in sc.items():
+                        tally[f"{arm}.{kk}"] = tally.get(f"{arm}.{kk}", 0) + int(v)
+            if ex is None:
+                ex = [{"q": tok.t.decode(prompts[i]), "record": outs["record"][i], "base": outs["base"][i]}
+                      for i in range(min(2, len(sub)))]
+        cells.put(key, {k: round(v / len(rows), 4) for k, v in sorted(tally.items())} | {"n": len(rows),
+                                                                                       "examples": ex})
+    if text and not cells.done("held_text"):
         held = LB.text_windows(tok, "held")
         rng = random.Random(80_000 + args.seed)
         tw = [held[rng.randrange(len(held))] for _ in range(128)]

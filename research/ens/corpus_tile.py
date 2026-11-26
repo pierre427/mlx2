@@ -482,9 +482,11 @@ def train(args) -> int:
 ARMS = (("base", None, False), ("tile", True, False), ("lora_only", True, True))
 
 
-def nll_eval(W, tile, args, n=64):
+def nll_eval(W, tile, args, n=64, fwd=None, chunk_batch=4, text_batch=16):
     """Mean next-token NLL (positions >= 1) on chunks of trained and never-trained documents and on held ordinary text:
-    base, tile, and the tile with its memory emptied (lora_only: the LoRA's share of any gain)."""
+    base, tile, and the tile with its memory emptied (lora_only: the LoRA's share of any gain). fwd: the forward with
+    the contract of forward() below (default: this module's); H56 side tiles pass side_tile.forward."""
+    fwd = forward if fwd is None else fwd
     model, tok = W["model"], W["tok"]
     res = {}
     rng = random.Random(70_000 + args.seed)
@@ -501,12 +503,12 @@ def nll_eval(W, tile, args, n=64):
             continue
         pick = rng.sample(ch, min(n, len(ch)))
         acc, cnt = collections.Counter(), 0.0
-        for i in range(0, len(pick), 4):
-            sub = pick[i:i + 4]
+        for i in range(0, len(pick), chunk_batch):
+            sub = pick[i:i + chunk_batch]
             T = mx.array([w[:-1] for _, w, _ in sub]); Y = mx.array([w[1:] for _, w, _ in sub])
             Wm = mx.array([[1.0] * (m - 1) + [0.0] * (CHUNK - m + 1) for _, _, m in sub])
             for arm, t, zv in ARMS:
-                lg, _ = forward(model, T, tile if t else None, zero_values=zv)
+                lg, _ = fwd(model, T, tile if t else None, zero_values=zv)
                 ce = nn.losses.cross_entropy(lg.astype(mx.float32), Y, reduction="none")
                 acc[arm] += float(mx.sum(ce * Wm).item())
             cnt += float(mx.sum(Wm).item())
@@ -517,11 +519,11 @@ def nll_eval(W, tile, args, n=64):
     text = text_chunks(tok, "held", n=128, seed=1)
     acc = collections.Counter()
     k = 0
-    for i in range(0, len(text), 16):
-        T = mx.array(text[i:i + 16])
-        k += T[:, 1:].size
+    for i in range(0, len(text), text_batch):
+        T = mx.array(text[i:i + text_batch])
+        k += T[:, 1:].size                                     # token-weighted (main d52f055d9); batch size settable
         for arm, t, zv in ARMS:
-            lg, _ = forward(model, T, tile if t else None, zero_values=zv)
+            lg, _ = fwd(model, T, tile if t else None, zero_values=zv)
             acc[arm] += float(nn.losses.cross_entropy(lg[:, :-1].astype(mx.float32), T[:, 1:], reduction="sum").item())
     if not k:
         raise ValueError("ordinary-text evaluation needs at least one complete held window")
@@ -558,7 +560,7 @@ def evaluate(args) -> int:
     return 0
 
 
-def main(argv=None):
+def parser():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
     t = sub.add_parser("train")
@@ -593,7 +595,17 @@ def main(argv=None):
     e.add_argument("--questions", default=None)
     e.add_argument("--gate-gib", type=float, default=24.0)
     e.add_argument("--no-memory-gate", action="store_true")
-    a = p.parse_args(argv)
+    return p
+
+
+def train_defaults() -> dict:
+    """The train subcommand's defaults (for loading runs whose args.json predates a later argument)."""
+    d = vars(parser().parse_args(["train", "--corpus", "-", "--out", "-"]))
+    return {k: v for k, v in d.items() if k not in ("cmd", "corpus", "out")}
+
+
+def main(argv=None):
+    a = parser().parse_args(argv)
     sys.exit(train(a) if a.cmd == "train" else evaluate(a))
 
 

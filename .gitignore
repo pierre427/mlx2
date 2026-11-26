@@ -39,3 +39,8 @@ qualification/runs/**/runtime/reasoning-key
 # EXL3 encoder research: compiled Viterbi cache.
 scripts/research/ds41_exl3/.build/
 research/ens/evidence/m5-queue-*.log
+
+# ENS evidence: never commit weights or resume state (2026-11-25: 1.1 GB slipped into 7ea1e9790)
+research/ens/evidence/**/*.safetensors
+research/ens/evidence/**/resume/
+research/ens/evidence/**/resume.*/

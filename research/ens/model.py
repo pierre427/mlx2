@@ -49,6 +49,14 @@ class CoreConfig:
     loop_gain: str = ""              # H45b (Pierre 2026-11-24): "" plain loop; "decay": round k's update scaled by
                                      # gamma^(k-1); "decaygain": also by (c_k / c_(k-1))^kappa, c = attention
                                      # concentration (sharpening). Needs uniform passes (max_passes).
+    loop_read: str = ""              # H45c (LoopRes, Pierre 2026-11-25): "" the H45 residual-stream loop; "loopres":
+                                     # no residual stream in the loop body, each sub-layer's input is a softmax mix
+                                     # over the prelude output and block outputs (content + role keys), as the
+                                     # paper; "loopres_content": content scores only (its ablation); "loopres_add":
+                                     # residual-preserving variant (mix of states, updates added to H45's stream;
+                                     # kept for reference, not an H45c arm)
+    loop_key_dim: int = 32           # H45c role-key width
+    loop_key_seed: int = 0           # H45c role keys are drawn from this explicit key (the global RNG is untouched)
 
     def to_json(self) -> dict:
         d = asdict(self)
@@ -74,6 +82,20 @@ class Block(nn.Module):
         self.n2 = nn.RMSNorm(cfg.d, eps=cfg.norm_eps)
         self.up = nn.Linear(cfg.d, 2 * cfg.ffn, bias=False)
         self.down = nn.Linear(cfg.ffn, cfg.d, bias=False)
+
+    def attn_update(self, x):
+        """H45c: the attention sub-layer's update for input x (what __call__ adds to h), fused attention."""
+        B, T, D = x.shape
+        hd = D // self.heads
+        q, k, v = mx.split(self.qkv(self.n1(x)), 3, axis=-1)
+        q, k, v = (t.reshape(B, T, self.heads, hd).transpose(0, 2, 1, 3) for t in (q, k, v))
+        a = mx.fast.scaled_dot_product_attention(q, k, v, scale=hd ** -0.5, mask="causal")
+        return self.o(a.transpose(0, 2, 1, 3).reshape(B, T, D))
+
+    def mlp_update(self, x):
+        """H45c: the MLP sub-layer's update for input x."""
+        g, u = mx.split(self.up(self.n2(x)), 2, axis=-1)
+        return self.down(nn.silu(g) * u)
 
     def __call__(self, h, lora=None, conc=False, qmask=None):
         """conc=True (H45b): explicit attention, also returning each row's attention concentration, the mean over
@@ -219,6 +241,19 @@ def _gather_rows(h, idx):
 
 GAMMA0_LOGIT = math.log(0.9 / 0.1)                     # H45b: gamma's neutral value 0.9
 KAPPA_SCALE = 30.0                                      # H45b: kappa = KAPPA_SCALE * loop_kappa_raw
+LOOP_READS = ("loopres", "loopres_content", "loopres_add")   # H45c
+
+
+def loopres_roles(nb: int) -> dict:
+    """H45c role-key indices for a loop body of nb blocks. Roles are relative, never the absolute pass index:
+    pre (the state entering the body on pass 1), prev j (body block j's output on the previous pass), cur j (block
+    j's output earlier in this pass), partial (u_i, block i's partial sum after its attention, read by its MLP).
+    Every pass >= 2 sees the same roles, so a core trained to 3 passes runs any count. Deviation from LoopRes,
+    whose loop-aware keys name a source's absolute loop: those have no key for a pass never trained, and H45
+    evaluates unseen depths to 6. The role keys (and queries) get AdamW weight decay 0.01 in loop_train like every
+    other trained parameter, unlike the paper's description; kept so the arms share one optimizer rule."""
+    return {"pre": 0, **{f"prev{j}": 1 + j for j in range(nb)}, **{f"cur{j}": 1 + nb + j for j in range(nb)},
+            "partial": 1 + 2 * nb}
 
 
 class Core(nn.Module):
@@ -245,6 +280,18 @@ class Core(nn.Module):
             self.loop_gamma_off = mx.array([0.0])
             if cfg.loop_gain == "decaygain":
                 self.loop_kappa_raw = mx.array([0.0])
+        if cfg.loop_read:
+            if cfg.loop_read not in LOOP_READS or not cfg.loop_body or cfg.loop_gain:
+                raise ValueError(f"loop_read needs a plain loop body (no loop_gain) and is one of {LOOP_READS}")
+            nb = cfg.loop_body[1] - cfg.loop_body[0]
+            # one zero query per looped sub-layer (attention, MLP of each body block) plus the readout: an untrained
+            # read is a uniform mix over its sources, as in LoopRes. Role keys ~ N(0, 1) as in the paper, drawn from
+            # an explicit key so the backbone init and the global RNG stream equal the plain loop arm's at a seed.
+            self.loopres_qc = mx.zeros((2 * nb + 1, cfg.d))
+            if cfg.loop_read != "loopres_content":
+                self.loopres_qr = mx.zeros((2 * nb + 1, cfg.loop_key_dim))
+                self.loopres_keys = mx.random.normal((len(loopres_roles(nb)), cfg.loop_key_dim),
+                                                     key=mx.random.key(cfg.loop_key_seed))
 
     def __call__(self, tokens, bus: Optional[BusCall] = None, *, check_finite: bool = False, passes=None,
                  max_passes: Optional[int] = None):
@@ -353,6 +400,8 @@ class Core(nn.Module):
             return self._looped_gain(tokens, P, bus, check_finite, return_gains)
         if return_gains:
             raise ValueError("return_gains needs a loop_gain core")
+        if self.cfg.loop_read:
+            return self._looped_res(tokens, passes, P, bus, check_finite, return_states)
         bb = self.backbone
         h = bb.embed_tokens(tokens)
         if bus is not None and self._site_after.get(-1) == bus.site:
@@ -376,6 +425,79 @@ class Core(nn.Module):
             sel = mx.where((passes >= k)[:, None, None], h, sel)
             if return_states:
                 states.append(bb.norm(tail(h)))
+        logits = bb.head(bb.norm(tail(sel)))
+        return (logits, mx.stack(states)) if return_states else logits
+
+    def _loopres_read(self, qi, srcs):
+        """Softmax mix over srcs [(role, state, 1 / rms(state))]: score = q_content . RMSNorm(v) [+ q_role . k_role],
+        per row and position. One source returns it unchanged."""
+        if len(srcs) == 1:
+            return srcs[0][1]
+        qc = self.loopres_qc[qi]
+        qr = self.loopres_qr[qi] @ self.loopres_keys.T if "loopres_qr" in self else None   # (n_roles,)
+        scores = [(v @ qc) * inv + (qr[role] if qr is not None else 0.0) for role, v, inv in srcs]
+        w = mx.softmax(mx.stack(scores, axis=-1), axis=-1)                                    # (B, T, n)
+        x = None
+        for s, (_, v, _) in enumerate(srcs):           # a running sum, not a (B, T, n, d) stack (memory)
+            t = w[..., s:s + 1] * v
+            x = t if x is None else x + t
+        return x
+
+    def _looped_res(self, tokens, passes, P, bus, check_finite, return_states):
+        """H45c (LoopRes, sec. 2.1-2.2). Blocks before the body (the prelude) run once, and the bus writes there,
+        as in H45; p is the prelude output. Inside the body there is no residual stream: on loop t, sub-layer input
+        x = sum_s alpha_s v_s over S_i^(t) = {p, b_1..b_B of loop t - 1 (window 1; absent on loop 1), b_1..b_(i-1)
+        of loop t, u_i^(t)}, where b_i^(t) is block i's output on loop t, the sum of its two sub-layer outputs
+        (attention update + MLP update), and u_i^(t) is block i's partial sum so far. u_i is zero before block i's
+        first sub-layer and is excluded there (a zero source would only dilute the mix): the attention reads
+        {p, prev, cur}, the MLP also reads u_i = the attention update. The loop output the coda (blocks from the
+        body's end on) consumes is a separate read over {p, b of loop t - 1, b_1..b_B of loop t}; row b takes the
+        loop output of loop passes[b] (per-row select, as H45).
+
+        loop_read "loopres_add" is the residual-preserving variant: the same sources as states (p, block output
+        states, the post-attention state), each sub-layer's update added to H45's running stream."""
+        start, end = self.cfg.loop_body
+        nb = end - start
+        R = loopres_roles(nb)
+        bb = self.backbone
+        eps = self.cfg.norm_eps
+        add = self.cfg.loop_read == "loopres_add"
+
+        def src(role, v):
+            return (role, v, mx.rsqrt(mx.mean(v * v, axis=-1) + eps))
+        h = bb.embed_tokens(tokens)
+        if bus is not None and self._site_after.get(-1) == bus.site:
+            h = self._apply(h, bus, check_finite)
+        for i in range(start):
+            h = bb.blocks[i](h)
+            if bus is not None and self._site_after.get(i) == bus.site:
+                h = self._apply(h, bus, check_finite)
+        pre = src(R["pre"], h)
+        prev = []
+        sel, states = None, []
+
+        def tail(x):
+            for i in range(end, self.cfg.layers):
+                x = bb.blocks[i](x)
+            return x
+        for k in range(1, P + 1):
+            cur = []
+            for j in range(nb):
+                blk = bb.blocks[start + j]
+                base = [pre] + prev + cur
+                if add:
+                    h = h + blk.attn_update(self._loopres_read(2 * j, base))
+                    h = h + blk.mlp_update(self._loopres_read(2 * j + 1, base + [src(R["partial"], h)]))
+                    b = h
+                else:
+                    u = blk.attn_update(self._loopres_read(2 * j, base))
+                    b = u + blk.mlp_update(self._loopres_read(2 * j + 1, base + [src(R["partial"], u)]))
+                cur.append(src(R[f"cur{j}"], b))
+            r = self._loopres_read(2 * nb, [pre] + prev + cur)
+            sel = r if sel is None else mx.where((passes >= k)[:, None, None], r, sel)
+            if return_states:
+                states.append(bb.norm(tail(r)))
+            prev = [(R[f"prev{j}"], v, inv) for j, (_, v, inv) in enumerate(cur)]   # same tensors, new roles
         logits = bb.head(bb.norm(tail(sel)))
         return (logits, mx.stack(states)) if return_states else logits
 

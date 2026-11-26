@@ -120,8 +120,19 @@ class Qwen3(nn.Module):
         return self.head(h)
 
 
+def hub_cache() -> Path:
+    """The Hugging Face hub cache: $HF_HUB_CACHE, else $HF_HOME/hub, else ~/.cache/huggingface/hub (the standard
+    order). Lets a shared machine keep our models in our own directory (2026-11-25)."""
+    import os
+    if os.environ.get("HF_HUB_CACHE"):
+        return Path(os.environ["HF_HUB_CACHE"])
+    if os.environ.get("HF_HOME"):
+        return Path(os.environ["HF_HOME"]) / "hub"
+    return Path.home() / ".cache/huggingface/hub"
+
+
 def snapshot_dir(repo: str = QWEN3_06B) -> Path:
-    root = Path.home() / ".cache/huggingface/hub" / f"models--{repo.replace('/', '--')}" / "snapshots"
+    root = hub_cache() / f"models--{repo.replace('/', '--')}" / "snapshots"
     snaps = sorted(root.iterdir())
     if len(snaps) != 1:
         raise SystemExit(f"{root}: expected one snapshot, found {len(snaps)}")

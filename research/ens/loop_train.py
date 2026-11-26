@@ -10,6 +10,12 @@ writes z once, before the loop, exactly as for C6 (seed-1 recipe: early site, ta
   uniform3  compute control (review 2026-11-23): the loop body runs 3 times for every row in training, whatever
           its steps, so it has the loop arm's training compute (10 block applications per row, against 6 for
           fixed) without pass counts tied to steps. Separates "passes = steps" from "more depth".
+  loopres  H45c (LoopRes, Pierre 2026-11-25): the loop arm with the LoopRes read (model.Core._looped_res): no
+          residual stream in the loop body; each looped sub-layer's input is a zero-query softmax mix over the
+          prelude output, previous-pass and this-pass block outputs and the block's partial sum, scored by content
+          and relative role keys; a separate read forms the loop output the post-loop blocks consume. Role keys and
+          queries get AdamW weight decay 0.01 like every other parameter (the paper does not say it decays them)
+  loopres_content  the LoopRes ablation: content scores only, no role keys
 
 The training mix is the 17 A0 training families plus depth-3 families (graph 4-3 and 6-3, FST 2-3, a 3-op program),
 so both arms see depths 1-3. Depths 4-6 are never trained: the depth evaluation (graph 4-d and 6-d, FST 2-d,
@@ -123,8 +129,11 @@ def op_guess_rate(fam, row):
 # gain6 = also by (c_k / c_(k-1))^kappa (model.Core._looped_gain). Effective depth = 1 + sum of the round gains.
 GAIN_PASSES = 6
 GAIN_ARMS = {"fixed6": "", "decay6": "decay", "gain6": "decaygain"}
+# H45c: the loop arm with a LoopRes read (model.CoreConfig.loop_read); passes = steps, as loop
+LOOP_READ_ARMS = {"loopres": "loopres", "loopres_content": "loopres_content"}
 BLOCKS_PER_ROW = {"fixed": 6, "loop": 6 + 2 * (TRAIN_MAX_PASSES - 1), "uniform3": 6 + 2 * (TRAIN_MAX_PASSES - 1),
-                  **{a: 6 + 2 * (GAIN_PASSES - 1) for a in GAIN_ARMS}}
+                  **{a: 6 + 2 * (GAIN_PASSES - 1) for a in GAIN_ARMS},
+                  **{a: 6 + 2 * (TRAIN_MAX_PASSES - 1) for a in LOOP_READ_ARMS}}
 
 
 def passes_for(arm, passes):
@@ -205,7 +214,10 @@ def load_resume(out: Path, core, opt, rngs):
 
 # ------------------------------------------------------------------ evaluation
 def acc(core, tokens, q, f, a, ans, msg, passes):
-    """passes=None runs the plain graph (one pass); otherwise the loop port."""
+    """passes=None runs the plain graph (one pass); otherwise the loop port. A LoopRes core (H45c) has no plain
+    one-pass graph (its read is part of every pass), so passes=None runs its loop port at one pass."""
+    if passes is None and core.cfg.loop_read:
+        passes = mx.ones((tokens.shape[0],), dtype=mx.int32)
     hits, n, c = 0, tokens.shape[0], 128                   # 128-row chunks bound memory; the count is exact
     for i in range(0, n, c):
         s = slice(i, i + c)
@@ -333,14 +345,16 @@ def _train(args, out) -> int:
                          "may change)")
     mx.random.seed(args.seed)
     cfg = CoreConfig(bus_width=64, tau=0.5, layers=6, d=256, ffn=1024, heads=4,
-                     loop_body=LOOP_BODY if args.arm in ("loop", "uniform3", *GAIN_ARMS) else (),
-                     loop_gain=GAIN_ARMS.get(args.arm, ""))
+                     loop_body=LOOP_BODY if args.arm in ("loop", "uniform3", *GAIN_ARMS, *LOOP_READ_ARMS) else (),
+                     loop_gain=GAIN_ARMS.get(args.arm, ""), loop_read=LOOP_READ_ARMS.get(args.arm, ""),
+                     loop_key_seed=args.seed if args.arm in LOOP_READ_ARMS else 0)
     core = Core(cfg)                                    # identical init for both arms at a seed (loop_body has no weights)
     core.freeze()
     core.backbone.unfreeze()
     core.ports["early"].unfreeze()
     core.ports["early"].tap.freeze()
-    gain_keys = [k for k in ("loop_gamma_off", "loop_kappa_raw") if k in core]
+    gain_keys = [k for k in ("loop_gamma_off", "loop_kappa_raw", "loopres_qc", "loopres_qr", "loopres_keys")
+                 if k in core]
     if gain_keys:
         core.unfreeze(recurse=False, keys=gain_keys)
     M = C.codebook(64)
@@ -448,7 +462,7 @@ def _loop(args, out, core, opt, step, state, fams, M, data_rng, jitter_rng, it, 
     depth = depth_eval(core, args.arm, M)
     receipt = {"schema": "ens.h45.core_receipt.v1", "checkpoint": ckpt, "arm": args.arm, "seed": args.seed,
                "site": "early", "config": core.cfg.to_json(), "args": vars(args), "params": C.n_params(core),
-               "loop_body": list(cfg.loop_body),
+               "loop_body": list(cfg.loop_body), "loop_read": cfg.loop_read,
                "train_max_passes": GAIN_PASSES if args.arm in GAIN_ARMS else TRAIN_MAX_PASSES,
                "loop_gain": {"kind": cfg.loop_gain,
                              "gamma": round(float(core.gamma()), 5) if cfg.loop_gain else None,
@@ -468,7 +482,7 @@ def main(argv=None):
 
 def build_parser():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--arm", choices=("loop", "fixed", "uniform3", *GAIN_ARMS), required=True)
+    p.add_argument("--arm", choices=("loop", "fixed", "uniform3", *GAIN_ARMS, *LOOP_READ_ARMS), required=True)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--steps", type=int, default=48000)
     p.add_argument("--batch", type=int, default=256)

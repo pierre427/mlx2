@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import random
 import time
 from pathlib import Path
@@ -57,7 +58,10 @@ TEMPLATES_HELD = ["Everyone who knows {e} will tell you that the {a} is", "Ask {
 _SYL = ["ka", "zor", "vel", "min", "tra", "qui", "dov", "rel", "sha", "pon", "lux", "ber", "gim", "fae", "tor", "nix",
         "wen", "yar", "cal", "dro", "hes", "jul", "oma", "pex"]
 SEQ = 32
-TEXT = Path.home() / "Desktop/amoeba-corpus/builds/core-corpus-v2-9b64b3791/corpus.jsonl"
+# ordinary English for KL rows; ENS_TEXT_CORPUS overrides the path (same file) on machines without the lab's Desktop
+# layout (2026-11-25)
+TEXT = Path(os.environ.get("ENS_TEXT_CORPUS") or
+            Path.home() / "Desktop/amoeba-corpus/builds/core-corpus-v2-9b64b3791/corpus.jsonl")
 RECIPE = "ens.expA.lm_bus.v1"
 
 

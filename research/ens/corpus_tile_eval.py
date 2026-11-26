@@ -68,7 +68,8 @@ def prompt_ids(tok, q):
     return tok.encode(QA.chat(q + " Answer briefly."))
 
 
-def generate(model, tok, tile, prompts, zero_values=False, max_new=MAX_NEW):
+def generate(model, tok, tile, prompts, zero_values=False, max_new=MAX_NEW, fwd=None):
+    fwd = CT.forward if fwd is None else fwd
     B = len(prompts)
     L = max(len(p) for p in prompts) + max_new
     buf = [p + [tok.pad] * (L - len(p)) for p in prompts]
@@ -78,7 +79,7 @@ def generate(model, tok, tile, prompts, zero_values=False, max_new=MAX_NEW):
     for _ in range(max_new):
         Lb = min(L, -(-max(cur) // 16) * 16)
         T = mx.array(buf)[:, :Lb]
-        logits, _ = CT.forward(model, T, tile, zero_values=zero_values)
+        logits, _ = fwd(model, T, tile, zero_values=zero_values)
         nxt = mx.argmax(logits[mx.arange(B), mx.array([c - 1 for c in cur])], -1).tolist()
         for b in range(B):
             if done[b]:
@@ -91,11 +92,12 @@ def generate(model, tok, tile, prompts, zero_values=False, max_new=MAX_NEW):
     return [tok.t.decode(buf[b][len(prompts[b]):cur[b]]) for b in range(B)]
 
 
-def _choice_ll(model, tok, tile, zv, p, choices):
+def _choice_ll(model, tok, tile, zv, p, choices, fwd=None):
+    fwd = CT.forward if fwd is None else fwd
     seqs = [p + (tok.encode(c) or [tok.pad]) for c in choices]
     L = max(len(s) for s in seqs)
     T = mx.array([s + [tok.pad] * (L - len(s)) for s in seqs])
-    logits, _ = CT.forward(model, T, tile, zero_values=zv)
+    logits, _ = fwd(model, T, tile, zero_values=zv)
     lp = logits.astype(mx.float32) - mx.logsumexp(logits.astype(mx.float32), axis=-1, keepdims=True)
     out = []
     for i, s in enumerate(seqs):
@@ -105,15 +107,16 @@ def _choice_ll(model, tok, tile, zv, p, choices):
     return out
 
 
-def choice_pick(model, tok, tile, zv, q, choices):
+def choice_pick(model, tok, tile, zv, q, choices, fwd=None):
     """Calibrated choice: log-likelihood after the question minus after a neutral prompt."""
-    a = _choice_ll(model, tok, tile, zv, prompt_ids(tok, q), choices)
-    b = _choice_ll(model, tok, tile, zv, tok.encode(QA.chat(NEUTRAL)), choices)
+    a = _choice_ll(model, tok, tile, zv, prompt_ids(tok, q), choices, fwd)
+    b = _choice_ll(model, tok, tile, zv, tok.encode(QA.chat(NEUTRAL)), choices, fwd)
     sc = [x - y for x, y in zip(a, b)]
     return choices[max(range(len(sc)), key=sc.__getitem__)]
 
 
-def qa_eval(W, tile, targs, qdir: Path, run: Path, batch=8):
+def qa_eval(W, tile, targs, qdir: Path, run: Path, batch=8, fwd=None):
+    """fwd: the forward (corpus_tile.forward contract); default corpus_tile.forward. H56 passes side_tile.forward."""
     model, tok = W["model"], W["tok"]
     files = [qdir / "recall.jsonl", qdir / "crossdoc.jsonl"]
     digest = hashlib.sha256()
@@ -150,7 +153,7 @@ def qa_eval(W, tile, targs, qdir: Path, run: Path, batch=8):
             sub = rows[i:i + batch]
             prompts = [prompt_ids(tok, r[field]) for r in sub]
             for arm, t, zv in arms:
-                for r, o in zip(sub, generate(model, tok, t, prompts, zero_values=zv)):
+                for r, o in zip(sub, generate(model, tok, t, prompts, zero_values=zv, fwd=fwd)):
                     ok = correct(o, r["answer"], r.get("aliases"))
                     tally[arm] += int(ok)
                     outs.write(json.dumps({"cell": key, "qid": r["qid"], "arm": arm, "field": field, "output": o,
@@ -176,7 +179,7 @@ def qa_eval(W, tile, targs, qdir: Path, run: Path, batch=8):
             for r in grows:
                 cells.check()
                 for arm, t, zv in arms:
-                    pick = choice_pick(model, tok, t, zv, r[field], r["choices"])
+                    pick = choice_pick(model, tok, t, zv, r[field], r["choices"], fwd)
                     tally[arm] += int(pick == r["choice_answer"])
                     outs.write(json.dumps({"cell": key, "qid": r["qid"], "arm": arm, "pick": pick,
                                            "correct": pick == r["choice_answer"]}) + "\n")
