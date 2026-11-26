@@ -83,6 +83,23 @@ and only with the probe on:
   alignment in ``MLX2_ROUND_PROBE_SUBSTITUTE_ALIGN`` (default ``256,4``).
   Results go to ``substitution-<pid>-<n>.json`` beside the recordings. It takes
   seconds per recording, inside the request that hosts the recorded round.
+  Only *clean* dispatches are replayed: every buffer the dispatch reads is
+  not written again later in the round, and every buffer it writes is last
+  written by it. The pass runs after the round, so any other dispatch would
+  read post-round contents. On 2026-11-26, 3,393 of a Raon round's 3,803
+  dispatches were not clean: MLX reuses buffers within a round, and a
+  replayed scatter whose int64 index buffer held a later int32 op's data
+  wrote outside its private copy and changed later outputs. Those dispatches
+  are booked ``skipped_stale_inputs``, never replayed.
+  ``MLX2_ROUND_PROBE_FLAG_AB=0,2`` (P2, needs recording) times, for the listed
+  recordings, every distinct kernel on two pipelines rebuilt from MLX's
+  descriptor with ``supportIndirectCommandBuffers`` off and on (a short
+  ranking pass, then 20+20 interleaved blocks of 100 dispatches for the 10
+  kernels with the most GPU time per round and every NAX kernel), with
+  ``flag_ab_instance`` choosing a replay-safe dispatch per kernel; results
+  in ``flag-ab-<pid>-<n>.json``.
+  ``MLX2_ROUND_PROBE_RECORD_ADDRESSES=1`` (P5a) adds every recorded buffer's
+  ``gpuAddress``, length, storage mode and heap flag to each recording.
   Side-effect isolation: ``MLX2_ROUND_PROBE_SUBSTITUTE_ARMS`` picks the arms
   (``A,A2,B,C``, default all; ``none`` makes the copies only, no GPU work;
   partial runs compare nothing), and ``MLX2_ROUND_PROBE_SUBSTITUTE_CHECKSUM=1``
@@ -112,6 +129,14 @@ RECORD_MAX_ENV = "MLX2_ROUND_PROBE_RECORD_MAX"
 SUBSTITUTE_ENV = "MLX2_ROUND_PROBE_SUBSTITUTE"
 SUBSTITUTE_ALIGN_ENV = "MLX2_ROUND_PROBE_SUBSTITUTE_ALIGN"
 SUBSTITUTE_ARMS_ENV = "MLX2_ROUND_PROBE_SUBSTITUTE_ARMS"
+FLAG_AB_ENV = "MLX2_ROUND_PROBE_FLAG_AB"
+# P5a: each recording also lists every recorded buffer's gpuAddress and length.
+ADDRESSES_ENV = "MLX2_ROUND_PROBE_RECORD_ADDRESSES"
+# Kernels that may write at addresses read from buffer contents: replayed for
+# timing only from a clean instance (record-time inputs). Data-dependent reads
+# (gather, gather_qmv) are allowed: a stale index can only fault the probe's
+# own command buffer, since every written buffer is a private copy.
+_WRITE_UNSAFE = ("scatter", "sort", "custom_kernel")
 SUBSTITUTE_CHECKSUM_ENV = "MLX2_ROUND_PROBE_SUBSTITUTE_CHECKSUM"
 _ARM_BITS = {"A": 1, "A2": 2, "B": 4, "C": 8}
 
@@ -496,15 +521,157 @@ def _write_recording(route, handle, started):
             "compare_with_previous": compared,
             "summary": summary, "dispatches": table, "pipelines": reflection,
         }
+        if _env_on(os.environ.get(ADDRESSES_ENV)) and "buffer_addresses" in _native.CAPABILITIES:
+            document["buffers"] = [list(row) for row in _native.buffer_addresses(handle)]
         tmp = path.with_suffix(".tmp")
         tmp.write_text(json.dumps(document))
         tmp.replace(path)
         _record["written"] = index + 1
         if index < _record["substitute"]:
             _substitution_pass(route, handle, index, summary)
+        if index in _flag_ab_indices():
+            _flag_ab_pass(route, handle, index, summary)
     except Exception as error:
         if len(_record["errors"]) < 16:
             _record["errors"].append(f"{type(error).__name__}: {error}")
+
+
+def clean_dispatches(table, kernels, reflection):
+    """Indices of dispatches whose replay after the round sees record-time inputs.
+
+    ``reflection``: kernel name -> {buffer slot: writes}. A dispatch is clean
+    when no buffer it reads is written by a later dispatch, and every buffer
+    it writes is written last by it (so its post-round contents are its own
+    output, which the replay arms copy before running).
+    """
+    def name(entry):
+        pipeline = entry["pipeline"]
+        return kernels[pipeline] if pipeline < len(kernels) else None
+
+    last_write = {}
+    for i, entry in enumerate(table):
+        slots = reflection.get(name(entry))
+        for slot in entry["slots"]:
+            # Unreflected kernels: access unknown, so every binding may write.
+            if slot[1] == "buffer" and (slots is None or slots.get(slot[0])):
+                last_write[slot[2]] = i
+    clean = []
+    for i, entry in enumerate(table):
+        slots = reflection.get(name(entry))
+        if slots is None:
+            continue  # unreflected: access unknown
+        ok = True
+        for slot in entry["slots"]:
+            if slot[1] != "buffer":
+                continue
+            last = last_write.get(slot[2], -1)
+            if (slots.get(slot[0]) and last != i) or (not slots.get(slot[0]) and last > i):
+                ok = False
+                break
+        if ok:
+            clean.append(i)
+    return clean
+
+
+def _flag_ab_indices():
+    value = os.environ.get(FLAG_AB_ENV, "")
+    try:
+        return {int(v) for v in value.split(",") if v.strip()}
+    except ValueError:
+        return set()
+
+
+def flag_ab_instance(table, kernels, clean):
+    """One replay-safe dispatch per kernel for the P2 timing: a clean instance
+    if any, else (for kernels outside ``_WRITE_UNSAFE``) the first one."""
+    clean = set(clean)
+    chosen = {}
+    for i, entry in enumerate(table):
+        name = kernels[entry["pipeline"]] if entry["pipeline"] < len(kernels) else None
+        if name is None or entry.get("form") == "indirect":
+            continue
+        if i in clean:
+            if name not in chosen or not chosen[name][1]:
+                chosen[name] = (i, True)
+        elif name not in chosen and not any(tag in name for tag in _WRITE_UNSAFE):
+            chosen[name] = (i, False)
+    return chosen
+
+
+def _bootstrap_ratio(plain, flag, draws=2000, seed=0):
+    import random
+    ratios = [f / p for p, f in zip(plain, flag) if p > 0]
+    if not ratios:
+        return None
+    rng = random.Random(seed)
+    meds = sorted(statistics_median([rng.choice(ratios) for _ in ratios]) for _ in range(draws))
+    return {"median": round(statistics_median(ratios), 4),
+            "ci95": [round(meds[int(0.025 * draws)], 4), round(meds[int(0.975 * draws) - 1], 4)],
+            "pairs": len(ratios)}
+
+
+def statistics_median(values):
+    values = sorted(values)
+    n = len(values)
+    return values[n // 2] if n % 2 else 0.5 * (values[n // 2 - 1] + values[n // 2])
+
+
+def _flag_ab_pass(route, handle, index, summary):
+    """P2: rank kernels by GPU time per round, then A/B the hot ones (module docstring)."""
+    started = time.perf_counter()
+    kernels = summary.get("kernels") or []
+    table = handle.dispatch_table()
+    reflection = {p.get("function"): {s[0]: s[2] for s in p.get("slots", []) if s[1] == "buffer"}
+                  for p in _native.pipelines()}
+    chosen = flag_ab_instance(table, kernels, clean_dispatches(table, kernels, reflection))
+    counts = Counter(kernels[e["pipeline"]] for e in table if e["pipeline"] < len(kernels))
+    ranking, failures = [], []
+    for name, (i, clean) in sorted(chosen.items()):
+        try:
+            row = _native.flag_ab(handle, i, blocks=2, per_block=20)
+        except Exception as error:
+            row = {"status": "exception", "errors": f"{type(error).__name__}: {error}"}
+        if row.get("status") != "timed":
+            failures.append({"kernel": name, "dispatch": i, **{k: row.get(k) for k in ("status", "errors", "build_errors")}})
+            continue
+        us = statistics_median(list(row["plain_us"]))
+        ranking.append({"kernel": name, "dispatch": i, "clean": clean, "count": counts[name],
+                        "plain_us": round(us, 3), "round_us": round(us * counts[name], 1),
+                        "build_plain": row.get("build_plain"), "build_flag": row.get("build_flag")})
+    ranking.sort(key=lambda r: -r["round_us"])
+    hot = [r for r in ranking[:10]] + [r for r in ranking[10:] if "nax" in r["kernel"]]
+    results = []
+    for r in hot:
+        try:
+            row = _native.flag_ab(handle, r["dispatch"], blocks=20, per_block=100)
+        except Exception as error:
+            row = {"status": "exception", "errors": f"{type(error).__name__}: {error}"}
+        entry = {**r, "status": row.get("status"), "errors": row.get("errors")}
+        if row.get("status") == "timed":
+            plain, flag = list(row["plain_us"]), list(row["flag_us"])
+            stats = _bootstrap_ratio(plain, flag)
+            entry.update(plain_median_us=round(statistics_median(plain), 3),
+                         flag_median_us=round(statistics_median(flag), 3), ratio=stats,
+                         slower_beyond_3pct=bool(stats and stats["median"] > 1.03 and stats["ci95"][0] > 1.0))
+        results.append(entry)
+    total = sum(r["round_us"] for r in ranking)
+    document = {
+        "schema": "mlx2.round-probe.flag-ab.v1", "probe": "P2", "route": route,
+        "recording_index": index, "distinct_kernels": len(set(kernels)),
+        "kernels_timed": len(ranking), "kernels_untimed": failures,
+        "unsafe_without_clean_instance": sorted(n for n in set(kernels) if n not in chosen),
+        "builds_failed": [r["kernel"] for r in ranking if not (r["build_plain"] and r["build_flag"])],
+        "ranked_round_us_total": round(total, 1),
+        "hot_share_of_ranked": round(sum(r["round_us"] for r in ranking[:10]) / total, 4) if total else None,
+        "ranking": ranking, "ab": results,
+        "verdict": "kill" if any(r.get("slower_beyond_3pct") for r in results) else "pass",
+        "kill_criterion": "a hot kernel is slower with the flag by more than 3% with the 95% CI above 1.0",
+        "seconds": round(time.perf_counter() - started, 3),
+    }
+    path = Path(_record["dir"]) / f"flag-ab-{os.getpid()}-{index:04d}.json"
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(document))
+    tmp.replace(path)
 
 
 def _substitution_pass(route, handle, index, summary):
@@ -516,9 +683,17 @@ def _substitution_pass(route, handle, index, summary):
     checksum = _env_on(os.environ.get(SUBSTITUTE_CHECKSUM_ENV))
     before = _native.buffer_checksums(handle) if checksum else None
     checksum_s = time.perf_counter() - started
+    table = handle.dispatch_table()
+    reflection = {p.get("function"): {s[0]: s[2] for s in p.get("slots", []) if s[1] == "buffer"}
+                  for p in _native.pipelines()}
+    clean = set(clean_dispatches(table, kernels, reflection))
     for align in _record["substitute_align"]:
         rows = []
         for i in range(summary.get("dispatches", 0)):
+            if i not in clean:
+                rows.append({"index": i, "kernel": kernels[table[i]["pipeline"]] if table[i]["pipeline"] < len(kernels) else "?",
+                             "status": "skipped_stale_inputs"})
+                continue
             try:
                 rows.append(_native.substitution_check(handle, i, align=align, icb=True, arms=arms))
             except Exception as error:
@@ -534,7 +709,10 @@ def _substitution_pass(route, handle, index, summary):
             "wrote": sum(1 for row in rows if row.get("wrote")),
             "icb_ran": sum(1 for row in rows if row.get("icb_ran")),
             "kernels": {k: dict(v) for k, v in sorted(by_kernel.items())},
-            "not_equal": [row for row in rows if row.get("status") not in ("equal", "partial")][:64],
+            "not_equal": [row for row in rows
+                          if row.get("status") not in ("equal", "partial", "skipped_stale_inputs")][:64],
+            "clean": len(clean),
+            "kernels_with_clean_dispatch": len({r.get("kernel") for r in rows if r.get("status") != "skipped_stale_inputs"}),
             "copy_bytes_total": sum(row.get("copy_bytes_total") or 0 for row in rows),
             "largest_copies": sorted(
                 ({"index": row["index"], "kernel": row.get("kernel"), "bytes": row.get("copy_bytes_total")}
@@ -545,9 +723,6 @@ def _substitution_pass(route, handle, index, summary):
     if checksum:
         after = _native.buffer_checksums(handle)
         changed = []
-        table = handle.dispatch_table()
-        reflection = {p.get("function"): {s[0]: s[2] for s in p.get("slots", []) if s[1] == "buffer"}
-                      for p in _native.pipelines()}
         for (i, length, h0), (_, _, h1) in zip(before, after):
             if h0 != h1:
                 users = []

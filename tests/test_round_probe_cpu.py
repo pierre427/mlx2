@@ -829,3 +829,33 @@ def test_probe_delta_carries_gpu_keys():
     assert delta["r"]["gpu_rounds"] == 1 and delta["r"]["gpu_wall_ns"] == 4
     plain = harness.probe_delta({"enabled": True, "routes": {"r": {"rounds": 2}}}, {})
     assert "gpu_rounds" not in plain["r"]
+
+
+def test_clean_dispatches_excludes_reads_of_later_overwritten_buffers():
+    # Kernels: "w" writes slot 1 and reads slot 0; "r" reads slot 0 only.
+    reflection = {"w": {0: False, 1: True}, "r": {0: False}}
+    kernels = ["w", "r"]
+    table = [
+        {"pipeline": 0, "slots": [(0, "buffer", 10, 0), (1, "buffer", 11, 0)]},  # 10 -> 11
+        {"pipeline": 1, "slots": [(0, "buffer", 11, 0)]},                        # reads 11
+        {"pipeline": 0, "slots": [(0, "buffer", 12, 0), (1, "buffer", 11, 0)]},  # 12 -> 11 again
+        {"pipeline": 1, "slots": [(0, "buffer", 12, 0)]},                        # reads 12
+    ]
+    # 0 wrote 11 but 2 rewrites it; 1 read 11 before 2 rewrote it; 2 and 3 are clean.
+    assert round_probe.clean_dispatches(table, kernels, reflection) == [2, 3]
+    # Unreflected kernels are never clean.
+    assert round_probe.clean_dispatches(table, ["x", "r"], reflection) == [3]
+
+
+def test_flag_ab_instance_prefers_clean_and_skips_unsafe_writers():
+    kernels = ["gemv", "scatter_x", "custom_kernel_y"]
+    table = [{"pipeline": 0, "slots": []}, {"pipeline": 0, "slots": []},
+             {"pipeline": 1, "slots": []}, {"pipeline": 2, "slots": []},
+             {"pipeline": 2, "slots": []}]
+    chosen = round_probe.flag_ab_instance(table, kernels, clean=[1, 4])
+    assert chosen == {"gemv": (1, True), "custom_kernel_y": (4, True)}  # scatter: no clean one
+
+
+def test_bootstrap_ratio_brackets_the_median():
+    stats = round_probe._bootstrap_ratio([10.0] * 20, [10.0 + 0.1 * (i % 3) for i in range(20)])
+    assert stats["pairs"] == 20 and stats["ci95"][0] <= stats["median"] <= stats["ci95"][1]
