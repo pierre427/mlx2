@@ -786,8 +786,14 @@ def test_best_route_entry_is_the_tested_one_lane_dflash2_chain():
     spec = entry["default"]
     assert spec["kind"] == "ast" and spec["max_lanes"] == 1
     # Exactly the policy GSM8K measured (b4e6be2eb): depth 7, composition off.
-    assert spec["execution_policy"] == {"num_draft": 7, "proposal_composition": False}
-    assert set(spec["execution_policy"]) | {"draft_model"} <= inkling2_dflash2.ALLOWED_POLICY_KEYS
+    # APCv2 interior checkpoints joined the default (Pierre 2026-11-26): a
+    # server-owned key, consumed before the adapter sees the policy.
+    assert spec["execution_policy"] == {"num_draft": 7, "proposal_composition": False,
+                                        "apc_interior_checkpoints": "auto"}
+    from mlx2.serving import SERVER_OWNED_EXECUTION_POLICY_KEYS
+
+    adapter_keys = set(spec["execution_policy"]) - SERVER_OWNED_EXECUTION_POLICY_KEYS
+    assert adapter_keys | {"draft_model"} <= inkling2_dflash2.ALLOWED_POLICY_KEYS
     assert spec["drafter"]["architectures"] == ["DFlash2DraftModel"]
     assert spec["drafter"]["config_sha256"] == [inkling2_dflash2.CONFIG_SHA256]
     assert entry["fallback"] == [{"name": "adapter_default", "kind": "adapter_default"}]
@@ -884,7 +890,8 @@ def test_no_flag_server_selects_dflash2_only_at_one_lane():
 
     status, route, policy = resolve("--max-lanes", "1")
     assert (status, route) == ("selected_unqualified", "external_draft")
-    assert policy == {"num_draft": 7, "proposal_composition": False, "draft_model": str(draft)}
+    assert policy == {"num_draft": 7, "proposal_composition": False, "draft_model": str(draft),
+                      "apc_interior_checkpoints": "auto"}
     assert resolve()[:2] == ("width_keyed_adapter_default", "ordinary")
     assert resolve("--max-lanes", "1", "--ordinary")[:2] == ("explicit_route", "ordinary")
     assert resolve("--max-lanes", "1", "--no-auto-route")[0] == "opted_out"

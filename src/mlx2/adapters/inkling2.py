@@ -495,9 +495,13 @@ KERNEL_OPTIONS = {
     # Improves on inkling2_flash_prefill (FP32 staging, one head per tile,
     # slower: 4K 1260 -> 1026 tok/s); the two are alternatives. Short blocks
     # (< 32 rows) still go to inkling2_verify_splitk first. Sliding layers
-    # keep the masked path. GPU only, declines counted. Default off: Metal
-    # tests and the GPU A/B are pending (omlx found MLX's masked SDPA faster
-    # than its flash kernel for full attention on M5 NAX hosts).
+    # keep the masked path. GPU only, declines counted. DEFAULT ON (Pierre
+    # 2026-11-26, selected unqualified, near-exact not bitwise; the reference
+    # policy keeps the masked path; opt out with false): A/B 78073afcb
+    # (Inkling-2-Mini@440956c8) prefill 16K 1150 -> 1189 tok/s, 32K 858 -> 1003
+    # (+17%), prefill-row argmax 97% with near-tie first divergences, decode
+    # argmax 31/32 and 32/32 (flips near ties). Unset, it steps aside for
+    # inkling2_prefill_onelaunch_attention or inkling2_flash_prefill.
     "inkling2_prefill_tiled_attention": "prefill_tiled_attention",
     # Prompt attention (rows > 1, sliding and global visits) in one Metal
     # launch per visit and chunk (runtime/models/inkling2/prefill_onelaunch.py,
@@ -637,9 +641,13 @@ KERNEL_OPTIONS = {
 # to 8 rows (decode and DSpark verify; the A/B covered decode only) and falls
 # back elsewhere; unset it
 # follows fuse_sconv, so inkling2_fuse_sconv false turns both off.
-# fuse_residual_kernel stays off: A/B 16eed37f5 (16eed37f5-kernres) was not
-# bitwise (max |dlogit| 0.08 at 1K, 0.55 at 16K, argmax 125/128 with the 3
-# margins not captured), decode within noise, prefill 12% slower at 1K.
+# fuse_residual_kernel is DEFAULT ON (Pierre 2026-11-26, selected unqualified;
+# opt out with inkling2_fuse_residual_kernel: false). Earlier A/B 16eed37f5 was
+# not bitwise (max |dlogit| 0.08 at 1K, 0.55 at 16K, argmax 125/128, margins not
+# captured). The depth-mix microbench b4e6be2eb (2026-11-25): decode +7.6% at
+# 1K / +7% at 16K, prefill bitwise, decode argmax 249/256 with all 7 flips near
+# ties (margin <= 0.29 nat). Functional check f06cd567a (2026-11-26, one-lane
+# DFlash2 GSM8K 10 q): 10/10, texts identical to off 10/10, 63.4 vs 62.1 tok/s.
 # W4A4 (moe_act_quant) stays off.
 # head_kernel is DEFAULT ON (Pierre 2026-11-25, after the Rapid-MLX gap A/B
 # qualification/runs/inkling2-gpu-20261125/566479abc-gaplevers): it reads the
@@ -659,7 +667,8 @@ KERNEL_DEFAULTS = {"moe_fused": True, "moe_weighted_sum": None, "moe_nax_gather"
                    "sink_sdpa": True, "sink_slot": True, "verify_splitk": True,
                    "fuse_controllers": True, "fuse_residual": True, "fuse_sconv": True,
                    "fuse_attention": True, "fuse_sconv_kernel": True, "head_kernel": True,
-                   "moe_decode_kernel": True}
+                   "moe_decode_kernel": True, "fuse_residual_kernel": True,
+                   "prefill_tiled_attention": True}
 # The policy that selects the reference path for every switch the defaults
 # turn on (comparison scripts and the ladder's reference arm start from it).
 REFERENCE_POLICY = {key: False for key, name in KERNEL_OPTIONS.items()
@@ -850,6 +859,9 @@ def validate_policy(value):
     if "moe_decode_kernel" in defaulted and (not kernels["moe_fused"]
                                              or kernels["moe_logdomain_renorm"]):
         kernels["moe_decode_kernel"] = False  # the default follows moe_fused
+    if "prefill_tiled_attention" in defaulted and (kernels["prefill_onelaunch_attention"]
+                                                   or kernels["flash_prefill"]):
+        kernels["prefill_tiled_attention"] = False  # the default yields to an alternative
     if "fuse_sconv_kernel" in defaulted and not kernels["fuse_sconv"]:
         kernels["fuse_sconv_kernel"] = False  # the default follows fuse_sconv
     if kernels["fuse_sconv_kernel"] and not kernels["fuse_sconv"]:

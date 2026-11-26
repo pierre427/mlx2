@@ -204,8 +204,7 @@ def _record(key, gap):
 def test_policy_defaults_off():
     from mlx2.adapters.inkling2 import KERNEL_OPTIONS, validate_policy
 
-    names = ["prefill_mask_bf16_budget", "prefill_mask_with_sink", "head_kernel_wide",
-             "prefill_tiled_attention"]
+    names = ["prefill_mask_bf16_budget", "prefill_mask_with_sink", "head_kernel_wide"]
     kernels = validate_policy(None)[0]
     for name in names:
         assert KERNEL_OPTIONS["inkling2_" + name] == name
@@ -214,6 +213,15 @@ def test_policy_defaults_off():
         assert validate_policy({"inkling2_" + name: True, **extra})[0][name] is True
         with pytest.raises(TypeError):
             validate_policy({"inkling2_" + name: 1})
+    # Default on since 2026-11-26 (Pierre); opt-out and step-aside rules.
+    assert kernels["prefill_tiled_attention"] is True
+    assert validate_policy({"inkling2_prefill_tiled_attention": False})[0][
+        "prefill_tiled_attention"] is False
+    for other in ("prefill_onelaunch_attention", "flash_prefill"):
+        chosen = validate_policy({"inkling2_" + other: True})[0]
+        assert chosen[other] is True and chosen["prefill_tiled_attention"] is False
+    from mlx2.adapters.inkling2 import REFERENCE_POLICY
+    assert REFERENCE_POLICY["inkling2_prefill_tiled_attention"] is False
 
 
 @pytest.mark.parametrize("padded", [False, True])

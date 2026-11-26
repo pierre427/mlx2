@@ -30,7 +30,7 @@ This is a sanity A/B (no thermal hold), not publishable statistics.
 
 Usage: python scripts/research/inkling2_fuse_ab.py <model dir> <run dir>
        [--contexts 1024,16384,65536] [--options fuse_controllers,...] [--blocks 2]
-       [--base reference|defaults] [--base-extra head_kernel,...]
+       [--base reference|defaults] [--base-extra head_kernel,...] [--base-off name,...]
 Default options: the four exact ones. Add ``fuse_sconv_kernel`` and/or
 ``fuse_residual_kernel`` for the near-exact arms (run them separately).
 
@@ -285,6 +285,9 @@ def main():
                         help="reference: every default-on option off (the historical A/B); "
                              "defaults: the shipped defaults, so the near-exact kernel "
                              "options are measured on top of the exact four")
+    parser.add_argument("--base-off", default="",
+                        help="comma list of options turned OFF in both arms (e.g. a default "
+                             "that is an alternative to the option under test)")
     parser.add_argument("--base-extra", default="",
                         help="options turned on in both arms (e.g. head_kernel)")
     args = parser.parse_args()
@@ -292,6 +295,7 @@ def main():
     contexts = [int(c) for c in args.contexts.split(",")]
     options = [option_name(o) for o in args.options.split(",") if o]
     extra = [option_name(o) for o in args.base_extra.split(",") if o]
+    base_off = [option_name(o) for o in args.base_off.split(",") if o]
     run_dir.mkdir(parents=True, exist_ok=True)
     if any(run_dir.iterdir()):
         raise SystemExit(f"{run_dir} is not empty")
@@ -307,7 +311,7 @@ def main():
     receipt = {"script": "scripts/research/inkling2_fuse_ab.py", "mlx2": head,
                "mlx2_src_dirty": dirty, "mlx_version": mx.__version__,
                "started": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "options": options,
-               "base_extra": extra,
+               "base_extra": extra, "base_off": base_off,
                "kind": "exactness + sanity A/B (no thermal hold; not publishable statistics)",
                "chunk": CHUNK, "block": BLOCK, "untimed_steps": args.untimed_steps,
                "cells": []}
@@ -319,6 +323,10 @@ def main():
         os.replace(tmp, out)
 
     policy = dict(REFERENCE_POLICY) if args.base == "reference" else {}
+    # --base-off: off in both arms, through the adapter policy so its
+    # validation sees the choice (a default that is an alternative to the
+    # option under test, e.g. prefill_tiled_attention vs onelaunch).
+    policy.update({"inkling2_" + name: False for name in base_off})
     receipt["base"] = args.base
     adapter = Inkling2Adapter(str(model_dir), execution_policy=policy)  # only the named options toggle
     try:

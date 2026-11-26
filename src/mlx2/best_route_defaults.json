@@ -1236,7 +1236,8 @@
     "max_lanes": 1,
     "execution_policy": {
      "num_draft": 7,
-     "proposal_composition": false
+     "proposal_composition": false,
+     "apc_interior_checkpoints": "auto"
     },
     "drafter": {
      "name": "Inkling-2-Mini-DFlash2",
@@ -1257,12 +1258,13 @@
      "kind": "adapter_default"
     }
    ],
-   "reason": "Operator decision: Pierre 2026-11-25 ('Yes dflash2') made the pinned Inkling-2-Mini-DFlash2 drafter (incoai@4f9088ea, weights sha256 217980ab) the no-flag route at one lane; selected unqualified. Route: ast drafter=Inkling-2-Mini-DFlash2 (Inkling 2 has no tree tiles, so --ast lowers to the external DFlash2 chain), num_draft 7, proposal_composition off, embed_norm on. GSM8K 40 q chat 5-shot greedy effort low, B1 (mlx2 b4e6be2eb, no thermal hold): ordinary 39/40 39.2 tok/s, embedded DSpark depth 7 39/40 47.1 tok/s MAL 3.69, DFlash2 depth 7 39/40 61.4 tok/s MAL 4.64; answers equal ordinary 40/40; sampled T=1 4/4. Wider servers keep the adapter default (the DFlash2 route is chain B1 only).",
+   "reason": "Operator decision: Pierre 2026-11-26 ('Yes, set default') made APCv2 interior checkpoints (auto) part of this default after the shared-system-prompt probe @5e009824f (new conversations on a ~17.9K system prompt: 0 cached / TTFT 13.3-15.2 s without vs 17,408 cached / TTFT 0.70-0.83 s with auto; texts identical 4/4, GSM8K 8/8 same answers, MAL 4.59 both). Operator decision: Pierre 2026-11-25 ('Yes dflash2') made the pinned Inkling-2-Mini-DFlash2 drafter (incoai@4f9088ea, weights sha256 217980ab) the no-flag route at one lane; selected unqualified. Route: ast drafter=Inkling-2-Mini-DFlash2 (Inkling 2 has no tree tiles, so --ast lowers to the external DFlash2 chain), num_draft 7, proposal_composition off, embed_norm on. GSM8K 40 q chat 5-shot greedy effort low, B1 (mlx2 b4e6be2eb, no thermal hold): ordinary 39/40 39.2 tok/s, embedded DSpark depth 7 39/40 47.1 tok/s MAL 3.69, DFlash2 depth 7 39/40 61.4 tok/s MAL 4.64; answers equal ordinary 40/40; sampled T=1 4/4. Wider servers keep the adapter default (the DFlash2 route is chain B1 only).",
    "evidence": {
     "files": [
      "qualification/runs/inkling2-gpu-20261125/b4e6be2eb-dflash2-full/gsm8k-greedy/receipt.json",
      "qualification/runs/inkling2-gpu-20261125/b4e6be2eb-dflash2-smoke/gsm8k-greedy/receipt.json",
-     "qualification/runs/inkling2-gpu-20261125/b4e6be2eb-dflash2-smoke/gsm8k-t1/receipt.json"
+     "qualification/runs/inkling2-gpu-20261125/b4e6be2eb-dflash2-smoke/gsm8k-t1/receipt.json",
+     "qualification/runs/inkling2-gpu-20261126/5e009824f-apc-ttft/"
     ],
     "source_revision": "b4e6be2ebadd42658411b26a72979081d67e4406",
     "decision_row": true
