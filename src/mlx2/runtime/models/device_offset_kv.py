@@ -34,6 +34,20 @@ device mode instead of copying the slack rows as if they were filled.
 Attention over the bounded width is equal to the exact-length attention only
 up to reduction order (MLX's kernels group by key width): Pierre's
 2026-11-26 bar for device-commit rounds is the near-tie contract, not bitwise.
+With the bound exact (``observe`` after every round, as slice DC-4 does) the
+width is the host width and the ``j <= pos + i`` mask selects exactly the
+causal keys.
+
+**Recovery lending (DC-4).** The engine's per-round recovery point
+(``cow_cache.snapshot_recovery_descriptors``) borrows K/V instead of aliasing
+them, as it does for ``KVCache``: a device write lands at ``pos``, never
+below the committed fill, so the captured prefix stays intact and the write
+needs no whole-buffer copy. The borrowed level is ``recovery_fill``: the host
+offset in host mode and, in device mode, the bound only while it is exact
+(observed, no write since). Otherwise it refuses, because rows in
+``[pos, bound)`` are slack that the next write may overwrite. ``observe``
+below a borrowed level marks that recovery point's rewind guard, as
+``KVCache.trim`` does.
 """
 
 from __future__ import annotations
@@ -49,6 +63,15 @@ class DeviceOffsetKVCache(KVCache):
     pos = None
     bound = 0
     _last_write = None
+    # Device mode: whether ``bound`` is the exact fill (observed, no write since).
+    _exact = True
+    # Recovery snapshots borrow K/V below ``recovery_fill`` (module note).
+    _RECOVERY_APPEND_ONLY_FIELDS = (
+        ("keys", -2, "recovery_fill"), ("values", -2, "recovery_fill"),
+    )
+    # The plane a device-mode request-private recovery clone is filed under
+    # (``cow_cache``); committed, publishable captures still refuse device mode.
+    _RECOVERY_PLANE = "attention_kv"
 
     def __init__(self):
         super().__init__()
@@ -56,6 +79,36 @@ class DeviceOffsetKVCache(KVCache):
         self.pos = None
         self.bound = 0
         self._last_write = None
+        self._exact = True
+
+    @classmethod
+    def adopt(cls, cache):
+        """A device-mode cache over an exact ``KVCache``'s own buffers (no copy)."""
+        if type(cache) is not KVCache:
+            raise TypeError("only an exact KVCache is adopted into device mode")
+        adopted = cls()
+        adopted.keys, adopted.values = cache.keys, cache.values
+        adopted.offset = int(cache.offset)
+        return adopted.enter_device_mode()
+
+    def to_host_kv(self):
+        """The exact ``KVCache`` at the observed fill, over the same buffers."""
+        if self.device_mode and not self._exact:
+            raise RuntimeError("observe() a device-mode KV cache's length before leaving it")
+        host = KVCache()
+        host.keys, host.values = self.keys, self.values
+        host.offset = int(self.bound if self.device_mode else self.offset)
+        return host
+
+    @property
+    def recovery_fill(self):
+        if not self.device_mode:
+            return int(self.offset)
+        if not self._exact:
+            raise RuntimeError(
+                "a device-mode KV cache with unobserved rows has no exact recovery level"
+            )
+        return int(self.bound)
 
     # Host mode is KVCache's ABI exactly (same planes, fields and offset law).
     def cache_operations_contract(self):
@@ -76,6 +129,7 @@ class DeviceOffsetKVCache(KVCache):
         self.pos = mx.array([int(self.offset)], dtype=mx.int32)
         self.bound = int(self.offset)
         self.device_mode = True
+        self._exact = True
         return self
 
     def observe(self, length: int):
@@ -87,6 +141,11 @@ class DeviceOffsetKVCache(KVCache):
         self.offset = length
         self.pos = mx.array([length], dtype=mx.int32)
         self._last_write = None
+        self._exact = True
+        from .cache import _note_recovery_rewind
+
+        # Rows of a borrowed recovery prefix above ``length`` may be rewritten.
+        _note_recovery_rewind(self)
         return self
 
     def leave_device_mode(self, length: int):
@@ -125,6 +184,7 @@ class DeviceOffsetKVCache(KVCache):
         self.keys = mx.slice_update(self.keys, keys, self.pos, axes=(2,))
         self.values = mx.slice_update(self.values, values, self.pos, axes=(2,))
         self._last_write = (self.pos, rows)
+        self._exact = False
         self.bound += rows
         self.offset = self.bound
         return self.keys[..., : self.bound, :], self.values[..., : self.bound, :]

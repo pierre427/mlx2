@@ -3096,6 +3096,9 @@ class ExternalDraftBatchGenerator:
         )
 
     def _sidecar(self, lane):
+        from .speculative_device_commit import refuse
+
+        refuse(lane.draft_cache, "an external draft sidecar")
         draft_cache, tail = self._snapshot_draft_state(
             lane.draft_cache, lane.tail
         )
@@ -4701,6 +4704,9 @@ class ExternalDraftBatchGenerator:
 
     def _freeze_cache(self, cache):
         """Independent committed target cache for boundaries and finishes."""
+        from .speculative_device_commit import refuse
+
+        refuse(cache, "a committed target-cache freeze")
         frozen, _sidecar, mode = snapshot_committed_cache(cache)
         if mode == "descriptor_cow":
             _bump(self.scheduler_stats, "external_cow_snapshots")
@@ -10113,6 +10119,12 @@ class ExternalDraftBatchGenerator:
             rows = transaction.commit_paths(paths)
         else:
             rows = transaction.commit(accepted_lengths=consumed)
+        # ``device_round.device_commit`` (spec-round DC-4, default off): the
+        # caches committed on the device; the drafter rings take every verify
+        # feature row and keep the committed count.
+        device_commit = bool(getattr(transaction, "device_commit", False))
+        if device_commit and (deferred_context or deferred_context_uids):
+            raise RuntimeError("a device-commit round has no deferred draft context")
         for decision, used in zip(decisions, consumed):
             # Delivered token j was drawn from verify row j: exactly ``used``
             # rows (accepted drafts plus the correction/bonus row, cut at a
@@ -10142,7 +10154,12 @@ class ExternalDraftBatchGenerator:
             lane.cache = rows[row]
             if committed_rngs is not None:
                 lane.rng = committed_rngs[row]
-            if decision.commit_rows is None:
+            if decision.commit_rows is None and device_commit:
+                from .speculative_device_commit import stage_tail
+
+                tail = features[row:row+1]
+                stage_tail(lane, transaction.count_for(consumed[row]), consumed[row])
+            elif decision.commit_rows is None:
                 tail = features[row:row+1,:consumed[row]]
             elif decision.committed_tail is not None:
                 tail = decision.committed_tail
@@ -10157,6 +10174,12 @@ class ExternalDraftBatchGenerator:
             lane.tail = tail
             lane.history.extend(committed_inputs)
             lane.anchor = emitted[-1]
+            if device_commit and (
+                any(token in self.stops for token in emitted)
+                or lane.generated + len(emitted) >= lane.maximum
+            ):
+                # The finish below freezes the prompt cache and the sidecar.
+                self.device_round.leave_device_form(self, [lane])
             round_accepted = _delivered_accepts(decision)
             self.scheduler_stats["accepted_proposals"] += round_accepted
             self.scheduler_stats["proposed_tokens"] += count
@@ -13278,6 +13301,13 @@ class ExternalDraftBatchGenerator:
                 return self._ordinary_round(cohort)
         if forced_depth not in (None, 0):
             raise ValueError("external forced draft depth must be zero or absent")
+        device_round = getattr(self, "device_round", None)
+        if (device_round is not None and device_round.device_commit
+                and (forced_depth is not None
+                     or any(lane.ordinary or _speculation_parked(lane) for lane in cohort))):
+            # Ordinary, parked and forced-depth rounds run on host-form caches;
+            # the device-round runner converts back on its own declines.
+            device_round.leave_device_form(self, cohort)
         if forced_depth is None and cohort and all(lane.ordinary for lane in cohort):
             inflight = self._ordinary_inflight
             if inflight is not None or self._ordinary_pipeline_eligible(cohort):
@@ -13313,7 +13343,6 @@ class ExternalDraftBatchGenerator:
                 and self.adaptive_policy.costs(len(cohort)) is not None):
             self._probe_branch("request_adaptive")
             return self._request_adaptive_round(cohort)
-        device_round = getattr(self, "device_round", None)
         if device_round is not None:
             self._probe_branch("device_round")
             if device_round.run(self, cohort, forced_depth):
@@ -16404,6 +16433,9 @@ class ExternalDraftBatchGenerator:
                     getattr(self, name, {}).pop(uid, None)
                 lane.cancelled = bool(cancelled); self.scheduler_stats["cancelled"] += int(cancelled)
                 if return_prompt_caches and uid in requested_uids:
+                    device_round = getattr(self, "device_round", None)
+                    if device_round is not None and device_round.device_commit:
+                        device_round.leave_device_form(self, [lane])
                     result[uid] = self._freeze_cache(lane.cache)
                 lane.ready.clear()
         for failed_uids, cohort, reason in owned_failures:

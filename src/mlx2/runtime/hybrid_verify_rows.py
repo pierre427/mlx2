@@ -539,7 +539,157 @@ class HybridVerifyTransaction:
             raise first
 
 
+class DeviceCommitTransaction:
+    """The device-commit mode of a hybrid verify transaction (spec-round DC-4).
+
+    One B1 lane whose global layers are device-mode ``DeviceOffsetKVCache``
+    and whose recurrent layers are ``ArraysCache`` rows with a staged device
+    rollback (Kimi/Raon RDA), opened by ``speculative_device_round`` under
+    ``device_round.device_commit`` (default off). There are no ``Integral``
+    offset reads beyond each KV cache's exact host bound at ``begin`` and no
+    trims:
+
+    * ``commit`` keeps the first ``count`` verify rows of every layer on the
+      device: KV ``device_commit(count)``, RDA ``device_rollback(count)``
+      (which also closes that row's speculation window, so it is not trimmed
+      again). ``count`` is the device int32 the round staged
+      (``stage_counts``), else the host length; then, because this slice
+      still reads every round's packet, each KV cache is ``observe``d at its
+      exact length, leaving no slack.
+    * ``abort`` returns every row to the pre-round boundary: KV caches are
+      observed at their base (rows past it are stale slack, as after a host
+      trim), and recurrent rows take back their pre-round state references.
+    """
+
+    device_commit = True
+    batched = False
+    plain = False
+
+    def __init__(self, caches, lengths):
+        from .models.cache import ArraysCache
+        from .models.device_offset_kv import DeviceOffsetKVCache
+
+        caches = list(caches)
+        if len(lengths) != 1 or not isinstance(lengths[0], Integral) or lengths[0] < 1:
+            raise ValueError("a device-commit transaction verifies one lane of at least one row")
+        self.lengths = [int(lengths[0])]
+        self.width = self.lengths[0]
+        self.caches = caches
+        self.closed = False
+        self._kv = []
+        self._recurrent = []
+        self._counts = None
+        for cache in caches:
+            if type(cache) is DeviceOffsetKVCache:
+                if not cache.device_mode or not cache._exact:
+                    raise HybridVerifyUnsupported(
+                        "a device-commit lane needs every KV cache in device mode at an exact length"
+                    )
+                self._kv.append((cache, int(cache.bound)))
+            elif type(cache) is ArraysCache and _recurrent(cache):
+                if cache.speculating:
+                    raise ValueError("recurrent row already has a speculation owner")
+                if cache.batch_size != 1 and not cache.empty():
+                    raise ValueError("each authoritative recurrent cache must be a B1 row")
+                self._recurrent.append(
+                    (cache, list(cache.cache), cache.lengths, cache.left_padding)
+                )
+            else:
+                raise HybridVerifyUnsupported(
+                    f"a device-commit lane has no device form for {type(cache).__name__}"
+                )
+        started = []
+        try:
+            for cache, *_state in self._recurrent:
+                cache.start_speculation()
+                started.append(cache)
+        except BaseException:
+            for cache in started:
+                cache.stop_speculation()
+            self.closed = True
+            raise
+
+    def stage_counts(self, counts, expected):
+        """The device int32 ``[1]`` count per lane and the host value it holds."""
+        if len(counts) != 1 or len(expected) != 1:
+            raise ValueError("a device-commit transaction stages one lane count")
+        self._counts = (counts[0], int(expected[0]))
+
+    def count_for(self, accepted):
+        """The device count for ``accepted`` committed rows (``_commit`` stages
+        the drafter rings with it)."""
+        return self._count(int(accepted))
+
+    def _count(self, accepted):
+        import mlx.core as mx
+
+        if self._counts is not None and self._counts[1] == accepted:
+            return self._counts[0].reshape(1).astype(mx.int32)
+        # A stop cut the round's delivery short of the device count.
+        return mx.array([accepted], dtype=mx.int32)
+
+    def _check_advanced(self):
+        for cache, base in self._kv:
+            if int(cache.bound) != base + self.lengths[0] or cache._last_write is None:
+                raise RuntimeError("every target layer must finish verification before commit")
+
+    def commit(self, accepted_lengths):
+        if self.closed:
+            raise RuntimeError("stale or closed device-commit transaction")
+        accepted = [int(n) for n in accepted_lengths]
+        if len(accepted) != 1 or not 1 <= accepted[0] <= self.lengths[0]:
+            raise ValueError("accepted prefix exceeds verified input length")
+        (used,) = accepted
+        try:
+            self._check_advanced()
+            count = self._count(used)
+            for cache, base in self._kv:
+                cache.device_commit(count)
+                cache.observe(base + used)
+            for cache, *_state in self._recurrent:
+                cache.device_rollback(count)
+        except BaseException:
+            self.abort()
+            raise
+        self.closed = True
+        rows = [list(self.caches)]
+        self._close()
+        return rows
+
+    def commit_paths(self, paths):
+        raise HybridVerifyUnsupported("a device-commit transaction commits chain prefixes only")
+
+    def abort(self):
+        if self.closed:
+            return
+        self.closed = True
+        first = None
+        for cache, base in self._kv:
+            try:
+                cache.observe(base)
+            except BaseException as error:  # noqa: BLE001 - every row gets its turn
+                first = first or error
+        for cache, state, lengths, left_padding in self._recurrent:
+            cache.cache = list(state)
+            cache.lengths, cache.left_padding = lengths, left_padding
+            try:
+                if cache.speculating:
+                    cache.stop_speculation()
+            except BaseException as error:  # noqa: BLE001
+                first = first or error
+        self._close()
+        if first is not None:
+            raise first
+
+    def _close(self):
+        # The staged count stays: ``_commit`` stages the drafter rings with it
+        # after this commit (``count_for``); it is one [1] int32.
+        self._kv = []
+        self._recurrent = []
+
+
 __all__ = [
+    "DeviceCommitTransaction",
     "HybridVerifyRows",
     "HybridVerifyTransaction",
     "HybridVerifyUnsupported",

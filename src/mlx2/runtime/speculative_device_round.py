@@ -61,6 +61,20 @@ calls into this module.  Switches (``device_round`` policy object):
     graph and no host read; a gain exists only where the device overlaps
     host work (the GPU), not on the CPU device.
 
+``device_commit`` (needs ``lazy_draft`` and ``decide``; slice 1a-4 DC-4,
+    design section 4.9)
+    A one-lane round commits the lane's caches on the device, with no host
+    trim: KV by ``DeviceOffsetKVCache.device_commit``, recurrent rows by
+    ``ArraysCache.device_rollback``, the DFlash2 drafter's sliding context
+    through ``DeviceRingKVCache`` rings fed every verify feature row with
+    the committed count (``speculative_device_commit``). The round still
+    reads its packet, so every device cache is observed at its exact length
+    after the commit (no slack): plumbing whose GPU A/B prices the device
+    form; depth-2 pipelining (DC-5) is where a gain can come from. A lane
+    that cannot take the device form commits on the host for that round
+    (counted under ``external_device_round_device_commit_skips``). Refused
+    beside ``prompt_copy_round``.
+
 ``prompt_copy_round`` (separate policy object, ``prompt_copy_round.py``)
     replaces a round's drafter proposals with a long copy from the prompt.
 
@@ -77,7 +91,8 @@ import numpy as np
 
 VERSION = "speculative-device-round-v1"
 POLICY_KEY = "device_round"
-_SWITCHES = ("lazy_draft", "decide", "sampled_drafts", "nucleus", "processors", "submit_drafts")
+_SWITCHES = ("lazy_draft", "decide", "sampled_drafts", "nucleus", "processors", "submit_drafts",
+             "device_commit")
 _SEED_SCALE = float(1 << 53)
 
 # Present in ``scheduler_stats`` only when the option is configured.
@@ -94,6 +109,13 @@ COUNTERS = (
     "external_device_round_declines",
 )
 DECLINE_REASONS = "external_device_round_decline_reasons"
+# Installed only when ``device_commit`` is on (switch-off stats are unchanged).
+DEVICE_COMMIT_COUNTERS = (
+    "external_device_round_device_commit_rounds",
+    "external_device_round_device_commit_enters",
+    "external_device_round_device_commit_leaves",
+)
+DEVICE_COMMIT_SKIPS = "external_device_round_device_commit_skips"
 
 
 @dataclass(frozen=True)
@@ -104,6 +126,7 @@ class DeviceRoundPolicy:
     nucleus: bool = False
     processors: bool = False
     submit_drafts: bool = False
+    device_commit: bool = False
 
     @classmethod
     def from_value(cls, value):
@@ -127,6 +150,8 @@ class DeviceRoundPolicy:
             raise ValueError(f"{POLICY_KEY}.submit_drafts requires lazy_draft")
         if policy.processors and not (policy.lazy_draft or policy.decide):
             raise ValueError(f"{POLICY_KEY}.processors requires lazy_draft or decide")
+        if policy.device_commit and not (policy.lazy_draft and policy.decide):
+            raise ValueError(f"{POLICY_KEY}.device_commit requires lazy_draft and decide")
         if not any(getattr(policy, key) for key in _SWITCHES):
             return None
         return policy
@@ -184,8 +209,24 @@ class DeviceRound:
         # declines are counted here too.
         stats.update(dict.fromkeys(COUNTERS, 0))
         stats[DECLINE_REASONS] = {}
+        if self.device_commit:
+            stats.update(dict.fromkeys(DEVICE_COMMIT_COUNTERS, 0))
+            stats[DEVICE_COMMIT_SKIPS] = {}
         if self.copy is not None:
             self.copy.install_counters(stats)
+
+    @property
+    def device_commit(self):
+        return bool(self.policy is not None and self.policy.device_commit)
+
+    def leave_device_form(self, owner, lanes):
+        """Return every device-form lane in ``lanes`` to its exact host form."""
+        from . import speculative_device_commit as commit
+
+        for lane in lanes:
+            if commit.leave(owner, lane):
+                _bump(owner.scheduler_stats, "external_device_round_device_commit_leaves")
+                self._lane_count(lane, "device_commit_leaves")
 
     # -- receipts ---------------------------------------------------------------
     def settings(self):
@@ -293,7 +334,23 @@ class DeviceRound:
 
     # -- the runner ---------------------------------------------------------------
     def run(self, owner, cohort, forced_depth):
-        """Serve one chain round here; False leaves it to ``_run_round``."""
+        """Serve one chain round here; False leaves it to ``_run_round``.
+
+        Under ``device_commit`` a lane leaves its device form whenever this
+        runner does not serve the round (a decline, a restored round, a
+        failure): the host path that follows needs host-form caches."""
+        if not self.device_commit:
+            return self._serve(owner, cohort, forced_depth)
+        try:
+            served = self._serve(owner, cohort, forced_depth)
+        except BaseException:
+            self.leave_device_form(owner, cohort)
+            raise
+        if not served:
+            self.leave_device_form(owner, cohort)
+        return served
+
+    def _serve(self, owner, cohort, forced_depth):
         lazy = self.policy is not None and self.policy.lazy_draft
         if not lazy and self.copy is None:
             return False
@@ -402,6 +459,7 @@ class DeviceRound:
         from .proposal_providers import PointMassLaw
 
         mx = owner.mx
+        on_device = self._enter_device_commit(owner, cohort, copies)
         recovery = owner._snapshot_round(cohort)
         owner.scheduler_stats["recovery_checkpoint_captures"] += len(recovery)
         stats_snapshot = owner._snapshot_scheduler_stats()
@@ -505,8 +563,13 @@ class DeviceRound:
                 ])
                 for row in rows
             ])
-            target = owner._target_owner([lane.cache for lane in cohort])
-            transaction = target.begin(lengths=[count + 1 for count in counts])
+            if on_device:
+                from .hybrid_verify_rows import DeviceCommitTransaction
+
+                transaction = DeviceCommitTransaction(cohort[0].cache, [counts[0] + 1])
+            else:
+                target = owner._target_owner([lane.cache for lane in cohort])
+                transaction = target.begin(lengths=[count + 1 for count in counts])
             logits, features = owner._cohort_target_forward(
                 inputs, transaction, cohort, site="standard_verify"
             )
@@ -518,6 +581,11 @@ class DeviceRound:
                 _bump(owner.scheduler_stats, "external_device_round_host_reads")
                 decisions = self._finish(owner, plans, logits)
                 hosts = [plan.drafts_host for plan in plans]
+                if on_device:
+                    # The device count the caches keep, and the host value it
+                    # holds (a stop may cut delivery shorter: host count then).
+                    transaction.stage_counts([plans[0].accepted + 1],
+                                             [decisions[0].accepted + 1])
             else:
                 mx.eval(logits, features, *[row.drafts for row in rows])
                 _bump(owner.scheduler_stats, "external_device_round_host_reads")
@@ -560,6 +628,9 @@ class DeviceRound:
             _bump(owner.scheduler_stats, "external_device_round_rounds")
             for lane in cohort:
                 self._lane_count(lane, "rounds")
+            if on_device:
+                _bump(owner.scheduler_stats, "external_device_round_device_commit_rounds")
+                self._lane_count(cohort[0], "device_commit_rounds")
             owner._commit(
                 cohort, decisions, features, blocks=blocks, transaction=transaction,
                 deferred_context=False, deferred_context_uids=set(),
@@ -579,6 +650,34 @@ class DeviceRound:
             raise
         finally:
             owner._open = False
+
+    def _enter_device_commit(self, owner, cohort, copies):
+        """Whether this round commits on the device (lane entered device form)."""
+        from . import speculative_device_commit as commit
+
+        if not self.device_commit:
+            return False
+        reason = None
+        if getattr(owner, "cost_per_commit_handoff", None) is not None:
+            # A parked lane's batch route (``_round_at_batch_route``) reads its
+            # caches and tail before any round dispatch; keep host form there.
+            reason = "cost_handoff"
+        elif len(cohort) != 1:
+            reason = "width"
+        elif copies[0] is not None:
+            reason = "prompt_copy"
+        else:
+            reason = commit.lane_reason(owner, cohort[0])
+        if reason is not None:
+            # This round commits on the host; a device-form lane leaves first.
+            self.leave_device_form(owner, cohort)
+            skips = owner.scheduler_stats.setdefault(DEVICE_COMMIT_SKIPS, {})
+            skips[reason] = skips.get(reason, 0) + len(cohort)
+            return False
+        if commit.enter(owner, cohort[0]):
+            _bump(owner.scheduler_stats, "external_device_round_device_commit_enters")
+            self._lane_count(cohort[0], "device_commit_enters")
+        return True
 
     # -- the decision -------------------------------------------------------------
     def verify(self, owner, cohort, blocks, logits):
@@ -757,6 +856,7 @@ class DeviceRound:
                 bonus = mx.random.categorical(logp[count], key=keys[2 * count + 1]).astype(int32)
                 outcomes = mx.stack([*corrections, bonus])
                 last = mx.take(outcomes, accepted.reshape(1))
+        plan.accepted = accepted.reshape(1).astype(int32)
         parts = [accepted.reshape(1).astype(int32), finite.reshape(1), last.reshape(1),
                  row.drafts.reshape(-1).astype(int32)]
         if plan.fits is not None:
@@ -844,6 +944,10 @@ def install(owner, device_round, prompt_copy_round):
 
     policy = DeviceRoundPolicy.from_value(device_round)
     copy_policy = PromptCopyPolicy.from_value(prompt_copy_round)
+    if policy is not None and policy.device_commit and copy_policy is not None:
+        # A copy round runs no drafter and commits its pending context on the
+        # host; the device rings would need a second append per round.
+        raise ValueError(f"{POLICY_KEY}.device_commit is refused beside prompt_copy_round")
     if policy is None and copy_policy is None:
         owner.device_round = None
         return None
@@ -851,4 +955,5 @@ def install(owner, device_round, prompt_copy_round):
     return owner.device_round
 
 
-__all__ = ["COUNTERS", "DECLINE_REASONS", "VERSION", "DeviceRound", "DeviceRoundPolicy", "install"]
+__all__ = ["COUNTERS", "DECLINE_REASONS", "DEVICE_COMMIT_COUNTERS", "DEVICE_COMMIT_SKIPS",
+           "VERSION", "DeviceRound", "DeviceRoundPolicy", "install"]

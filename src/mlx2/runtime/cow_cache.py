@@ -244,12 +244,39 @@ def _tree_array_metrics(value: Any) -> tuple[int, int]:
     return (count, nbytes)
 
 
+# Set only while a request-private recovery point is captured or restored
+# (``snapshot_recovery_descriptors``/``restore_recovery_descriptors``).  A
+# cache whose host contract is refused in some mode (a device-mode
+# ``DeviceOffsetKVCache``: no host offset) may then still be cloned under the
+# plane its type names in ``_RECOVERY_PLANE``; committed, publishable captures
+# never see this and keep refusing.
+_RECOVERY_CAPTURE = threading.local()
+
+
+def _recovery_plane(cache: Any) -> Optional[str]:
+    if not getattr(_RECOVERY_CAPTURE, "active", 0):
+        return None
+    return type(cache).__dict__.get("_RECOVERY_PLANE")
+
+
+class _RecoveryCapture:
+    def __enter__(self):
+        _RECOVERY_CAPTURE.active = getattr(_RECOVERY_CAPTURE, "active", 0) + 1
+
+    def __exit__(self, *exc):
+        _RECOVERY_CAPTURE.active -= 1
+        return False
+
+
 def _plane_for_cache(cache: Any, *, draft: bool = False) -> str:
     if draft:
         return "draft_mtp"
     try:
         contract = cache_operations(cache, capability="APCv2 COW plane classification")
     except CacheOperationsUnsupported as error:
+        plane = _recovery_plane(cache)
+        if plane is not None:
+            return plane
         raise COWCacheUnsupported(str(error)) from error
     kinds = tuple(plane.kind for plane in contract.planes)
     if "qsa_summary" in kinds:
@@ -845,14 +872,23 @@ def _clone_graph(
     memo[ident] = clone
     # Everything below an MTP-draft sidecar stays on the inherited draft
     # plane; its nested target-family contract must not reclassify it.
-    nested_contract = (
-        None
-        if plane == "draft_mtp"
-        else cache_operations(
-            value, capability="APCv2 COW nested plane classification", required=False
+    recovery_plane = None
+    try:
+        nested_contract = (
+            None
+            if plane == "draft_mtp"
+            else cache_operations(
+                value, capability="APCv2 COW nested plane classification", required=False
+            )
         )
-    )
-    if nested_contract is None:
+    except CacheOperationsUnsupported:
+        recovery_plane = _recovery_plane(value)
+        if recovery_plane is None:
+            raise
+        nested_contract = None
+    if recovery_plane is not None:
+        clone_plane = recovery_plane
+    elif nested_contract is None:
         clone_plane = plane
     else:
         nested_kinds = tuple(item.kind for item in nested_contract.planes)
@@ -1728,6 +1764,22 @@ class _BorrowedRecoveryPlane:
     rewind_guard: Any = None
 
 
+@dataclass(frozen=True)
+class _LentRecoveryPlane:
+    """A live cache that lends its buffers through its own declared hooks.
+
+    ``live.recovery_lend(clone)`` clears the buffers on the clone and returns
+    a token (or None: nothing lent); on restore
+    ``live.recovery_borrow(target, token)`` checks the token and gives the
+    restored clone the live buffers, or raises.  Used by caches whose writes
+    are not plain appends at a fill level (the DC-3 device ring).
+    """
+
+    live: Any
+    clone: Any
+    token: Any
+
+
 def snapshot_recovery_descriptors(
     prompt_cache: Iterable[Any],
     sidecar: Any = None,
@@ -1750,9 +1802,10 @@ def snapshot_recovery_descriptors(
     """
     memo = {} if memo is None else memo
     prompt_cache = list(prompt_cache)
-    snapshot, snapshot_sidecar, _receipt = snapshot_prompt_cache_descriptors(
-        prompt_cache, sidecar, memo=memo, require_committed=False, measure=False
-    )
+    with _RecoveryCapture():
+        snapshot, snapshot_sidecar, _receipt = snapshot_prompt_cache_descriptors(
+            prompt_cache, sidecar, memo=memo, require_committed=False, measure=False
+        )
     roots = [prompt_cache]
     if isinstance(sidecar, (list, tuple)):
         roots.append(sidecar)
@@ -1761,6 +1814,14 @@ def snapshot_recovery_descriptors(
     for live in _iter_cache_objects(roots):
         fields = _append_only_fields(live)
         clone = memo.get(id(live))
+        lend = type(live).__dict__.get("recovery_lend")
+        if (callable(lend) and clone is not None and clone is not live
+                and id(live) not in seen):
+            seen.add(id(live))
+            token = live.recovery_lend(clone)
+            if token is not None:
+                borrowed.append(_LentRecoveryPlane(live, clone, token))
+            continue
         if not fields or clone is None or clone is live or id(live) in seen:
             continue
         seen.add(id(live))
@@ -1879,14 +1940,18 @@ def restore_recovery_descriptors(
     one, and the restore is refused rather than served.
     """
     memo = {} if memo is None else memo
-    restored, restored_sidecar, _receipt = snapshot_prompt_cache_descriptors(
-        snapshot, sidecar, memo=memo, require_committed=False, measure=False
-    )
+    with _RecoveryCapture():
+        restored, restored_sidecar, _receipt = snapshot_prompt_cache_descriptors(
+            snapshot, sidecar, memo=memo, require_committed=False, measure=False
+        )
     pending = []
     for plane in borrowed:
         target = memo.get(id(plane.clone))
         if target is None:
             raise COWCacheError("a recovery restore lost a borrowed cache plane")
+        if isinstance(plane, _LentRecoveryPlane):
+            pending.extend(plane.live.recovery_borrow(target, plane.token))
+            continue
         who = type(plane.live).__name__
         if plane.rewind_guard is not None and plane.rewind_guard.violated:
             # Trimmed below the captured level since: the positions between

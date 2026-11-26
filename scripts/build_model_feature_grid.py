@@ -61,6 +61,8 @@ FEATURES = (
     # Spec-round Phase 1a (2026-11-26): device_round v2 slices (lazy drafts, device
     # processors, lazy composition); execution-policy key ``device_round``.
     "device_round_v2",
+    # Slice 1a-4 DC-4 (2026-11-26): ``device_round.device_commit`` (device-side cache commit).
+    "device_round.device_commit",
     # Raon-1-mini levers (2026-11-25): merged decode projections, fused mHC sites.
     "merged_projections", "mhc_fused", "mla_flash_expanded", "moe_nax_gather_affine",
     # Hy4-flash (2026-11-18): embedded DFly2 drafter, chain-packed AST executor.
