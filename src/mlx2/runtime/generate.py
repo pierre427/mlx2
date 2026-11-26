@@ -63,6 +63,7 @@ from .prefill_plan import (
 from .prefill_slice_schedule import record_slice as _record_slice
 from .round_phases import drive_round as _drive_round
 from .round_phases import publish_round
+from . import round_probe
 from .sample_utils import LaneRNG, draw_key
 from .speculative_sampling import count_delivered_relaxed_accepts
 from .state_boundaries import BoundaryPurpose, StateBoundary
@@ -9069,7 +9070,7 @@ class BatchGenerator:
             self._generation_batch.mtp_cycle_state()
             or self._generation_batch.has_deferred_lanes
         ):
-            generation_responses.extend(self._generation_batch.next())
+            generation_responses.extend(self._probed_next(self._generation_batch))
         park_mtp_tokens = len(generation_responses)
         lifecycle_failure = getattr(
             self._generation_batch, "take_atomic_cohort_failure", lambda: None
@@ -9090,7 +9091,7 @@ class BatchGenerator:
         park_plain_width = len(self._plain_fallback_batch)
         park_plain_start = len(generation_responses)
         if len(self._plain_fallback_batch) > 0:
-            plain_responses = self._plain_fallback_batch.next()
+            plain_responses = self._probed_next(self._plain_fallback_batch)
             for response in plain_responses:
                 response.ordinary_execution = True
             generation_responses.extend(plain_responses)
@@ -10135,6 +10136,15 @@ class BatchGenerator:
                 return []
         return [i for i, row in enumerate(queued) if row[0] in active["uids"]][:n]
 
+    def _probed_next(self, batch):
+        """``batch.next()``; one probe scope per decode step under MLX2_ROUND_PROBE."""
+        if not round_probe.ACTIVE:
+            return batch.next()
+        with round_probe.scope(f"generate:{type(batch).__name__}") as probe:
+            responses = batch.next()
+            probe.tokens(len(responses))
+            return responses
+
     def _round(self):
         try:
             return (yield from self._round_impl())
@@ -10163,7 +10173,7 @@ class BatchGenerator:
         if len(self._generation_batch) > 0:
             if self.adaptive_prefill or self._fairness().enabled:
                 decode_started = time.perf_counter()
-                generation_responses = self._generation_batch.next()
+                generation_responses = self._probed_next(self._generation_batch)
                 decode_completed = time.perf_counter()
                 self._last_decode_duration_ms = (
                     decode_completed - decode_started
@@ -10178,7 +10188,7 @@ class BatchGenerator:
                 )
                 self._sync_decode_fairness_stats()
             else:
-                generation_responses = self._generation_batch.next()
+                generation_responses = self._probed_next(self._generation_batch)
             self._gen_tokens_counter += len(generation_responses)
             previous_steps = self._steps_counter
             self._steps_counter += 1

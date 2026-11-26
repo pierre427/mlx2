@@ -24,6 +24,7 @@ import numpy as np
 
 from ..thinking_guard import stack_block_steer, verify_block_steer
 from . import round_phases
+from . import round_probe
 from .cohort_ownership import declared_cohort_key
 from .prompt_lookup import verify_full_accept_fraction
 from .committed_recovery import CommittedRecoverySlot
@@ -13111,19 +13112,40 @@ class ExternalDraftBatchGenerator:
                 pass
 
     def _run_round(self, cohort, *, forced_depth=None):
+        if not round_probe.ACTIVE:
+            return self._run_round_impl(cohort, forced_depth=forced_depth)
+        # Diagnostic (MLX2_ROUND_PROBE): one probe scope per round; the
+        # dispatcher below re-labels it with the branch it takes.
+        before = sum(len(lane.ready) for lane in cohort)
+        drafter = type(getattr(self, "draft", None)).__name__
+        with round_probe.scope(f"external:{drafter}:chain") as probe:
+            try:
+                return self._run_round_impl(cohort, forced_depth=forced_depth)
+            finally:
+                probe.tokens(sum(len(lane.ready) for lane in cohort) - before)
+
+    def _probe_branch(self, branch):
+        if round_probe.ACTIVE:
+            drafter = type(getattr(self, "draft", None)).__name__
+            round_probe.retag(f"external:{drafter}:{branch}")
+
+    def _run_round_impl(self, cohort, *, forced_depth=None):
         if (getattr(self, "ast_b1_tile_policy", None) == "four_path15"
             or getattr(self, "ast_packed_pattern", None)):
             if len(cohort) != 1:
                 raise ValueError("four_path15 admits only one active request")
             if forced_depth == 0 or cohort[0].maximum - cohort[0].generated <= 1:
                 _bump(self.scheduler_stats, "external_ast_b1_explicit_ordinary_terminal_rounds")
+                self._probe_branch("ordinary")
                 return self._ordinary_round(cohort)
         if forced_depth not in (None, 0):
             raise ValueError("external forced draft depth must be zero or absent")
         if forced_depth is None and cohort and all(lane.ordinary for lane in cohort):
             inflight = self._ordinary_inflight
             if inflight is not None or self._ordinary_pipeline_eligible(cohort):
+                self._probe_branch("ordinary_pipeline")
                 return self._ordinary_pipeline_round(cohort)
+            self._probe_branch("ordinary")
             return self._ordinary_round(cohort)
         if (
             forced_depth is None
@@ -13134,6 +13156,7 @@ class ExternalDraftBatchGenerator:
                 for lane in cohort
             )
         ):
+            self._probe_branch("pool")
             return self._pool_round(cohort)
         if forced_depth is None and self.draft_topology == "tree15" and all(
             lane.maximum - lane.generated > 1
@@ -13145,14 +13168,19 @@ class ExternalDraftBatchGenerator:
             # A lane's last budget token takes the chain body's zero-count
             # round, which appends the draft context and publishes the
             # sidecar; the ordinary path reported ordinary_fallback for it.
+            self._probe_branch("tree15")
             return self._tree_round(cohort)
         if (self.adaptive_policy is not None and self.adaptive_policy.mode == "per_request"
                 and self.adaptive_policy.costs(1) is not None
                 and self.adaptive_policy.costs(len(cohort)) is not None):
+            self._probe_branch("request_adaptive")
             return self._request_adaptive_round(cohort)
         device_round = getattr(self, "device_round", None)
-        if device_round is not None and device_round.run(self, cohort, forced_depth):
-            return
+        if device_round is not None:
+            self._probe_branch("device_round")
+            if device_round.run(self, cohort, forced_depth):
+                return
+            self._probe_branch("chain")
         clock = self._phase_time() if self.round_timing else None
         recovery = self._snapshot_round(cohort)
         self.scheduler_stats["recovery_checkpoint_captures"] += len(recovery)

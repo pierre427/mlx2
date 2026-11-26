@@ -1,0 +1,692 @@
+#!/usr/bin/env python3
+"""Phase 0 round-cost harness: one route, one lane, quiet vs contended host.
+
+Design: docs/research/2026-11-25-gpu-resident-spec-rounds-design.md (Phase 0,
+§4). Measurement only; it changes no route and no default.
+
+``run`` drives one already-running loopback server started with
+``MLX2_ROUND_PROBE=1`` (``src/mlx2/runtime/round_probe.py``). For each context
+size it builds a fixed prompt from distinct GSM8K test questions (no repeated
+strings), clears APCv2, sends one cold warm-up request, then measures warm
+requests (decode only; the prefix is cached) until at least ``--rounds``
+decode rounds are booked. Every quiet cell runs before any contended cell, so
+the load average of a quiet cell is never inflated by the generator's tail.
+
+Per cell it records rounds/s, tokens/s, tokens per round (accepted + bonus),
+host ms per round split into encode/submit, wait and host Python, syncs per
+round (explicit and implicit, with call sites), the 1-minute load average and
+the instantaneous runnable-process count, sampled every 5 s. Probe numbers
+come from the per-request receipt's cumulative ``round_probe`` block (fresh at
+the request's last token), differenced between consecutive requests.
+
+``--xctrace`` adds one traced request per quiet cell (never under load) under a
+bounded Metal System Trace attached to the server pid; GPU busy time is the
+union of that pid's ``metal-gpu-intervals`` divided by the probe rounds of that
+request. The traced request is excluded from the speed numbers (xctrace costs
+CPU). A trace that matched no server-pid interval, or that hit its time limit,
+yields no GPU time. Traces are large (6-14 GB at 64K on 2026-11-25), so only
+cells up to ``--trace-max-size`` (16K) are traced, with a short request
+(``--trace-max-tokens``), only when ``--trace-min-free-gib`` is free, and the
+bundle is deleted after parsing unless ``--keep-traces``.
+
+Contended cells start ``--load-workers`` busy Python processes (pytest-like:
+bytecode, dict/list churn, allocation and GC; default priority, as the real
+pytest load was; ``--load-nice`` lowers it) ``--load-ramp-s`` before measuring, and stop them after the
+cell. Each contended cell holds the load at most ``--load-ramp-s`` +
+``--cell-max-s`` and is followed by ``--cooldown-s`` without load, so lease
+heartbeats get through (2026-11-25: the CPG radio timed out at load ~48, so
+loaded stretches are at most 10 + 50 s with 60 s of cooldown, and 48 workers).
+The 1-minute load average lags the ramp, so the
+instantaneous runnable-process count is the headline contention figure.
+
+``load`` runs only the generator (calibration). ``report`` joins cell files
+into the go/no-go table of §4.4: Phase 1 is a go for a route when contended
+decode is >= 20 % slower than quiet, or when the quiet host share of round
+time is >= 15 %. The round period is decode time / rounds as the client sees
+it, so it includes the serving loop between rounds. Host share is (period -
+GPU busy) / period when a usable trace exists, else (encode/submit + host
+Python + between rounds) / period; the in-round share (encode/submit + host
+Python) / in-round wall is reported beside it.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import multiprocessing
+import os
+import re
+import shutil
+import signal
+import statistics
+import subprocess
+import sys
+import threading
+import time
+import xml.etree.ElementTree as ET
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+SCHEMA = "mlx2.spec-round-phase0.v1"
+GO_CONTENDED_SLOWDOWN = 0.20
+GO_HOST_SHARE = 0.15
+INSTRUCTION = ("\n\nSummarise the kinds of problems listed above in about 150 words, "
+               "as plain prose.")
+
+
+# --------------------------------------------------------------- host load --
+
+def _burn(deadline, parent, nice=0):
+    """One pytest-like CPU worker: Python bytecode, containers, allocation, GC."""
+    import gc
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    if nice:
+        os.nice(nice)
+    table, spin = {}, 0
+    while time.time() < deadline:
+        for i in range(2000):
+            key = f"k{(spin * 2654435761 + i) % 50021}"
+            table[key] = [i, key, (i, spin)]
+            if len(table) > 20000:
+                table.clear()
+        spin += 1
+        if spin % 64 == 0:
+            gc.collect(0)
+            if os.getppid() != parent:  # orphaned: never outlive the harness
+                return
+
+
+def runnable_processes():
+    """Instantaneous count of runnable processes (``ps`` state R)."""
+    try:
+        out = subprocess.run(["ps", "-A", "-o", "state="], capture_output=True,
+                             text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return sum(1 for line in out.split() if line.startswith("R"))
+
+
+def load_sample():
+    one, five, fifteen = os.getloadavg()
+    return {"t": time.time(), "load1": round(one, 2), "load5": round(five, 2),
+            "load15": round(fifteen, 2), "runnable": runnable_processes()}
+
+
+class LoadGenerator:
+    """N busy worker processes with a hard deadline; idempotent stop."""
+
+    def __init__(self, workers, max_seconds, nice=0):
+        self.workers = int(workers)
+        self.nice = int(nice)
+        self.max_seconds = float(max_seconds)
+        self.procs = []
+
+    def start(self):
+        ctx = multiprocessing.get_context("spawn")
+        deadline = time.time() + self.max_seconds
+        for _ in range(self.workers):
+            proc = ctx.Process(target=_burn, args=(deadline, os.getpid(), self.nice), daemon=True)
+            proc.start()
+            self.procs.append(proc)
+        return self
+
+    def stop(self):
+        for proc in self.procs:
+            if proc.is_alive():
+                proc.terminate()
+        for proc in self.procs:
+            proc.join(timeout=10)
+            if proc.is_alive():
+                proc.kill()
+                proc.join(timeout=5)
+        self.procs = []
+
+
+class Sampler(threading.Thread):
+    def __init__(self, every=5.0):
+        super().__init__(daemon=True)
+        self.every, self.samples, self._halt = every, [], threading.Event()
+
+    def run(self):
+        while not self._halt.is_set():
+            self.samples.append(load_sample())
+            self._halt.wait(self.every)
+
+    def finish(self):
+        self._halt.set()
+        self.join(timeout=15)
+        self.samples.append(load_sample())
+        return self.samples
+
+
+def load_summary(samples):
+    if not samples:
+        return {}
+    ones = [s["load1"] for s in samples]
+    runnable = [s["runnable"] for s in samples if s["runnable"] is not None]
+    return {"load1_start": ones[0], "load1_end": ones[-1], "load1_max": max(ones),
+            "load1_mean": round(statistics.fmean(ones), 2),
+            "runnable_median": statistics.median(runnable) if runnable else None,
+            "samples": samples}
+
+
+# ------------------------------------------------------------- probe math --
+
+def probe_routes(block):
+    return (block or {}).get("routes") or {}
+
+
+def probe_delta(after, before):
+    """Per-route difference of two cumulative round_probe blocks."""
+    out = {}
+    before_routes = probe_routes(before)
+    for route, row in probe_routes(after).items():
+        base = before_routes.get(route) or {}
+        delta = {key: int(row.get(key) or 0) - int(base.get(key) or 0)
+                 for key in ("rounds", "tokens", "wall_ns", "encode_submit_ns",
+                             "wait_ns", "host_python_ns", "syncs", "blocking_syncs")}
+        for group in ("explicit_syncs", "implicit_syncs"):
+            kinds = {}
+            for kind, value in (row.get(group) or {}).items():
+                prior = (base.get(group) or {}).get(kind) or {}
+                kinds[kind] = {k: int(value.get(k) or 0) - int(prior.get(k) or 0)
+                               for k in ("calls", "blocking", "encode_submit_ns", "wait_ns")}
+            delta[group] = {k: v for k, v in kinds.items() if v["calls"]}
+        if delta["rounds"]:
+            out[route] = delta
+    return out
+
+
+def add_deltas(total, delta):
+    for route, row in delta.items():
+        into = total.setdefault(route, {"explicit_syncs": {}, "implicit_syncs": {}})
+        for key, value in row.items():
+            if isinstance(value, dict):
+                for kind, counts in value.items():
+                    slot = into[key].setdefault(kind, {"calls": 0, "blocking": 0, "encode_submit_ns": 0, "wait_ns": 0})
+                    for k, v in counts.items():
+                        slot[k] = slot.get(k, 0) + v
+            else:
+                into[key] = into.get(key, 0) + value
+    return total
+
+
+def per_round(row):
+    rounds = row.get("rounds") or 0
+    if not rounds:
+        return {}
+    ms = lambda key: round(row.get(key, 0) / rounds / 1e6, 4)  # noqa: E731
+    calls = lambda group: round(sum(v["calls"] for k, v in row.get(group, {}).items()  # noqa: E731
+                                    if k != "async_eval") / rounds, 3)
+    return {"wall_ms": ms("wall_ns"), "encode_submit_ms": ms("encode_submit_ns"),
+            "wait_ms": ms("wait_ns"), "host_python_ms": ms("host_python_ns"),
+            "tokens": round(row.get("tokens", 0) / rounds, 4),
+            "syncs": round(row.get("syncs", 0) / rounds, 3),
+            "blocking_syncs": round(row.get("blocking_syncs", 0) / rounds, 3),
+            "explicit_syncs": calls("explicit_syncs"), "implicit_syncs": calls("implicit_syncs"),
+            "by_kind": {kind: round(v["calls"] / rounds, 3)
+                        for group in ("explicit_syncs", "implicit_syncs")
+                        for kind, v in sorted(row.get(group, {}).items())}}
+
+
+def dominant(routes):
+    return max(routes.items(), key=lambda item: item[1].get("rounds", 0)) if routes else (None, {})
+
+
+# ------------------------------------------------------------- GPU trace --
+
+def recording_started(text):
+    return "Recording started" in text or "Ctrl-C to stop the recording" in text
+
+
+class MetalTrace:
+    """Bounded ``xctrace`` Metal System Trace attached to one pid."""
+
+    def __init__(self, pid, path, time_limit_s):
+        self.pid, self.path, self.limit = int(pid), Path(path), int(time_limit_s)
+        self.proc, self.log, self.ready = None, None, False
+
+    def start(self):
+        if self.path.exists():
+            raise FileExistsError(f"refuse to overwrite {self.path}")
+        logpath = self.path.with_suffix(".xctrace.log")
+        self.log = logpath.open("xb")
+        self.proc = subprocess.Popen(
+            ["xcrun", "xctrace", "record", "--template", "Metal System Trace",
+             "--attach", str(self.pid), "--time-limit", f"{self.limit}s", "--no-prompt",
+             "--output", str(self.path)], stdout=self.log, stderr=subprocess.STDOUT)
+        deadline = time.monotonic() + 45
+        while time.monotonic() < deadline and self.proc.poll() is None:
+            if recording_started(logpath.read_text(errors="replace")):
+                self.ready = True
+                break
+            time.sleep(0.25)
+        if not self.ready:
+            self.stop()
+        return self.ready
+
+    def stop(self):
+        if self.proc is not None and self.proc.poll() is None:
+            self.proc.send_signal(signal.SIGINT)
+            try:
+                self.proc.wait(timeout=60)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+                self.proc.wait(timeout=10)
+        if self.log is not None:
+            self.log.close()
+            self.log = None
+        return self.proc.returncode if self.proc is not None else None
+
+
+def export_gpu_intervals(trace, out_xml):
+    subprocess.run(
+        ["xcrun", "xctrace", "export", "--input", str(trace), "--xpath",
+         '/trace-toc/run[@number="1"]/data/table[@schema="metal-gpu-intervals"]',
+         "--output", str(out_xml)], check=True, capture_output=True, timeout=600)
+    return parse_gpu_intervals(out_xml.read_text())
+
+
+def parse_gpu_intervals(xml_text):
+    """Rows of ``metal-gpu-intervals`` as dicts keyed by column mnemonic.
+
+    xctrace writes each distinct value once with ``id`` and later as ``ref``;
+    a ``<sentinel/>`` is an empty cell. Values are (text, fmt).
+    """
+    root = ET.fromstring(xml_text)
+    schema = root.find(".//schema")
+    if schema is None:
+        return []
+    columns = [col.findtext("mnemonic") for col in schema.findall("col")]
+    ids, rows = {}, []
+    for row in root.iter("row"):
+        values = {}
+        for column, cell in zip(columns, list(row)):
+            if cell.tag == "sentinel":
+                continue
+            for node in cell.iter():
+                if node.get("id") is not None:
+                    ids[node.get("id")] = node
+            node = ids.get(cell.get("ref"), cell) if cell.get("ref") else cell
+            values[column] = ((node.text or "").strip(), node.get("fmt") or "")
+        rows.append(values)
+    return rows
+
+
+def gpu_busy(rows, pid=None):
+    """Union of GPU interval time (ns) for ``pid`` (all rows when none match)."""
+    spans, matched = [], 0
+    for row in rows:
+        try:
+            start = int(row["start"][0])
+            duration = int(row["duration"][0])
+        except (KeyError, ValueError):
+            continue
+        process = row.get("process", ("", ""))[1]
+        match = re.search(r"\((\d+)\)", process)
+        owner = int(match.group(1)) if match else None
+        spans.append((owner, start, start + duration))
+        matched += pid is not None and owner == pid
+    use = [(s, e) for owner, s, e in spans if pid is None or not matched or owner == pid]
+    use.sort()
+    busy, last_end, first, last = 0, None, None, None
+    for start, end in use:
+        first = start if first is None else first
+        last = end if last is None else max(last, end)
+        if last_end is None or start >= last_end:
+            busy += end - start
+            last_end = end
+        elif end > last_end:
+            busy += end - last_end
+            last_end = end
+    return {"intervals": len(use), "pid_matched_intervals": matched,
+            "busy_ns": busy, "span_ns": (last - first) if use else 0,
+            "filter": "pid" if pid is not None and matched else "all_rows"}
+
+
+# ------------------------------------------------------------------ run --
+
+def build_prompts(sizes):
+    import spec_acceptance_gsm8k as gsm
+    from ling32_air_prefill_ab import prompt_text
+    _, files = gsm.dataset_files()
+    test = gsm.load_split(files["test"])
+    return {size: prompt_text(test, size).rsplit("\n\n", 1)[0] + INSTRUCTION for size in sizes}
+
+
+def request(client, model, text, max_tokens):
+    from ling32_air_prefill_ab import find
+    started = time.monotonic()
+    result = client.call("/v1/chat/completions", {
+        "model": model, "temperature": 0, "stream": False, "max_tokens": max_tokens,
+        "enable_thinking": False, "messages": [{"role": "user", "content": text}]})
+    elapsed = time.monotonic() - started
+    usage = result.get("usage") or {}
+    completion = int(usage.get("completion_tokens") or 0)
+    ttft = find(result, "ttft_seconds")
+    decode_s = (elapsed - ttft) if ttft is not None and elapsed > ttft else None
+    return {
+        "elapsed_s": round(elapsed, 4), "ttft_s": ttft, "decode_s": decode_s,
+        "prompt_tokens": usage.get("prompt_tokens"),
+        "cached_tokens": (usage.get("prompt_tokens_details") or {}).get("cached_tokens"),
+        "completion_tokens": completion,
+        "decode_tok_s": ((completion - 1) / decode_s if decode_s and completion > 1 else None),
+        "finish_reason": (result.get("choices") or [{}])[0].get("finish_reason"),
+        "route": (result.get("mlx2") or {}).get("route"),
+    }, find(result, "round_probe")
+
+
+def measure_cell(client, model, text, args, condition, out_dir, size, server_pid, baseline):
+    """Warm requests until ``--rounds`` decode rounds; returns (cell, last probe block)."""
+    rows, totals, last = [], {}, baseline
+    sampler = Sampler()
+    sampler.start()
+    started = time.monotonic()
+    for index in range(args.max_requests):
+        row, block = request(client, model, text, args.max_tokens)
+        if not (block or {}).get("enabled"):
+            raise SystemExit("server receipt has no enabled round_probe; start it with MLX2_ROUND_PROBE=1")
+        delta = probe_delta(block, last)
+        last = block
+        row["probe"] = delta
+        rows.append(row)
+        add_deltas(totals, delta)
+        print(json.dumps({"size": size, "condition": condition, "request": index,
+                          "decode_tok_s": row["decode_tok_s"],
+                          "rounds": sum(r["rounds"] for r in delta.values())}), flush=True)
+        booked = sum(r.get("rounds", 0) for r in totals.values())
+        if booked >= args.rounds or (condition == "contended" and
+                                     time.monotonic() - started >= args.cell_max_s):
+            break
+    trace = None
+    # Trace quiet cells only: the host-share criterion reads the quiet GPU time,
+    # and a trace under load would keep the generator running for minutes.
+    # Metal traces are large (6-14 GB at 64K on 2026-11-25; they filled the
+    # disk): trace only up to --trace-max-size, a short request, with free
+    # space checked first, and delete the bundle once parsed.
+    free_gib = shutil.disk_usage(out_dir).free / 2**30
+    if args.xctrace and server_pid and condition == "quiet" and (
+            size > args.trace_max_size or free_gib < args.trace_min_free_gib):
+        trace = {"status": "skipped", "free_gib": round(free_gib, 1),
+                 "reason": (f"context {size} > --trace-max-size {args.trace_max_size}"
+                            if size > args.trace_max_size
+                            else f"free disk {free_gib:.0f} GiB < {args.trace_min_free_gib}")}
+    elif args.xctrace and server_pid and condition == "quiet":
+        trace_path = out_dir / f"metal-{size}-{condition}.trace"
+        tracer = MetalTrace(server_pid, trace_path, args.trace_limit_s)
+        trace = {"path": str(trace_path), "status": "unavailable"}
+        try:
+            if tracer.start():
+                row, block = request(client, model, text, args.trace_max_tokens)
+                delta = probe_delta(block, last)
+                last = block
+                trace.update(status="recorded", request=row, probe=delta)
+        finally:
+            trace["recorder_returncode"] = tracer.stop()
+        if trace["status"] == "recorded" and trace_path.exists():
+            try:
+                rows_xml = export_gpu_intervals(trace_path, out_dir / f"metal-{size}-{condition}.xml")
+                busy = gpu_busy(rows_xml, server_pid)
+                rounds = sum(r["rounds"] for r in trace["probe"].values())
+                wall = sum(r["wall_ns"] for r in trace["probe"].values())
+                traced = trace["request"]
+                truncated = traced["elapsed_s"] >= args.trace_limit_s - 5
+                usable = busy["filter"] == "pid" and not truncated and rounds
+                trace.update(status="parsed" if usable else "unusable", gpu=busy,
+                             truncated=truncated,
+                             unusable_reason=None if usable else (
+                                 "no interval matched the server pid" if busy["filter"] != "pid"
+                                 else "trace time limit reached" if truncated else "no rounds"),
+                             gpu_ms_per_round=(busy["busy_ns"] / rounds / 1e6) if usable else None,
+                             probe_wall_ms_per_round=(wall / rounds / 1e6) if rounds else None,
+                             note="GPU busy includes the request's short warm prefill")
+            except (subprocess.SubprocessError, OSError, ET.ParseError) as error:
+                trace.update(status="export_failed", error=f"{type(error).__name__}: {error}")
+        if trace_path.exists():
+            trace["trace_bytes"] = sum(f.stat().st_size for f in trace_path.rglob("*") if f.is_file()) \
+                if trace_path.is_dir() else trace_path.stat().st_size
+            if not args.keep_traces:
+                shutil.rmtree(trace_path, ignore_errors=True) if trace_path.is_dir() else trace_path.unlink()
+                trace["trace_deleted"] = True
+    samples = sampler.finish()
+    name, top = dominant(totals)
+    decode = [r["decode_tok_s"] for r in rows if r["decode_tok_s"]]
+    decode_s = sum(r["decode_s"] or 0 for r in rows)
+    rounds = top.get("rounds", 0)
+    pr = per_round(top)
+    if pr and decode_s and rounds:
+        # Round period as the client sees it: in-scope round time plus the
+        # serving loop between rounds (publication, detokenization, APCv2).
+        pr["period_ms"] = round(decode_s * 1000 / rounds, 4)
+        pr["outside_ms"] = round(max(0.0, pr["period_ms"] - pr["wall_ms"]), 4)
+    cell = {
+        "size": size, "condition": condition, "requests": rows,
+        "route_label": name, "routes": totals,
+        "rounds": rounds,
+        "rounds_per_s": (rounds / decode_s) if decode_s and rounds else None,
+        "decode_tok_s_median": statistics.median(decode) if decode else None,
+        "per_round": pr,
+        "prompt_tokens": statistics.median([r["prompt_tokens"] for r in rows if r["prompt_tokens"]] or [0]) or None,
+        "load": load_summary(samples),
+        "metal_trace": trace,
+    }
+    return cell, last
+
+
+def run(args):
+    import spec_acceptance_gsm8k as gsm
+    # A TERM from the unit's trap must unwind through ``finally`` so the load
+    # workers stop with the harness (they also exit when orphaned).
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
+    out_dir = Path(args.output)
+    if out_dir.exists() and any(out_dir.iterdir()):
+        raise SystemExit(f"refuse nonempty evidence directory {out_dir}")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    client = gsm.Client(args.base_url, Path(args.admin_token).read_text().strip())
+    status = client.call("/v1/status", timeout=30)
+    model = gsm.served_model_name(status, args.checkpoint)
+    sizes = [int(v) for v in args.sizes.split(",")]
+    prompts = build_prompts(sizes)
+    conditions = [c for c in args.conditions.split(",") if c]
+    meta = {
+        "schema": SCHEMA, "checkpoint": args.checkpoint, "arm": args.arm,
+        "route": args.route, "source_revision": args.source_revision,
+        "served_artifact": status.get("artifact"), "runtime": status.get("runtime"),
+        "route_receipt": status.get("route_receipt"),
+        "settings": status.get("settings"),
+        "command_buffer_env": ((status.get("round_probe") or {}).get("command_buffer_env")
+                               or {k: os.environ.get(k) for k in ("MLX_MAX_OPS_PER_BUFFER", "MLX_MAX_MB_PER_BUFFER")}),
+        "load_workers": args.load_workers, "load_nice": args.load_nice,
+        "load_ramp_s": args.load_ramp_s, "cell_max_s": args.cell_max_s, "cooldown_s": args.cooldown_s,
+        "rounds_target": args.rounds,
+        "max_tokens": args.max_tokens, "server_pid": args.server_pid,
+        "host": {"cpus": os.cpu_count()}, "started_at": time.time(),
+        "thermal_admission": False, "performance_claim": False,
+        "purpose": "Phase 0 attribution (quiet vs contended); not publishable statistics",
+    }
+    cells, last = [], None
+    for condition in conditions:  # every quiet cell before any contended cell
+        for size in sizes:
+            client.call("/v1/admin/apc/clear", {"reason": f"phase0-{size}"}, admin=True)
+            warm, last = request(client, model, prompts[size], 8)  # cold prefill, unmeasured
+            generator = None
+            if condition == "contended":
+                generator = LoadGenerator(args.load_workers, args.load_ramp_s + args.cell_max_s + 600,
+                                          nice=args.load_nice).start()
+                time.sleep(args.load_ramp_s)
+            try:
+                cell, last = measure_cell(client, model, prompts[size], args, condition,
+                                          out_dir, size, args.server_pid, last)
+            finally:
+                if generator is not None:
+                    generator.stop()
+            cell["warmup"] = warm
+            cells.append(cell)
+            (out_dir / f"cell-{size}-{condition}.json").write_text(json.dumps(cell, indent=1) + "\n")
+            if generator is not None:
+                time.sleep(args.cooldown_s)
+    status_after = client.call("/v1/status", timeout=30)
+    document = {**meta, "finished_at": time.time(), "cells": cells,
+                "round_probe_final": status_after.get("round_probe"),
+                "scheduler_final": status_after.get("scheduler")}
+    (out_dir / "phase0.json").write_text(json.dumps(document, indent=1) + "\n")
+    print(json.dumps(summarize(document), indent=1))
+
+
+# --------------------------------------------------------------- report --
+
+def summarize(document):
+    """Go/no-go per (checkpoint, arm, size) against §4.4."""
+    by_size = {}
+    for cell in document.get("cells", []):
+        by_size.setdefault(cell["size"], {})[cell["condition"]] = cell
+    rows = []
+    for size, pair in sorted(by_size.items()):
+        quiet, contended = pair.get("quiet"), pair.get("contended")
+        row = {"checkpoint": document.get("checkpoint"), "arm": document.get("arm"),
+               "route": document.get("route"), "size": size,
+               "source_revision": document.get("source_revision"),
+               "command_buffer_env": document.get("command_buffer_env")}
+        for name, cell in (("quiet", quiet), ("contended", contended)):
+            if cell is None:
+                continue
+            pr = cell.get("per_round") or {}
+            trace = cell.get("metal_trace") or {}
+            row[name] = {
+                "route_label": cell.get("route_label"),
+                "decode_tok_s": cell.get("decode_tok_s_median"),
+                "rounds_per_s": cell.get("rounds_per_s"),
+                "tokens_per_round": pr.get("tokens"),
+                "prompt_tokens": cell.get("prompt_tokens"),
+                "period_ms": pr.get("period_ms"), "outside_ms": pr.get("outside_ms"),
+                "wall_ms": pr.get("wall_ms"), "encode_submit_ms": pr.get("encode_submit_ms"),
+                "wait_ms": pr.get("wait_ms"), "host_python_ms": pr.get("host_python_ms"),
+                "gpu_ms": trace.get("gpu_ms_per_round"),
+                "syncs": pr.get("syncs"), "blocking_syncs": pr.get("blocking_syncs"),
+                "explicit_syncs": pr.get("explicit_syncs"),
+                "implicit_syncs": pr.get("implicit_syncs"),
+                "load1_mean": (cell.get("load") or {}).get("load1_mean"),
+                "runnable_median": (cell.get("load") or {}).get("runnable_median"),
+            }
+        q, c = row.get("quiet"), row.get("contended")
+        slowdown = None
+        if q and c and q["decode_tok_s"] and c["decode_tok_s"]:
+            slowdown = 1 - c["decode_tok_s"] / q["decode_tok_s"]
+        host_share, basis, in_scope = None, None, None
+        if q and q.get("wall_ms"):
+            period = q.get("period_ms") or q["wall_ms"]
+            outside = q.get("outside_ms") or 0.0
+            if q.get("gpu_ms") is not None:
+                host_share, basis = max(0.0, 1 - q["gpu_ms"] / period), "1 - gpu_ms/period_ms"
+            else:
+                host_share = (q["encode_submit_ms"] + q["host_python_ms"] + outside) / period
+                basis = "(encode_submit_ms + host_python_ms + outside_ms)/period_ms"
+            in_scope = (q["encode_submit_ms"] + q["host_python_ms"]) / q["wall_ms"]
+        mal_drift = None
+        if q and c and q["tokens_per_round"] and c["tokens_per_round"]:
+            mal_drift = c["tokens_per_round"] / q["tokens_per_round"] - 1
+        row["contended_slowdown"] = slowdown
+        row["quiet_host_share"] = host_share
+        row["host_share_basis"] = basis
+        row["quiet_in_round_host_share"] = in_scope
+        row["tokens_per_round_drift"] = mal_drift
+        row["phase1_go"] = bool((slowdown is not None and slowdown >= GO_CONTENDED_SLOWDOWN)
+                                or (host_share is not None and host_share >= GO_HOST_SHARE))
+        row["go_reasons"] = [reason for reason, hit in (
+            (f"contended {slowdown:.1%} slower >= 20%" if slowdown is not None else "", slowdown is not None and slowdown >= GO_CONTENDED_SLOWDOWN),
+            (f"quiet host share {host_share:.1%} >= 15%" if host_share is not None else "", host_share is not None and host_share >= GO_HOST_SHARE),
+        ) if hit]
+        rows.append(row)
+    return {"schema": SCHEMA + ".summary", "rows": rows}
+
+
+def fmt(value, spec=".1f"):
+    return "-" if value is None else format(value, spec)
+
+
+def report(args):
+    rows = []
+    for path in args.inputs:
+        rows.extend(summarize(json.loads(Path(path).read_text()))["rows"])
+    lines = ["| checkpoint | arm | prompt tok | quiet tok/s | contended tok/s | slowdown | tok/round q/c | "
+             "period ms q | in-round ms q | encode ms q | wait ms q | python ms q | between ms q | GPU ms q | "
+             "blocking syncs/round q | runnable c (load1) | host share q | Phase 1 |",
+             "|" + "---|" * 18]
+    for r in rows:
+        q, c = r.get("quiet") or {}, r.get("contended") or {}
+        lines.append("| " + " | ".join([
+            str(r["checkpoint"]).split("@")[0], str(r["arm"]),
+            fmt(q.get("prompt_tokens") or r["size"], ".0f"),
+            fmt(q.get("decode_tok_s")), fmt(c.get("decode_tok_s")),
+            fmt(r["contended_slowdown"], ".1%"),
+            f"{fmt(q.get('tokens_per_round'), '.2f')}/{fmt(c.get('tokens_per_round'), '.2f')}",
+            fmt(q.get("period_ms"), ".2f"), fmt(q.get("wall_ms"), ".2f"),
+            fmt(q.get("encode_submit_ms"), ".2f"), fmt(q.get("wait_ms"), ".2f"),
+            fmt(q.get("host_python_ms"), ".2f"), fmt(q.get("outside_ms"), ".2f"),
+            fmt(q.get("gpu_ms"), ".2f"), fmt(q.get("blocking_syncs"), ".1f"),
+            f"{fmt(c.get('runnable_median'), '.0f')} ({fmt(c.get('load1_mean'), '.0f')})",
+            fmt(r["quiet_host_share"], ".1%"),
+            "go" if r["phase1_go"] else "no-go"]) + " |")
+    text = "\n".join(lines) + "\n"
+    document = {"schema": SCHEMA + ".report", "rows": rows,
+                "criteria": {"contended_slowdown": GO_CONTENDED_SLOWDOWN, "quiet_host_share": GO_HOST_SHARE}}
+    if args.output:
+        Path(args.output).write_text(json.dumps(document, indent=1) + "\n")
+        Path(args.output).with_suffix(".md").write_text(text)
+    print(text)
+
+
+def load(args):
+    generator = LoadGenerator(args.workers, args.seconds + 30).start()
+    try:
+        end = time.time() + args.seconds
+        while time.time() < end:
+            time.sleep(min(5, max(0, end - time.time())))
+            print(json.dumps(load_sample()), flush=True)
+    finally:
+        generator.stop()
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = parser.add_subparsers(dest="command", required=True)
+    r = sub.add_parser("run")
+    r.add_argument("--base-url", required=True)
+    r.add_argument("--admin-token", required=True)
+    r.add_argument("--checkpoint", required=True, help="<artifact name>@<fingerprint>")
+    r.add_argument("--arm", required=True)
+    r.add_argument("--route", default="", help="human route description for the receipt")
+    r.add_argument("--source-revision", required=True, help="mlx2 commit the server runs")
+    r.add_argument("--sizes", default="1024,16384")
+    r.add_argument("--conditions", default="quiet,contended")
+    r.add_argument("--rounds", type=int, default=200, help="minimum decode rounds per cell")
+    r.add_argument("--max-requests", type=int, default=10)
+    r.add_argument("--max-tokens", type=int, default=256)
+    r.add_argument("--load-workers", type=int, default=48)
+    r.add_argument("--load-nice", type=int, default=0,
+                   help="nice increment for the load workers (0 = default priority, as the real pytest load)")
+    r.add_argument("--load-ramp-s", type=float, default=10)
+    r.add_argument("--cell-max-s", type=float, default=50,
+                   help="contended: stop measuring after this long under load")
+    r.add_argument("--cooldown-s", type=float, default=60)
+    r.add_argument("--server-pid", type=int)
+    r.add_argument("--xctrace", action="store_true")
+    r.add_argument("--trace-limit-s", type=int, default=60)
+    r.add_argument("--trace-max-size", type=int, default=16384, help="trace only cells up to this context")
+    r.add_argument("--trace-max-tokens", type=int, default=64, help="max_tokens of the traced request")
+    r.add_argument("--trace-min-free-gib", type=float, default=60)
+    r.add_argument("--keep-traces", action="store_true", help="keep .trace bundles after parsing")
+    r.add_argument("--output", required=True)
+    p = sub.add_parser("report")
+    p.add_argument("inputs", nargs="+")
+    p.add_argument("--output")
+    g = sub.add_parser("load")
+    g.add_argument("--workers", type=int, default=64)
+    g.add_argument("--seconds", type=float, default=60)
+    args = parser.parse_args(argv)
+    {"run": run, "report": report, "load": load}[args.command](args)
+
+
+if __name__ == "__main__":
+    main()

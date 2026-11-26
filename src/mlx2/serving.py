@@ -52,6 +52,7 @@ from .power_telemetry import PowerTelemetry, PowerTelemetryPolicy
 from .runtime.apc_numerics import moe_rhs_pad_identity as _moe_rhs_pad_identity
 from .runtime.eval_watchdog import EvalWatchdog
 from .runtime import loop_trace as _loop_trace
+from .runtime import round_probe as _round_probe
 from .runtime.gpu_keep_warm import GpuKeepWarm, GpuKeepWarmPolicy
 from .runtime.weight_space_metrics import unconfigured_runtime_state
 from .runtime.residency_heartbeat import (
@@ -62,6 +63,16 @@ from .runtime.residency_heartbeat import (
 )
 
 log = logging.getLogger(__name__)
+
+
+def _round_probe_active():
+    """MLX2_ROUND_PROBE (diagnostic, default off): per-round host attribution."""
+    return _round_probe.ACTIVE
+
+
+def _round_probe_status():
+    return _round_probe.status()
+
 
 # Execution-policy keys the serving engine owns; every other key is passed to
 # the adapter factory, which validates it.  One list so offline tools (the
@@ -14137,6 +14148,7 @@ class ServingEngine(KernelReloadMixin):
                     "approximate_kv": approximate_status,
                     "scheduler": dict(batch.scheduler_stats),
                     "segmented_self_mtp": segmented_self_mtp_stats(),
+                    "round_probe": _round_probe_status(),
                     "spomin_live_surgery": (
                         spomin_manager.snapshot()
                         if spomin_manager is not None
@@ -18009,6 +18021,11 @@ class ServingEngine(KernelReloadMixin):
                                     "mtp": response.mtp_receipt,
                                     "speculation": getattr(response, "speculative_receipt", None),
                                     **(
+                                        {"round_probe": _round_probe_status()}
+                                        if _round_probe_active()
+                                        else {}
+                                    ),
+                                    **(
                                         {
                                             "media_decode": media_decode_receipt(
                                                 job,
@@ -18331,6 +18348,7 @@ class ServingEngine(KernelReloadMixin):
                             ),
                             "scheduler": dict(batch.scheduler_stats),
                             "segmented_self_mtp": segmented_self_mtp_stats(),
+                            "round_probe": _round_probe_status(),
                             "metal_active_bytes": mx.get_active_memory(),
                             "metal_peak_bytes": mx.get_peak_memory(),
                             "process_physical_footprint_bytes": physical_footprint_bytes(),
