@@ -266,6 +266,12 @@ def _flash_next(path: Path, config: dict) -> AdapterResolution:
     return AdapterResolution(module.FlashNextAdapter, descriptor, artifact)
 
 
+def _sensenova_loop(path: Path, config: dict) -> AdapterResolution:
+    from .sensenova_loop import DESCRIPTOR, SenseNovaLoopAdapter, inspect_artifact
+
+    return AdapterResolution(SenseNovaLoopAdapter, DESCRIPTOR, inspect_artifact(path))
+
+
 def _qwen3_5_dense(path: Path, config: dict) -> AdapterResolution:
     text = config.get("text_config", config)
     topology = (text.get("num_hidden_layers"), text.get("hidden_size"))
@@ -364,6 +370,8 @@ def _xing4_0(path: Path, config: dict) -> AdapterResolution:
 
 
 def _nemotron_h(path: Path, config: dict, given: Path | None = None) -> AdapterResolution:
+    if (path / "unitron_extension_manifest.json").is_file():
+        raise ValueError("Unitron visual-token checkpoints require the image generation service")
     if (config.get("num_hidden_layers"), config.get("hidden_size")) == (52, 2688):
         module = importlib.import_module(".nemotron35_lightning", __package__)
         # The folder as given (before symlinks are resolved) locates a
@@ -655,6 +663,7 @@ _RESOLVERS: dict[str, Callable[[Path, dict], AdapterResolution]] = {
     "raon1_mini": _raon1_mini,
     "bert": _minilm,
     "qwen4_exp": _flash_next,
+    "sensenova_loop": _sensenova_loop,
     "qwen3_5": _qwen3_5_dense,
     "qwen3_5_moe": _qwen36_35b,
     "muse_glimmer": _muse_glimmer,

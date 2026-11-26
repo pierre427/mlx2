@@ -31,8 +31,12 @@ DECISIONS = ROOT / "docs" / "research" / "model-feature-decisions.tsv"
 REGISTRY = ROOT / "src" / "mlx2" / "adapters" / "registry.py"
 SERVER = ROOT / "src" / "mlx2" / "server.py"
 
+# Media generators use the media registry and stay out of causal-text dispatch.
+MEDIA_VARIANTS: dict[str, tuple[str, ...]] = {}
+
 # Registry model_type values with distinct adapter or topology decisions.
 VARIANTS = {
+    **MEDIA_VARIANTS,
     "glm53_gguf": ("reap50-q3-k-m-packed-ordinary",),
     "qwen3_5": ("4b", "9b", "27b"),
     "qwen3_5_moe": ("35b_a3b", "122b_a10b"),
@@ -52,6 +56,8 @@ VARIANTS = {
 # not a statement that every registered model implements each feature.
 FEATURES = (
     "oq4e_conversion",
+    "compiled_mhc",
+    "image_autoregressive", "compiled_image_decode",
     # Raon-1-mini levers (2026-11-25): merged decode projections, fused mHC sites.
     "merged_projections", "mhc_fused", "mla_flash_expanded", "moe_nax_gather_affine",
     # Hy4-flash (2026-11-18): embedded DFly2 drafter, chain-packed AST executor.
@@ -440,7 +446,8 @@ def registered_types() -> list[str]:
             continue
         if not isinstance(node.value, ast.Dict):
             continue
-        return sorted(ast.literal_eval(key) for key in node.value.keys)
+        text_types = [ast.literal_eval(key) for key in node.value.keys]
+        return sorted((*text_types, *MEDIA_VARIANTS))
     raise RuntimeError("_RESOLVERS dictionary was not found")
 
 
