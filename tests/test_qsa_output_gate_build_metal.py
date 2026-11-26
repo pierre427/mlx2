@@ -234,18 +234,22 @@ def _assert_bits_equal(mx, np, storage, actual, expected, ungated, gate, label):
     assert int(np.count_nonzero(actual_bits != ungated_bits)) > 0, f"{label}: gate had no effect"
 
 
-# The served-exp probe (served_exp, recon-20261001) found the epilogue's fast
-# exp off by up to 59 ULP from eager float32 sigmoid on ~1% of inputs, so
-# float32 now takes the composed gate (counted); bf16/fp16 keep the epilogue.
-REFUSED_FP32 = "served eager sigmoid uses metal::precise::exp"
+# Since 2e9a43bf9 (MLX 0.32.4 admission) the epilogue is compiled with
+# whichever exp spelling the served-exp probe finds reproduces eager
+# ``mx.sigmoid`` (``ServedExpGate.adaptation_refusal``), instead of being
+# refused unless its own ``metal::exp`` matches.  Pinned by
+# tests/test_served_exp_gates.py::test_metal_probe_finds_an_adaptable_form_or_fails_closed:
+# bf16 adapts, float32 adapts (to ``metal::precise::exp``), float16 matches
+# no kernel form and keeps the composed MLX gate (counted refusal).
+REFUSED_FP16 = "served eager sigmoid matches no kernel form"
 
 
 def _expect_gate(status, path, dtype):
     import mlx.core as mx
 
-    if dtype == mx.float32:
+    if dtype == mx.float16:
         assert not status["gate_engaged"] and status["gate_path"] is None, status
-        assert status["gate_refusals"] >= 1 and status["gate_last_refusal"] == REFUSED_FP32, status
+        assert status["gate_refusals"] >= 1 and status["gate_last_refusal"] == REFUSED_FP16, status
     else:
         assert status["gate_engaged"] is True and status["gate_path"] == path, status
         assert status["gate_refusals"] == 0, status

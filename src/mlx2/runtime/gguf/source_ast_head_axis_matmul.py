@@ -64,6 +64,6 @@ def private_matmul(left,right,*,transpose_b,padded=True,check_live):
 
 
 def implementation_identity():
-    from .source_dense import _installed,LIBRARY_SHA256
+    from .source_dense import _installed,installed_pins
     _installed()
-    return hashlib.sha256(Path(__file__).read_bytes()+LIBRARY_SHA256.encode()).hexdigest()
+    return hashlib.sha256(Path(__file__).read_bytes()+installed_pins()[0].encode()).hexdigest()

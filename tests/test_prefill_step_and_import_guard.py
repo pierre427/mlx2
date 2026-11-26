@@ -373,7 +373,7 @@ def test_serve_extra_caps_mlx_below_the_next_release():
         for r in pyproject["project"]["optional-dependencies"]["serve"]
         if r.startswith("mlx")
     ]
-    assert mlx.specifier.contains("0.32.4", prereleases=True)
-    assert not mlx.specifier.contains("0.32.3", prereleases=True)
-    assert not mlx.specifier.contains("0.32.5", prereleases=True)
-    assert not mlx.specifier.contains("0.32.5.dev20261016", prereleases=True)
+    assert mlx.specifier.contains("0.32.5", prereleases=True)
+    assert not mlx.specifier.contains("0.32.4", prereleases=True)
+    assert not mlx.specifier.contains("0.32.6", prereleases=True)
+    assert not mlx.specifier.contains("0.32.6.dev20261201", prereleases=True)

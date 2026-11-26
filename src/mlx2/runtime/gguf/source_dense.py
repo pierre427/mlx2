@@ -24,6 +24,23 @@ HASHES = {
     "steel/gemm/gemm_nax.h": "8f8d11f3c29e30dbfcaa6799963edd5fb71b81f912c4f3494e294d3002e3d337",
 }
 LIBRARY_SHA256 = "d8c9393d584e781393c3effccfccd8ba85ad0c70264edaf9f897dca9875375c6"
+# HASHES/LIBRARY_SHA256 above are the original 0.32.4 pins; admission and
+# identities use installed_pins().  0.32.5 re-audit (2026-11-25,
+# v0.32.4..v0.32.5): type_traits.h, steel/defines.h, steel/gemm/nax.h and
+# steel/gemm/gemm_nax.h are byte-identical; integral_constant.h only rewrites
+# the compile-time integral_const_binop result type (no runtime arithmetic);
+# gemv.h changes only the kDoAxpby store (mlx #4769) and this module
+# instantiates GEMVKernel<..., false>.  matmul.cpp changes only the transposed
+# gemv_t dispatch and empty GatherMM/SegmentedMM outputs.  Bitwise parity to
+# the stock dispatch stays a GPU-gate claim.
+PINS_BY_VERSION = {
+    "0.32.4": (LIBRARY_SHA256, HASHES),
+    "0.32.5": ("0b8158bf29ecac60049f9163dda9537aab10d6fd8aa3d7614c646c3e6f810750", {
+        **HASHES,
+        "steel/utils/integral_constant.h": "748d04212ae45c82fe227355235d25422f8e24a52568d372f59da28a76244e56",
+        "gemv.h": "4d72d35da3662554fe46c869691d188c407c56ffd62d3876a6df046ad014a551",
+    }),
+}
 DEFAULT_TILE = (64, 64, 128, 2, 2)
 OPERAND_POLICIES = ("full_operands_v1", "coefficient_views_v1")
 _COEFFICIENT_VIEW_ISSUER = object()
@@ -169,14 +186,24 @@ def supports(x, weight, kind, *, algorithm="auto", tile=DEFAULT_TILE, check_devi
         return False
 
 
+def installed_pins():
+    """(libmlx sha256, {header: sha256}) pinned for the installed MLX build."""
+    import importlib.metadata
+    pinned = PINS_BY_VERSION.get(importlib.metadata.version("mlx"))
+    if pinned is None:
+        raise RuntimeError("Source dense installed MLX library changed; re-audit required")
+    return pinned
+
+
 @lru_cache(maxsize=1)
 def _installed():
     import mlx.core as mx
+    library_sha256, hashes = installed_pins()
     root = Path(mx.__file__).resolve().parent
-    if hashlib.sha256((root/"lib/libmlx.dylib").read_bytes()).hexdigest() != LIBRARY_SHA256:
+    if hashlib.sha256((root/"lib/libmlx.dylib").read_bytes()).hexdigest() != library_sha256:
         raise RuntimeError("Source dense installed MLX library changed; re-audit required")
     headers = root/"include/mlx/backend/metal/kernels"
-    for name, expected in HASHES.items():
+    for name, expected in hashes.items():
         if hashlib.sha256((headers/name).read_bytes()).hexdigest() != expected:
             raise RuntimeError("Source dense installed MLX helper changed; re-audit required")
     return root, headers

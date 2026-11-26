@@ -10,6 +10,17 @@ import hashlib
 
 GROUPS, OUTPUT, WIDTH = 8, 1024, 4096
 MMA_SHA256 = '9b37709de40c3acaa5411875e52c8d26e6de093261741f671fbdab9c39a852b7'
+# Per-build steel/gemm/mma.h pins.  0.32.5 re-audit (2026-11-25): the only
+# change is BlockMMA::mma gaining a ``TB = T`` template parameter for the B
+# tile; BaseMMAFrag<float,8,8> (the lane coordinates and K8
+# simdgroup_multiply_accumulate law transcribed below) is byte-identical, and
+# gemm.h, steel_gemm_fused.h and steel_gemm_splitk.h are byte-identical.
+# Bitwise parity stays the GPU gate
+# (tests/test_deepseek_v41_source_dense_mxfp8_metal.py).
+MMA_SHA256_BY_VERSION = {
+    '0.32.4': MMA_SHA256,
+    '0.32.5': '21439be1087ac840ac5936bda0e57bd982fb7b104ea5e5f82ba7be0d2eaee524',
+}
 
 
 def plan(rows, *, tile_m=16, tile_n=64, simdgroups=4):
@@ -48,18 +59,34 @@ def _device_supported():
 
 
 def supports(x,weight,*,check_device=True,**options):
+    """False on an unaudited MLX build too, so the caller keeps stock math."""
     try:
         _geometry(x,weight,**options)
-        return not check_device or _device_supported()
-    except (ValueError,TypeError,AttributeError):
+        if not check_device:
+            return True
+        if not _device_supported():
+            return False
+        _verify_installed()
+        return True
+    except (ValueError,TypeError,AttributeError,RuntimeError):
         return False
 
 
 @lru_cache(maxsize=1)
-def _verify_installed():
+def _installed_audited():
+    """Cached once per process, also when False (supports() is on the hot path)."""
+    import importlib.metadata
     from .source_dense import _installed
-    _,headers = _installed()
-    if hashlib.sha256((headers/'steel/gemm/mma.h').read_bytes()).hexdigest() != MMA_SHA256:
+    expected = MMA_SHA256_BY_VERSION.get(importlib.metadata.version('mlx'))
+    try:
+        _,headers = _installed()
+    except RuntimeError:
+        return False
+    return expected is not None and hashlib.sha256((headers/'steel/gemm/mma.h').read_bytes()).hexdigest() == expected
+
+
+def _verify_installed():
+    if not _installed_audited():
         raise RuntimeError('Source legacy WoA installed MMA changed; re-audit required')
 
 

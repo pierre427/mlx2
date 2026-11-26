@@ -243,7 +243,9 @@ def implementation_identity():
     digest = hashlib.sha256()
     for path in (Path(__file__), Path(source_hc.__file__)):
         digest.update(hashlib.sha256(path.read_bytes()).hexdigest().encode())
-    digest.update(repr(sorted(source_hc.INSTALLED_PINS.items())).encode())
+    import importlib.metadata
+    pins = source_hc.INSTALLED_PINS_BY_VERSION.get(importlib.metadata.version('mlx'), {})
+    digest.update(repr(sorted(pins.items())).encode())
     return hashlib.sha256((POLICY + ':' + digest.hexdigest()).encode()).hexdigest()
 
 

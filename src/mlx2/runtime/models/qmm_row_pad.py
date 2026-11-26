@@ -26,6 +26,12 @@ Not bitwise identical to stock: padded rows use the NAX ``qmm`` arithmetic
 instead of the split-K partial sums.  Selection is gated by
 ``MLX2_QMM_ROW_PAD`` (default off).
 
+MLX 0.32.5 decision (2026-11-25): not admitted.  #4720 was closed by #4781
+(and #4682), which route aligned NAX split-K through ``qmm_splitk_nax`` and
+send 8..vector_limit rows there directly; #4793 closed unmerged.  The route
+model above no longer describes 0.32.5, so this module stays 0.32.4-only
+(fails closed elsewhere) and should be removed with 0.32.4.
+
 Original mlx2 code; see provenance/qmm-row-pad.json.
 """
 

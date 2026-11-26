@@ -78,9 +78,8 @@ def test_cpu_invocation_refuses_no_fallback():
 
 def test_installed_pins_are_current_and_do_not_execute_gpu():
     receipt = hc.installed_receipt()
-    assert receipt["version"] == "0.32.4"
-    assert set(receipt["files_sha256"]) == set(hc.INSTALLED_PINS)
-    assert receipt["files_sha256"] == hc.INSTALLED_PINS
+    assert receipt["version"] in ("0.32.4", "0.32.5")
+    assert receipt["files_sha256"] == hc.INSTALLED_PINS_BY_VERSION[receipt["version"]]
 
 
 @pytest.mark.parametrize("change", ["version", "missing", "content"])
@@ -88,9 +87,9 @@ def test_source_drift_refuses(tmp_path, monkeypatch, change):
     source = tmp_path/"source.h"
     source.write_bytes(b"source")
     pins = {"source.h": hashlib.sha256(b"source").hexdigest()}
-    monkeypatch.setattr(hc, "INSTALLED_PINS", pins)
+    monkeypatch.setattr(hc, "INSTALLED_PINS_BY_VERSION", {"pinned": pins})
     monkeypatch.setattr(hc, "_package_root", lambda: tmp_path)
-    monkeypatch.setattr(hc.importlib.metadata, "version", lambda name: "wrong" if change == "version" else hc.INSTALLED_VERSION)
+    monkeypatch.setattr(hc.importlib.metadata, "version", lambda name: "wrong" if change == "version" else "pinned")
     if change == "missing": source.unlink()
     elif change == "content": source.write_bytes(b"changed")
     with pytest.raises(ValueError, match="version|missing|changed"):

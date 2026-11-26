@@ -108,3 +108,28 @@ def test_dispatch_binds_original_bfloat_coefficients_without_copy(monkeypatch):
     assert seen[0]['inputs'][0] is x and seen[0]['inputs'][1] is w
     assert seen[0]['output_shapes']==[(1,99,8,1024)]
     assert seen[0]['output_dtypes']==[mx.float32]
+
+
+def test_unaudited_mlx_build_declines_instead_of_raising(monkeypatch):
+    x,w=inputs(2)
+    monkeypatch.setattr(dense,'_device_supported',lambda:True)
+    monkeypatch.setattr(dense,'_installed_audited',lambda:False)
+    assert not dense.supports(x,w)
+    with pytest.raises(RuntimeError,match='re-audit'):
+        dense._verify_installed()
+    monkeypatch.setattr(dense,'_installed_audited',lambda:True)
+    assert dense.supports(x,w)
+
+
+def test_mma_pins_cover_both_audited_builds():
+    assert dense.MMA_SHA256_BY_VERSION['0.32.4']==dense.MMA_SHA256
+    assert set(dense.MMA_SHA256_BY_VERSION)=={'0.32.4','0.32.5'}
+
+
+def test_installed_build_audit_matches_its_pin():
+    import importlib.metadata
+    dense._installed_audited.cache_clear()
+    try:
+        assert dense._installed_audited() is (importlib.metadata.version('mlx') in dense.MMA_SHA256_BY_VERSION)
+    finally:
+        dense._installed_audited.cache_clear()

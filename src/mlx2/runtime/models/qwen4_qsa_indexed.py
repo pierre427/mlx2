@@ -69,6 +69,11 @@ _SDPA_VECTOR_HEADER_SHA256_BY_BUILD = {
     "0.32.2.dev20260915+2a817ad94": _OLD_SDPA_VECTOR_HEADER_SHA256,
     "0.32.2.dev20260919+39400a0d4": _OLD_SDPA_VECTOR_HEADER_SHA256,
     "0.32.4": "32146cdd4b9982723ee696da1ad8d146682d84d2ee40098a4063a25b8a1ec322",
+    # Candidate, gated on scripts/mlx0325_requal_gates.sh.  Reviewed diff vs
+    # 0.32.4: window_size function constant 27 (off at 0, the only value
+    # mlx2 passes), causal now combines with an array mask, and an appended
+    # sdpa_split_reduce kernel; sdpa_vector_2pass_2's reduction is unchanged.
+    "0.32.5": "b44d2c3541a05742c6c8c801e4dc0bdb702628813243621c86e3340f676eaf74",
 }
 _QUANTIZED_BITS = frozenset({4, 8})
 _QUANTIZED_GROUP_SIZES = frozenset({32, 64, 128})

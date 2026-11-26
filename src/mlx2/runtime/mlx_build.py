@@ -39,6 +39,30 @@ to fp32, and fixes a batched qvm leading-dimension corruption.
 admitted on 0.32.4 only; a new build must re-measure it (or drop it if
 mlx #4793 / #4720 has landed) before its admission list grows.
 
+Upstream 0.32.5 (2026-11-25) is listed as a CANDIDATE: this entry is valid
+only once scripts/mlx0325_requal_gates.sh has passed on it (build, ABI, every
+Metal exactness test file, GDN spelling, row-exact calibration and the
+Apple_M5_Max__0.32.5 row-exact table committed).  What moves stock
+arithmetic or dispatch on our paths (v0.32.4..v0.32.5, 148 commits):
+transposed quantized matmul at 3..16 rows now takes ``qmv_mma``/``qmv_nax``
+(#4712, #4787, #4860, #4890, #4827) and 8..vector_limit rows take
+``qmm_splitk_nax`` (#4682, #4781), so verify rows no longer run the M=1
+``qmv`` arithmetic; ``qmv_wide`` row tiles widened (#4728); new
+``sdpa_split`` for q<=8 with 32 < q*gqa <= 128 and no array mask (#4723),
+fused causal head_dim 256 SDPA for 512..1023 query rows (#4893);
+``sdpa_vector.h`` gained a window function constant and combines causal
+with an array mask (#4734; the two-pass reduction tree is unchanged);
+``gated_delta_update`` keeps g/beta in fp32 (#4760) and indexes 4D
+per-channel gates (#4791); addmm/gemv axpby accumulate in AccT (#4769);
+Metal affine ``quantize`` of all-negative groups (#4775); fp8 NaN (#4756);
+``expm1f`` (#4780, fp32 only) and the custom-kernel source cache (#4568).
+#4936 (queue leak) and #4915 (contiguity after reshape) are fixed.
+``qmm_row_pad`` is NOT admitted on 0.32.5: #4781 closed #4720 by routing
+NAX split-K through ``qmm_splitk_nax`` (#4793 itself closed unmerged), so
+the legacy 32x32 split-K it pads around no longer runs on M5; drop the
+module when 0.32.4 leaves this list.  ``switch_layers`` MoE pad cost fits
+are 0.32.4-only (uncalibrated fallback elsewhere) and need a refit.
+
 "Verified" here is a kernel-exactness statement about the installed MLX; it is
 not route qualification (docs/QUALIFICATION.md).
 """
@@ -54,6 +78,7 @@ VERIFIED_MLX_BUILDS = frozenset(
         "0.32.2.dev20260915+2a817ad94",
         "0.32.2.dev20260919+39400a0d4",
         "0.32.4",
+        "0.32.5",
     }
 )
 

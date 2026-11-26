@@ -34,10 +34,25 @@ GROUP_SIZE = 32
 # magnitude (2**-9) normal in F32 and BF16; b<=246 keeps 448*2**(b-127) finite.
 SCALE_MIN, SCALE_MAX = 10, 246
 GEOMETRY = dict(bm=4, bn=1, sm=1, sn=32, tm=4, tn=4)
-LIBRARY_SHA256 = "d8c9393d584e781393c3effccfccd8ba85ad0c70264edaf9f897dca9875375c6"
-HEADER_PINS = {
-    "gemv.h": "296ef622ea3c67d7485aa7cdf102bbfcb582e07bd3207793179a9d1e65ee5a65",
-    "fp8.h": "9a9d77a6295f66b4ada4311c3b855b6ecb7a2b38f28623109e3c61d2e17e81ae",
+# Per-build (libmlx.dylib sha256, {header: sha256}) pins.  0.32.5 re-audit
+# (2026-11-25, v0.32.4..v0.32.5): gemv.h changes only the ``kDoAxpby`` store
+# (alpha/beta now accumulate in AccT, mlx #4769); the copied lane/loop/shuffle
+# law and the ``kDoAxpby=false`` store are byte-identical, and matmul.cpp's
+# dispatch change is confined to the transposed (``gemv_t``) branch.  fp8.h
+# changes the E4M3 *encoder* NaN case and makes E8M0 byte 0xFF decode to NaN
+# (mlx #4756); the E4M3 decode and every E8M0 byte in SCALE_MIN..SCALE_MAX
+# decode identically, and ``fp_dequantize``/``dequantize_scale`` in
+# fp_quantized.h are byte-identical.  Bitwise parity remains the GPU gate
+# (tests/test_deepseek_v41_source_dense_mxfp8_metal.py, incl. stock einsum).
+PINS_BY_VERSION = {
+    "0.32.4": ("d8c9393d584e781393c3effccfccd8ba85ad0c70264edaf9f897dca9875375c6", {
+        "gemv.h": "296ef622ea3c67d7485aa7cdf102bbfcb582e07bd3207793179a9d1e65ee5a65",
+        "fp8.h": "9a9d77a6295f66b4ada4311c3b855b6ecb7a2b38f28623109e3c61d2e17e81ae",
+    }),
+    "0.32.5": ("0b8158bf29ecac60049f9163dda9537aab10d6fd8aa3d7614c646c3e6f810750", {
+        "gemv.h": "4d72d35da3662554fe46c869691d188c407c56ffd62d3876a6df046ad014a551",
+        "fp8.h": "0d212a9fa1d371bd85c8d7cf8159dbe0e702a4bbdf0a334f7fe3032c55743a1c",
+    }),
 }
 
 _HEADER = r"""// Original project kernel; decode law mirrors installed MLX fp8.h
@@ -166,18 +181,20 @@ def implementation_identity():
     """Bind the installed MLX build, pinned headers and this module's source."""
     import importlib.metadata
     import mlx.core as mx
-    if importlib.metadata.version("mlx") != "0.32.4":
+    pinned = PINS_BY_VERSION.get(importlib.metadata.version("mlx"))
+    if pinned is None:
         raise RuntimeError("Source MXFP8 WoA MLX version changed; re-audit required")
+    library_sha256, header_pins = pinned
     root = Path(mx.__file__).resolve().parent
-    if hashlib.sha256((root / "lib/libmlx.dylib").read_bytes()).hexdigest() != LIBRARY_SHA256:
+    if hashlib.sha256((root / "lib/libmlx.dylib").read_bytes()).hexdigest() != library_sha256:
         raise RuntimeError("Source MXFP8 WoA MLX build changed; re-audit required")
     headers = root / "include/mlx/backend/metal/kernels"
-    for name in HEADER_PINS:
-        if hashlib.sha256((headers / name).read_bytes()).hexdigest() != HEADER_PINS[name]:
+    for name in header_pins:
+        if hashlib.sha256((headers / name).read_bytes()).hexdigest() != header_pins[name]:
             raise RuntimeError("Source MXFP8 WoA pinned MLX header changed; re-audit required")
     own = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
-    pins = repr(sorted(HEADER_PINS.items()))
-    return hashlib.sha256((POLICY + ":" + LIBRARY_SHA256 + ":" + own + ":" + pins).encode()).hexdigest()
+    pins = repr(sorted(header_pins.items()))
+    return hashlib.sha256((POLICY + ":" + library_sha256 + ":" + own + ":" + pins).encode()).hexdigest()
 
 
 def kernel_spec():

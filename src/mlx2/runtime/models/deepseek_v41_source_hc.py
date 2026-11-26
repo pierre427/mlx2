@@ -17,17 +17,38 @@ REDUCTIONS = ("sequential", "column_pairwise", "column_interleaved", "row_pairwi
 SOFTMAX_EXPS = ("metal::fast::exp", "metal::exp", "metal::precise::exp")
 _SUM_MODES = {"sequential": (0, 0), "column_pairwise": (0, 1),
               "column_interleaved": (0, 2), "row_pairwise": (1, 0), "both_pairwise": (1, 1)}
-INSTALLED_VERSION = "0.32.4"
-INSTALLED_PINS = {
-    "include/mlx/backend/metal/kernels/unary_ops.h": "af710925f066b029f67289a0bbe4edd0ba6c5e7f51c9df609abb111216fa963f",
-    "include/mlx/backend/metal/kernels/softmax.h": "cb233fe42a7358f5f658c9a1ef52cd2ee9dd3786ddfad01793a976d58f4d4051",
-    "include/mlx/backend/metal/kernels/defines.h": "a6c2c824e855078cd092fd9592457616f995755f0e865475c3f006a3f5d6bf1d",
-    "include/mlx/backend/metal/kernels/reduction/reduce_row.h": "8045c77cb0dde4f97a77ddcdcfad825ccf855928d31369a1dc1832629a63da50",
-    "include/mlx/backend/metal/kernels/reduction/reduce_col.h": "47d47a9a8b52e3dfd15b195f40cdb3623583e00f5ac11378cdc0a7fe49fe17cf",
-    "include/mlx/backend/metal/kernels/reduction/ops.h": "78d06730fc9564a73944e7f1fe3897d25c8789b28a939bf418e1968db311da41",
-    "include/mlx/backend/metal/kernels/binary_ops.h": "6dbe789faafbf7259f411c7fab7c0fcdd192df47a78f8f0bd408228f7a30e5c7",
-    "lib/libmlx.dylib": "d8c9393d584e781393c3effccfccd8ba85ad0c70264edaf9f897dca9875375c6",
-    "lib/mlx.metallib": "c6d7a3facb83568f6e4cb2cf4a8c736ee29302571a48343cb9a3a4d1cd3e3893",
+# Per-build pins.  0.32.5 re-audit (2026-11-25, v0.32.4..v0.32.5, 148 upstream
+# commits): unary_ops.h, softmax.h, defines.h, reduce_row.h, reduce_col.h and
+# reduction/ops.h are byte-identical; binary_ops.h changes only LeftShift and
+# RightShift (out-of-range shift counts), which Source HC never uses; the
+# host dispatch changes (softmax.cpp and reduce.cpp slice dispatches above
+# UINT32_MAX threads, int8 any/all, a row_reduce_small counter bound) do not
+# reach FP32 rows 1..1000.  libmlx.dylib and mlx.metallib are rebuilt, so the
+# compiled ordinary kernels stay a GPU-gate claim
+# (tests/test_deepseek_v41_source_hc_mega_metal.py), not a CPU one.
+INSTALLED_PINS_BY_VERSION = {
+    "0.32.4": {
+        "include/mlx/backend/metal/kernels/unary_ops.h": "af710925f066b029f67289a0bbe4edd0ba6c5e7f51c9df609abb111216fa963f",
+        "include/mlx/backend/metal/kernels/softmax.h": "cb233fe42a7358f5f658c9a1ef52cd2ee9dd3786ddfad01793a976d58f4d4051",
+        "include/mlx/backend/metal/kernels/defines.h": "a6c2c824e855078cd092fd9592457616f995755f0e865475c3f006a3f5d6bf1d",
+        "include/mlx/backend/metal/kernels/reduction/reduce_row.h": "8045c77cb0dde4f97a77ddcdcfad825ccf855928d31369a1dc1832629a63da50",
+        "include/mlx/backend/metal/kernels/reduction/reduce_col.h": "47d47a9a8b52e3dfd15b195f40cdb3623583e00f5ac11378cdc0a7fe49fe17cf",
+        "include/mlx/backend/metal/kernels/reduction/ops.h": "78d06730fc9564a73944e7f1fe3897d25c8789b28a939bf418e1968db311da41",
+        "include/mlx/backend/metal/kernels/binary_ops.h": "6dbe789faafbf7259f411c7fab7c0fcdd192df47a78f8f0bd408228f7a30e5c7",
+        "lib/libmlx.dylib": "d8c9393d584e781393c3effccfccd8ba85ad0c70264edaf9f897dca9875375c6",
+        "lib/mlx.metallib": "c6d7a3facb83568f6e4cb2cf4a8c736ee29302571a48343cb9a3a4d1cd3e3893",
+    },
+    "0.32.5": {
+        "include/mlx/backend/metal/kernels/unary_ops.h": "af710925f066b029f67289a0bbe4edd0ba6c5e7f51c9df609abb111216fa963f",
+        "include/mlx/backend/metal/kernels/softmax.h": "cb233fe42a7358f5f658c9a1ef52cd2ee9dd3786ddfad01793a976d58f4d4051",
+        "include/mlx/backend/metal/kernels/defines.h": "a6c2c824e855078cd092fd9592457616f995755f0e865475c3f006a3f5d6bf1d",
+        "include/mlx/backend/metal/kernels/reduction/reduce_row.h": "8045c77cb0dde4f97a77ddcdcfad825ccf855928d31369a1dc1832629a63da50",
+        "include/mlx/backend/metal/kernels/reduction/reduce_col.h": "47d47a9a8b52e3dfd15b195f40cdb3623583e00f5ac11378cdc0a7fe49fe17cf",
+        "include/mlx/backend/metal/kernels/reduction/ops.h": "78d06730fc9564a73944e7f1fe3897d25c8789b28a939bf418e1968db311da41",
+        "include/mlx/backend/metal/kernels/binary_ops.h": "a24eaa4b610224d5f296c0a8b7a1317561b569f70c11c4b95c4aea8f484370a9",
+        "lib/libmlx.dylib": "0b8158bf29ecac60049f9163dda9537aab10d6fd8aa3d7614c646c3e6f810750",
+        "lib/mlx.metallib": "5871f53317992c3c325c9079cecb9554bf4fe25c8060b1aa42ca847ddd8b747e",
+    },
 }
 _SCHEDULED = {}
 
@@ -37,24 +58,33 @@ def _package_root():
     return Path(mx.__file__).parent
 
 
+def installed_pins():
+    """(version, pins) for the installed MLX build; refuses an unpinned build."""
+    version = importlib.metadata.version("mlx")
+    pins = INSTALLED_PINS_BY_VERSION.get(version)
+    if pins is None:
+        raise ValueError("Source HC installed MLX version differs from pinned candidate")
+    return version, pins
+
+
 @lru_cache(maxsize=1)
 def _verify_installed():
-    if importlib.metadata.version("mlx") != INSTALLED_VERSION:
-        raise ValueError("Source HC installed MLX version differs from pinned candidate")
+    version, pins = installed_pins()
     root = _package_root()
-    for relative, expected in INSTALLED_PINS.items():
+    for relative, expected in pins.items():
         try:
             digest = hashlib.sha256((root / relative).read_bytes()).hexdigest()
         except OSError as error:
             raise ValueError("Source HC installed source missing: " + relative) from error
         if digest != expected:
             raise ValueError("Source HC installed source changed: " + relative)
-    return tuple(INSTALLED_PINS.items())
+    return version, tuple(pins.items())
 
 
 def installed_receipt():
     """CPU-only source validation; no Metal work or parity assertion."""
-    return {"version": INSTALLED_VERSION, "files_sha256": dict(_verify_installed())}
+    version, files = _verify_installed()
+    return {"version": version, "files_sha256": dict(files)}
 
 
 @lru_cache(maxsize=1)

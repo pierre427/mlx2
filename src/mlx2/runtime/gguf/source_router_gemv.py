@@ -136,8 +136,11 @@ def checked(name=None):
 
 
 def implementation_identity():
+    import importlib.metadata
     from . import source_dense
     own = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
     helper = hashlib.sha256(Path(source_dense.__file__).read_bytes()).hexdigest()
-    return hashlib.sha256((POLICY + ":" + own + ":" + helper + ":" + source_dense.LIBRARY_SHA256
-                           + ":" + repr(sorted(source_dense.HASHES.items()))).encode()).hexdigest()
+    library, hashes = source_dense.PINS_BY_VERSION.get(
+        importlib.metadata.version("mlx"), (source_dense.LIBRARY_SHA256, source_dense.HASHES))
+    return hashlib.sha256((POLICY + ":" + own + ":" + helper + ":" + library
+                           + ":" + repr(sorted(hashes.items()))).encode()).hexdigest()

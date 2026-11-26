@@ -197,5 +197,5 @@ def private_matmul(left,right,*,transpose_b,check_live):
 
 def implementation_identity():
     _installed()
-    from .source_dense import LIBRARY_SHA256
-    return hashlib.sha256(Path(__file__).read_bytes()+LIBRARY_SHA256.encode()+repr(sorted(HASHES.items())).encode()).hexdigest()
+    from .source_dense import installed_pins
+    return hashlib.sha256(Path(__file__).read_bytes()+installed_pins()[0].encode()+repr(sorted(HASHES.items())).encode()).hexdigest()
