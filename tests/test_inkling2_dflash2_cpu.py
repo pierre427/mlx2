@@ -766,3 +766,125 @@ def test_after_correction_requires_finite_positive_numeric_cap(cap):
     with pytest.raises(ValueError, match="final_logit_softcapping"):
         DFlash2Config.from_dict(_hf_config(selector_softcap_mode="after_correction",
                                            final_logit_softcapping=cap))
+
+
+# --- best-route default (Pierre 2026-11-25: "Yes dflash2") -----------------
+
+INKLING2_FP = "440956c8d7f103c1b409b197f150faff54ae2e4233f1e64398f335745a93ff9f"
+
+
+def _inkling2_entry():
+    from mlx2 import best_route_defaults
+
+    table = best_route_defaults.load_table()
+    return best_route_defaults.find_entry(table, "Inkling2Adapter", INKLING2_FP)
+
+
+def test_best_route_entry_is_the_tested_one_lane_dflash2_chain():
+    entry = _inkling2_entry()
+    assert entry["status"] == "selected_unqualified"
+    spec = entry["default"]
+    assert spec["kind"] == "ast" and spec["max_lanes"] == 1
+    # Exactly the policy GSM8K measured (b4e6be2eb): depth 7, composition off.
+    assert spec["execution_policy"] == {"num_draft": 7, "proposal_composition": False}
+    assert set(spec["execution_policy"]) | {"draft_model"} <= inkling2_dflash2.ALLOWED_POLICY_KEYS
+    assert spec["drafter"]["architectures"] == ["DFlash2DraftModel"]
+    assert spec["drafter"]["config_sha256"] == [inkling2_dflash2.CONFIG_SHA256]
+    assert entry["fallback"] == [{"name": "adapter_default", "kind": "adapter_default"}]
+    assert entry["checkpoint"] == f"Inkling-2-Mini@sha256:{INKLING2_FP}"
+    # An unmeasured Inkling 2 checkpoint has no entry (no family fallback).
+    from mlx2 import best_route_defaults
+
+    assert best_route_defaults.find_entry(best_route_defaults.load_table(), "Inkling2Adapter", "0" * 64) is None
+
+
+def test_auto_pairing_uses_the_adapter_inspector_and_adds_no_pins(monkeypatch):
+    from mlx2 import best_route_defaults
+    from mlx2.adapters import drafter_pairing, inkling2
+
+    seen = {}
+    monkeypatch.setattr(inkling2, "inspect_artifact", lambda path: {
+        "identity": {"path": "/target", "fingerprint": "t" * 64}, "text_config": {"k": 1}})
+
+    def inspect(path, **kwargs):
+        seen.update(kwargs, path=path)
+        return {"draft_revision": "d" * 64}
+
+    monkeypatch.setattr(inkling2_dflash2, "inspect_drafter", inspect)
+    pairing = drafter_pairing.pair_drafter(
+        {"adapter": "Inkling2Adapter", "path": "/target"},
+        {"path": "/draft", "architectures": ["DFlash2DraftModel"], "name": "Inkling-2-Mini-DFlash2"},
+        target_revision=False)
+    assert seen == {"path": "/draft", "target_path": "/target", "text_config": {"k": 1},
+                    "target_fingerprint": "t" * 64}  # default embed_norm (on)
+    assert pairing["pins"] == {} and pairing["identity"] == "d" * 64
+    assert pairing["draft"] == "Inkling-2-Mini-DFlash2@sha256:" + "d" * 64
+    assert pairing["execution_policy"] == {"draft_model": "/draft", "num_draft": 7}
+    # The seam merges the entry policy and no pins: the route admits the result.
+    record = {"applied": True, "route": {"execution_policy": {"num_draft": 7, "proposal_composition": False}},
+              "drafter": {"path": "/draft", "pins": pairing["pins"]}}
+    policy = best_route_defaults.finish_best_route_default(
+        SimpleNamespace(route_default_selection=record), {"draft_model": "/draft"})
+    assert policy == {"num_draft": 7, "proposal_composition": False, "draft_model": "/draft"}
+    # The adapter's own route selection admits it (not only the key constant).
+    from mlx2.adapters.inkling2 import Inkling2Adapter
+
+    monkeypatch.setattr(inkling2_dflash2, "is_dflash2_artifact", lambda path: path == "/draft")
+    adapter = object.__new__(Inkling2Adapter)
+    assert adapter._select_dflash2_route(dict(policy)) is True
+    assert adapter.dflash2_embed_norm is True
+
+
+def test_auto_pairing_refuses_other_architectures():
+    from mlx2.adapters import drafter_pairing
+
+    with pytest.raises(ValueError, match="pinned Inkling-2-Mini-DFlash2"):
+        drafter_pairing.pair_drafter(
+            {"adapter": "Inkling2Adapter", "path": "/target"},
+            {"path": "/draft", "architectures": ["DSparkDraftModel"], "name": "x"},
+            target_revision=False)
+
+
+def test_best_route_identity_is_the_real_drafter_revision():
+    """Skips without the local artifacts; otherwise the table's evidence
+    identity must be what the adapter's inspector computes today."""
+    target = Path.home() / "mlx-models/Inkling-2-Mini"
+    draft = Path.home() / "mlx-models/Inkling-2-Mini-DFlash2"
+    if not (target / "config.json").exists() or not (draft / "config.json").exists():
+        pytest.skip("Inkling 2 Mini or its DFlash2 drafter is not on this host")
+    from mlx2.adapters import drafter_pairing
+
+    pairing = drafter_pairing.pair_drafter(
+        {"adapter": "Inkling2Adapter", "path": str(target)},
+        {"path": str(draft), "architectures": ["DFlash2DraftModel"], "name": "Inkling-2-Mini-DFlash2"},
+        target_revision=False)
+    assert pairing["identity"] in _inkling2_entry()["default"]["drafter"]["identities"]
+
+
+def test_no_flag_server_selects_dflash2_only_at_one_lane():
+    """The server seam on the real artifacts (skips without them)."""
+    target = Path.home() / "mlx-models/Inkling-2-Mini"
+    draft = Path.home() / "mlx-models/Inkling-2-Mini-DFlash2"
+    if not (target / "config.json").exists() or not (draft / "config.json").exists():
+        pytest.skip("Inkling 2 Mini or its DFlash2 drafter is not on this host")
+    from mlx2 import server as S
+    from mlx2.adapters.registry import inspect_model
+    from mlx2.best_route_defaults import finish_best_route_default
+
+    def resolve(*flags):
+        args = S.build_parser().parse_args(["--model", str(target), *flags])
+        resolution = inspect_model(args.model)
+        S.apply_adapter_lane_default(args, resolution)
+        S.apply_best_route_default(args, resolution, policy=None)
+        policy, resolution = S.apply_external_mtp_head(args, None, resolution)
+        policy = S.apply_ast_invocation(args, policy, resolution)
+        policy = finish_best_route_default(args, policy)
+        selection = S.resolve_route_selection(args, policy, resolution)
+        return args.route_default_selection["status"], selection.route, policy
+
+    status, route, policy = resolve("--max-lanes", "1")
+    assert (status, route) == ("selected_unqualified", "external_draft")
+    assert policy == {"num_draft": 7, "proposal_composition": False, "draft_model": str(draft)}
+    assert resolve()[:2] == ("width_keyed_adapter_default", "ordinary")
+    assert resolve("--max-lanes", "1", "--ordinary")[:2] == ("explicit_route", "ordinary")
+    assert resolve("--max-lanes", "1", "--no-auto-route")[0] == "opted_out"

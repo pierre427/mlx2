@@ -1187,6 +1187,49 @@
     "source_revision": "56a957a87",
     "decision_row": true
    }
+  },
+  {
+   "checkpoint": "Inkling-2-Mini@sha256:440956c8d7f103c1b409b197f150faff54ae2e4233f1e64398f335745a93ff9f",
+   "fingerprint": "440956c8d7f103c1b409b197f150faff54ae2e4233f1e64398f335745a93ff9f",
+   "adapter": "Inkling2Adapter",
+   "status": "selected_unqualified",
+   "default": {
+    "name": "ast_Inkling-2-Mini-DFlash2",
+    "kind": "ast",
+    "max_lanes": 1,
+    "execution_policy": {
+     "num_draft": 7,
+     "proposal_composition": false
+    },
+    "drafter": {
+     "name": "Inkling-2-Mini-DFlash2",
+     "architectures": [
+      "DFlash2DraftModel"
+     ],
+     "identities": [
+      "4767e92be233bfa7f585167fed708abc4f26a1d93de56dcb24e4a296df483429"
+     ],
+     "config_sha256": [
+      "d094e435eb939e01fca6297f637c5af35e3da4b552f8e1ab0a181cd278a1cefa"
+     ]
+    }
+   },
+   "fallback": [
+    {
+     "name": "adapter_default",
+     "kind": "adapter_default"
+    }
+   ],
+   "reason": "Operator decision: Pierre 2026-11-25 ('Yes dflash2') made the pinned Inkling-2-Mini-DFlash2 drafter (incoai@4f9088ea, weights sha256 217980ab) the no-flag route at one lane; selected unqualified. Route: ast drafter=Inkling-2-Mini-DFlash2 (Inkling 2 has no tree tiles, so --ast lowers to the external DFlash2 chain), num_draft 7, proposal_composition off, embed_norm on. GSM8K 40 q chat 5-shot greedy effort low, B1 (mlx2 b4e6be2eb, no thermal hold): ordinary 39/40 39.2 tok/s, embedded DSpark depth 7 39/40 47.1 tok/s MAL 3.69, DFlash2 depth 7 39/40 61.4 tok/s MAL 4.64; answers equal ordinary 40/40; sampled T=1 4/4. Wider servers keep the adapter default (the DFlash2 route is chain B1 only).",
+   "evidence": {
+    "files": [
+     "qualification/runs/inkling2-gpu-20261125/b4e6be2eb-dflash2-full/gsm8k-greedy/receipt.json",
+     "qualification/runs/inkling2-gpu-20261125/b4e6be2eb-dflash2-smoke/gsm8k-greedy/receipt.json",
+     "qualification/runs/inkling2-gpu-20261125/b4e6be2eb-dflash2-smoke/gsm8k-t1/receipt.json"
+    ],
+    "source_revision": "b4e6be2ebadd42658411b26a72979081d67e4406",
+    "decision_row": true
+   }
   }
  ]
 }

@@ -298,6 +298,23 @@ def pair_drafter(
         # policy, and the Raon policy refuses draft_revision (2026-11-25: every
         # no-flag one-lane Raon server failed to load).
         identity_only = dflash2.content_revision(record)
+    elif adapter == "Inkling2Adapter":
+        if archs != ["DFlash2DraftModel"]:
+            # Embedded DSpark is selected by name, never paired from disk.
+            raise ValueError("Inkling 2 pairs only its pinned Inkling-2-Mini-DFlash2 drafter")
+        from . import inkling2, inkling2_dflash2
+
+        target = inkling2.inspect_artifact(tpath)
+        # The adapter's own fail-closed inspection (config and weight pins,
+        # visit taps, embedding law), as at load with the default embed_norm.
+        record = inkling2_dflash2.inspect_drafter(
+            dpath, target_path=target["identity"]["path"], text_config=target["text_config"],
+            target_fingerprint=target["identity"]["fingerprint"])
+        # Identity only, not a pin: the DFlash2 route accepts draft_model,
+        # num_draft, adaptive_verification and proposal_composition and
+        # refuses any other policy key (finish_best_route_default merges pins).
+        identity_only = record["draft_revision"]
+        policy["num_draft"] = 7
     else:
         raise ValueError(f"{adapter} declares no external-draft route")
     identity = pins.get("draft_revision") or identity_only \
