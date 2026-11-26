@@ -131,6 +131,8 @@ FEATURES = (
     "inkling2_external_dflash2_multilane",
     # mlx #4957 (open) built onto 0.32.4: command buffers billed by new output/temp bytes (2026-11-24).
     "mlx_pr4957_cmdbuf_output_bytes",
+    # Flash-Next AST row-invariant matrix-unit tile law prototype (fast-route contract, 2026-11-26).
+    "ast_tile_law_row_invariant_mma",
     "inkling2_moe_fused", "inkling2_moe_weighted_sum", "inkling2_moe_nax_gather",
     "inkling2_moe_act_quant", "inkling2_kv_q8",
     "inkling2_fuse_controllers", "inkling2_fuse_residual", "inkling2_fuse_sconv",
