@@ -10,6 +10,7 @@ accepted state.
 from __future__ import annotations
 
 import copy
+from types import SimpleNamespace
 import hashlib
 import json
 import math
@@ -161,6 +162,14 @@ class ProposalCompositionPolicy:
             if name not in self._IDENTITY_OPTIONAL
             or getattr(self, name) != self._IDENTITY_OPTIONAL[name]
         }
+
+
+class LazyDecline(Exception):  # noqa: N818 - control flow, not an error
+    """A composed lazy draft hands this round back to the host proposal path."""
+
+    def __init__(self, reason):
+        super().__init__(reason)
+        self.reason = reason
 
 
 class ComposedDraftModel:
@@ -493,6 +502,12 @@ class ComposedDraftModel:
             and self._trusted_evidence_sufficient(record)
         ) if isinstance(record, dict) else False
 
+    # The device round may draft composed rows lazily (``draft_lazy``,
+    # device_round v2 slice 1a-1b): source arbitration and its score/trust
+    # bookkeeping stay on the host, exactly as ``draft_distributions`` runs
+    # them; only an external selection keeps the device round.
+    draft_lazy_composed = True
+
     def __getattr__(self, name):
         return getattr(self.backend, name)
 
@@ -576,6 +591,48 @@ class ComposedDraftModel:
         cohort_width=None,
         **kwargs,
     ):
+        plan = self._plan_rows(
+            anchors, proposal_length, logits_processors, processor_histories,
+            proposal_score_states, proposal_trust_states, proposal_source_ranges,
+            cohort_width,
+        )
+        histories, backend_length = plan.histories, plan.backend_length
+        candidates = plan.candidates
+        forward_prebuild = self.supports_verify_prebuild
+        if forward_prebuild:
+            self.backend.verify_prebuild = (
+                self.verify_prebuild
+                if all(candidate[0] == "external" for candidate in candidates)
+                else None
+            )
+        try:
+            tokens, laws = self.backend.draft_distributions(
+                anchors,
+                hidden,
+                cache,
+                backend_length,
+                rngs,
+                temperatures,
+                logits_processors=logits_processors,
+                processor_histories=histories,
+                **kwargs,
+            )
+        finally:
+            if forward_prebuild:
+                self.backend.verify_prebuild = None
+        return self._book_rows(plan, tokens, laws, proposal_length)
+
+    def _plan_rows(
+        self, anchors, proposal_length, logits_processors, processor_histories,
+        proposal_score_states, proposal_trust_states, proposal_source_ranges,
+        cohort_width,
+    ):
+        """Validate the executor rows and choose each row's source on the host.
+
+        Pure in the lane states (it reads score and trust tables, builds a
+        fresh prompt-lookup index per row and may run the private native-MTP
+        source); shared by ``draft_distributions`` and ``draft_lazy``.
+        """
         if processor_histories is None or len(processor_histories) != len(anchors):
             raise ValueError(
                 "proposal composition requires committed histories per row"
@@ -714,29 +771,65 @@ class ComposedDraftModel:
             )
             candidates.append(selected)
             copy_trust_keys.append(copy_trust_key)
-        forward_prebuild = self.supports_verify_prebuild
-        if forward_prebuild:
-            self.backend.verify_prebuild = (
-                self.verify_prebuild
-                if all(candidate[0] == "external" for candidate in candidates)
-                else None
-            )
-        try:
-            tokens, laws = self.backend.draft_distributions(
-                anchors,
-                hidden,
-                cache,
-                backend_length,
-                rngs,
-                temperatures,
-                logits_processors=logits_processors,
-                processor_histories=histories,
-                **kwargs,
-            )
-        finally:
-            if forward_prebuild:
-                self.backend.verify_prebuild = None
-        confidence = getattr(self.backend, "adaptive_confidence_features", None)
+        return SimpleNamespace(
+            histories=histories, backend_length=backend_length, candidates=candidates,
+            copy_trust_keys=copy_trust_keys, logits_processors=logits_processors,
+            proposal_score_states=proposal_score_states,
+            proposal_trust_states=proposal_trust_states, cohort_width=cohort_width,
+            anchors=anchors,
+        )
+
+    def draft_lazy(self, anchor, hidden, cache, proposal_length, sampler=None, *, rng=None,
+                   logits_processors=None, processor_history=None,
+                   proposal_score_state=None, proposal_trust_state=None, cohort_width=1):
+        """One composed lane's drafts, lazily, when its row selects ``external``.
+
+        The same host planning (``_plan_rows``: committed scores, a fresh
+        prompt-lookup index, trust calibration) and bookkeeping
+        (``_book_rows``: ``last_proposal_*`` and ``composition_stats``) as
+        ``draft_distributions``, around the backend's ``draft_lazy`` in place
+        of its ``draft_distributions``.  A row that selects a copy, the
+        native-MTP source or a trusted-PLD calibration raises ``LazyDecline``
+        before the backend runs (planning only reads lane state), so the
+        device round restores the round and the host path proposes it.
+        """
+        backend_lazy = getattr(self.backend, "draft_lazy", None)
+        if not callable(backend_lazy):
+            raise LazyDecline("composition_backend_without_lazy_draft")
+        plan = self._plan_rows(
+            [anchor], proposal_length,
+            [list(logits_processors)] if logits_processors else None,
+            [list(processor_history or ())],
+            [proposal_score_state if proposal_score_state is not None else {}],
+            [proposal_trust_state if proposal_trust_state is not None else {}],
+            None, cohort_width,
+        )
+        source = plan.candidates[0][0]
+        if source != "external":
+            raise LazyDecline(f"composition_selected_{source}")
+        if self.supports_verify_prebuild and self.verify_prebuild is not None:
+            raise LazyDecline("composition_verify_prebuild")
+        extra = {}
+        if rng is not None:
+            extra["rng"] = rng
+        if logits_processors:
+            extra.update(logits_processors=logits_processors,
+                         processor_history=list(processor_history or ()))
+        tokens = backend_lazy(anchor, hidden, cache, plan.backend_length, sampler, **extra)
+        # An external row's tokens are never read by the bookkeeping; the
+        # backend publishes no lazy confidence features.
+        self._book_rows(plan, [None], [None], proposal_length, confidence=[None])
+        return tokens
+
+    def _book_rows(self, plan, tokens, laws, proposal_length, *, confidence=None):
+        """Replace copied rows and publish the round's ``last_proposal_*`` rows."""
+        anchors, candidates = plan.anchors, plan.candidates
+        copy_trust_keys, logits_processors = plan.copy_trust_keys, plan.logits_processors
+        proposal_score_states = plan.proposal_score_states
+        proposal_trust_states = plan.proposal_trust_states
+        cohort_width = plan.cohort_width
+        if confidence is None:
+            confidence = getattr(self.backend, "adaptive_confidence_features", None)
         confidence = (
             list(confidence) if confidence is not None else [None] * len(anchors)
         )

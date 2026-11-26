@@ -10,6 +10,7 @@ contract in their own class body.
 from __future__ import annotations
 
 import hashlib
+import os
 import json
 import sys
 from dataclasses import dataclass
@@ -56,6 +57,13 @@ class CheckpointPublicationCondition:
         return self.reason if active else None
 
 
+# Spec-round Phase 1a slice 1a-3 (default off, exact): memoize contract
+# fingerprints and per-pass cache declarations in the segmented self-MTP
+# ledger, which re-derived them for every cache several times per round.
+_LEDGER_CACHE = os.environ.get("MLX2_SEGMENTED_LEDGER_CACHE", "0") == "1"
+_FINGERPRINTS: dict = {}
+
+
 @dataclass(frozen=True, slots=True)
 class CacheOperationsContract:
     """Exact state identity and operations for one cache family."""
@@ -92,6 +100,16 @@ class CacheOperationsContract:
 
     @property
     def fingerprint(self) -> str:
+        if _LEDGER_CACHE:
+            # Opt-in memo (MLX2_SEGMENTED_LEDGER_CACHE): the digest is a pure
+            # function of this frozen value, so it is keyed by the value.
+            cached = _FINGERPRINTS.get(self)
+            if cached is None:
+                cached = _FINGERPRINTS[self] = self._compute_fingerprint()
+            return cached
+        return self._compute_fingerprint()
+
+    def _compute_fingerprint(self) -> str:
         payload = {
             "schema": self.schema,
             "family": self.family,

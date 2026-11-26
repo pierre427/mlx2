@@ -402,7 +402,58 @@ def _ring_capacity(caches: tuple[Any, ...]) -> int | None:
     return capacities.pop()
 
 
+# Opt-in per-pass memo (MLX2_SEGMENTED_LEDGER_CACHE, slice 1a-3): within one
+# ledger pass (a transaction's construction, validate or publish) every cache
+# object is alive and keeps its declared contract, so its declarations are
+# derived once per pass.  Fingerprints are reused only within one validate.
+_LEDGER_CACHE = os.environ.get("MLX2_SEGMENTED_LEDGER_CACHE", "0") == "1"
+_PASS = threading.local()
+
+
+class _LedgerPass:
+    __slots__ = ("outer",)
+
+    def __enter__(self):
+        self.outer = getattr(_PASS, "memo", None) is not None
+        if not self.outer:
+            _PASS.memo = {}
+        return self
+
+    def __exit__(self, *exc):
+        if not self.outer:
+            _PASS.memo = None
+        return False
+
+
+def _ledger_pass():
+    return _LedgerPass() if _LEDGER_CACHE else _NULL_PASS
+
+
+class _NullPass:
+    __slots__ = ()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+_NULL_PASS = _NullPass()
+
+
 def _component_declarations(kind: CachePlaneKind, cache: Any):
+    memo = getattr(_PASS, "memo", None) if _LEDGER_CACHE else None
+    if memo is not None:
+        key = ("declarations", kind, id(cache))
+        found = memo.get(key)
+        if found is None:
+            found = memo[key] = _component_declarations_uncached(kind, cache)
+        return found
+    return _component_declarations_uncached(kind, cache)
+
+
+def _component_declarations_uncached(kind: CachePlaneKind, cache: Any):
     operations = cache_operations(cache, capability="segmented MTP state identity")
     if kind == CachePlaneKind.MTP_DRAFT:
         return operations, operations.planes
@@ -415,6 +466,18 @@ def _component_declarations(kind: CachePlaneKind, cache: Any):
 
 
 def _fingerprint(kind: CachePlaneKind, caches: tuple[Any, ...]) -> tuple[Any, ...]:
+    memo = getattr(_PASS, "memo", None) if _LEDGER_CACHE else None
+    scope = None if memo is None else memo.get("fingerprints")
+    if scope is not None:
+        key = (kind, tuple(id(cache) for cache in caches))
+        found = scope.get(key)
+        if found is None:
+            found = scope[key] = _fingerprint_uncached(kind, caches)
+        return found
+    return _fingerprint_uncached(kind, caches)
+
+
+def _fingerprint_uncached(kind: CachePlaneKind, caches: tuple[Any, ...]) -> tuple[Any, ...]:
     return tuple(
         (
             _cache_type(cache),
@@ -562,6 +625,10 @@ class SegmentedLaneTransaction:
     """One lane's aligned cache-plane generation ledger."""
 
     def __init__(self, pair: Any, lane: Any, position: int) -> None:
+        with _ledger_pass():
+            self._init(pair, lane, position)
+
+    def _init(self, pair: Any, lane: Any, position: int) -> None:
         groups = _plane_groups(pair)
         bases = []
         self._groups = tuple(sorted(groups, key=lambda kind: kind.value))
@@ -592,6 +659,27 @@ class SegmentedLaneTransaction:
         self.predecessor_lineage_id: str | None = None
 
     def validate(
+        self, pair: Any, lane: Any, expected_position: int, *, continuity: bool = True
+    ) -> None:
+        with _ledger_pass():
+            self._validate(pair, lane, expected_position, continuity=continuity)
+
+    def _validate(
+        self, pair: Any, lane: Any, expected_position: int, *, continuity: bool = True
+    ) -> None:
+        memo = getattr(_PASS, "memo", None) if _LEDGER_CACHE else None
+        if memo is None:
+            return self._validate_body(pair, lane, expected_position, continuity=continuity)
+        # One validate reads each cache's compatibility values twice (the
+        # membership fingerprint, then the stamp); nothing mutates in between.
+        outer = memo.get("fingerprints")
+        memo["fingerprints"] = {}
+        try:
+            return self._validate_body(pair, lane, expected_position, continuity=continuity)
+        finally:
+            memo["fingerprints"] = outer
+
+    def _validate_body(
         self, pair: Any, lane: Any, expected_position: int, *, continuity: bool = True
     ) -> None:
         groups = _plane_groups(pair)
@@ -641,7 +729,12 @@ class SegmentedLaneTransaction:
         note_segmented_self_mtp("transaction_canonicalizations")
         return successor
 
-    def publish(
+    def publish(self, branch: CacheDeltaBranch, pair: Any, lane: Any, advance: int,
+                **kwargs) -> "SegmentedLaneTransaction":
+        with _ledger_pass():
+            return self._publish(branch, pair, lane, advance, **kwargs)
+
+    def _publish(
         self,
         branch: CacheDeltaBranch,
         pair: Any,

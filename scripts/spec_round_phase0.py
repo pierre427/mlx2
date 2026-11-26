@@ -494,14 +494,19 @@ def fresh_status(client, wait_s=2.5, poll_s=0.25):
 def counter_delta(after, before):
     return {key: round(value - before.get(key, 0), 6) for key, value in sorted(after.items())
             if value != before.get(key, 0)}
+# ``--request-json``: extra request fields for every request of the run (for
+# example ``{"presence_penalty": 0}``); recorded in the run receipt.
+REQUEST_EXTRA: dict = {}
 
 
 def request(client, model, text, max_tokens):
+    import hashlib
     from ling32_air_prefill_ab import find
     started = time.monotonic()
     result = client.call("/v1/chat/completions", {
         "model": model, "temperature": 0, "stream": False, "max_tokens": max_tokens,
-        "enable_thinking": False, "messages": [{"role": "user", "content": text}]})
+        "enable_thinking": False, "messages": [{"role": "user", "content": text}],
+        **REQUEST_EXTRA})
     elapsed = time.monotonic() - started
     usage = result.get("usage") or {}
     completion = int(usage.get("completion_tokens") or 0)
@@ -517,6 +522,10 @@ def request(client, model, text, max_tokens):
         "route": (result.get("mlx2") or {}).get("route"),
         "mtp": mtp_transition(result.get("mlx2")),
         "mlx2_receipt": {k: v for k, v in (result.get("mlx2") or {}).items() if k != "round_probe"},
+        # Greedy arms of one snapshot compare their outputs by this digest.
+        "text_sha256": hashlib.sha256(
+            str(((result.get("choices") or [{}])[0].get("message") or {}).get("content")).encode()
+        ).hexdigest(),
     }, find(result, "round_probe")
 
 
@@ -687,6 +696,13 @@ def run(args):
     except ValueError as error:
         raise SystemExit(str(error)) from error
     validate_rerun_options(args, sizes, conditions)
+    if args.request_json:
+        extra = json.loads(args.request_json)
+        fixed = {"model", "messages", "max_tokens", "stream", "temperature", "enable_thinking"}
+        if not isinstance(extra, dict) or set(extra) & fixed:
+            raise SystemExit("--request-json must be an object that does not set " + "/".join(sorted(fixed)))
+        REQUEST_EXTRA.clear()
+        REQUEST_EXTRA.update(extra)
     out_dir = Path(args.output)
     if out_dir.exists() and any(out_dir.iterdir()):
         raise SystemExit(f"refuse nonempty evidence directory {out_dir}")
@@ -705,7 +721,7 @@ def run(args):
                                or {k: os.environ.get(k) for k in ("MLX_MAX_OPS_PER_BUFFER", "MLX_MAX_MB_PER_BUFFER")}),
         "load_workers": args.load_workers, "load_nice": args.load_nice,
         "load_ramp_s": args.load_ramp_s, "cell_max_s": args.cell_max_s, "cooldown_s": args.cooldown_s,
-        "rounds_target": args.rounds,
+        "rounds_target": args.rounds, "request_extra": dict(REQUEST_EXTRA),
         "rounds_target_contended": rounds_target(args, "contended"),
         "max_tokens": args.max_tokens,
         "size_max_tokens": {str(k): v for k, v in sorted(args.size_max_tokens.items())},
@@ -920,6 +936,8 @@ def main(argv=None):
                    help="contended: stop measuring after this long under load")
     r.add_argument("--cooldown-s", type=float, default=60)
     r.add_argument("--server-pid", type=int)
+    r.add_argument("--request-json", default=None,
+                   help='extra request fields for every request, e.g. \'{"presence_penalty": 0}\'')
     r.add_argument("--xctrace", action="store_true")
     r.add_argument("--trace-limit-s", type=int, default=60)
     r.add_argument("--trace-max-size", type=int, default=16384, help="trace only cells up to this context")

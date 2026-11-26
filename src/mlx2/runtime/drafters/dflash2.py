@@ -916,6 +916,117 @@ DFlash2DraftModel.pairwise_score_table = pairwise_score_table
 DFlash2DraftModel.propose_block = _propose_block
 
 
+# ``draft_lazy`` marks a processed lane whose host loop would have ended the
+# draft early (no finite candidate): the device round redoes it on the host.
+DRAFT_LAZY_HOST_REDO = -2
+
+
+def _draft_lazy(self, anchor, hidden, cache, proposal_length, sampler=None, *, rng=None,
+                logits_processors=None, processor_history=None):
+    """One lane's greedy drafts as a lazy int32 ``[n]`` array, no host read.
+
+    ``speculative_device_round`` ``lazy_draft`` (default off, unqualified).
+    The ops are ``draft_distributions``' unprocessed path for a one-row
+    batch (the trunk pass, top-k candidates, pair-score table and
+    ``pairwise_walk`` at temperature 0, over ``batch_caches([cache])``), so
+    the tokens are bitwise those it returns for that lane, and ``rng`` (the
+    lane's RequestRNG) gives up the same ``proposal_length`` uniforms that
+    path draws (a greedy walk still consumes one per position).  A row the
+    host path would reject (``invalid``: NaN or no finite score) comes back
+    as ``-1`` tokens, which the device round refuses after its read.
+
+    With ``logits_processors`` (slice 1a-2; the device round passes them
+    only for stateless, history-pure processors such as the presence
+    penalty), the ops are the processed sequential loop of
+    ``draft_distributions`` instead: per position, the edge to the previous
+    selected token, the lane's processors on ``processor_history + [anchor]
+    + drafts so far`` (lazy), the candidate scores ``value[ids] + edge``,
+    the optional selector soft-cap with processor exclusions kept, and the
+    greedy argmax, consuming one uniform per position as ``rng.sample`` does.
+    A position with no finite candidate (the host loop ends that lane's
+    draft there) or a NaN score (the host loop raises) comes back as
+    ``DRAFT_LAZY_HOST_REDO`` tokens: the round is restored and runs on the
+    host path.
+
+    Greedy and one lane only: the device round declines sampled lanes
+    (``draft_lazy_greedy_only``) and cohorts wider than one
+    (``draft_lazy_width_one``) before calling this.
+    """
+    if sampler is not None:
+        raise ValueError("DFlash2 lazy drafts are greedy only (no drafting sampler)")
+    count = int(proposal_length)
+    if count < 1:
+        raise ValueError("DFlash2 lazy drafts need a positive proposal length")
+    if hidden.shape[0] != 1:
+        raise ValueError("DFlash2 lazy drafts run one lane at a time")
+    anchors = mx.array([int(anchor)], dtype=mx.int32)
+    inputs = mx.concatenate(
+        [anchors[:, None], mx.full((1, count), self.config.mask_token_id, dtype=mx.int32)], axis=1
+    )
+    features = self._hidden(inputs, hidden, self.batch_caches([cache]))[:, 1:]
+    logits = self._logits(features)
+    top = min(self.candidate_selector.top_k, logits.shape[-1])
+    candidates = mx.argpartition(logits, -top, axis=-1)[..., -top:]
+    unary = mx.take_along_axis(logits, candidates, axis=-1)
+    if logits_processors:
+        return _draft_lazy_processed(
+            self, anchors, features, logits, candidates, count, rng,
+            logits_processors, processor_history,
+        )
+    scores = self.pairwise_score_table(anchors, features, candidates, unary)
+    uniforms = [[rng.uniform() if rng is not None else 0.0 for _ in range(count)]]
+    tokens, _laws, invalid = pairwise_walk(candidates, scores, uniforms, [0.0])
+    return mx.where(invalid[0], mx.full((count,), -1, dtype=mx.int32), tokens[0].astype(mx.int32))
+
+
+def _draft_lazy_processed(self, anchors, features, logits, candidates, count, rng,
+                          processors, history):
+    """The processed greedy loop of ``_draft_distributions`` for one lane, lazily."""
+    from ..processor_probe import probe_logits_processors
+
+    selector = self.candidate_selector
+    post_cap = selector.post_softcap
+    projected = selector.hidden_projection(features)
+    # ``processor_histories[row] + [anchor] + tokens[row]`` (the anchor is a host int here too).
+    prefix = mx.concatenate([
+        mx.array(list(history or ()), dtype=mx.int32), anchors.astype(mx.int32),
+    ])
+    predecessor = anchors
+    drafted, redo = [], mx.array(False)
+    for position in range(count):
+        edges = mx.sum(
+            selector.predecessor_codebook(predecessor)[:, None]
+            * projected[:, position, None]
+            * selector.successor_codebook(candidates[:, position]),
+            axis=-1,
+        )
+        tokens = mx.concatenate([prefix, mx.stack(drafted)]) if drafted else prefix
+        value = probe_logits_processors(processors, tokens, logits[:, position].astype(mx.float32))
+        scores = (
+            mx.take(value[0].astype(mx.float32), candidates[0, position])
+            + edges[0].astype(mx.float32)
+        )
+        if post_cap is not None:
+            excluded = mx.isinf(scores) & (scores < 0)
+            capped = cap_selector_scores(scores.astype(mx.float32), post_cap).astype(mx.float32)
+            scores = mx.where(excluded, mx.array(-float("inf"), dtype=mx.float32), capped)
+        redo = redo | ~mx.any(mx.isfinite(scores)) | mx.any(mx.isnan(scores))
+        if rng is not None:
+            rng.uniform()  # ``rng.sample(one-hot)`` draws one uniform per position
+        token = mx.take(candidates[0, position], mx.argmax(scores)).astype(mx.int32)
+        drafted.append(token)
+        predecessor = token.reshape(1)
+    out = mx.stack(drafted)
+    return mx.where(redo, mx.full((count,), DRAFT_LAZY_HOST_REDO, dtype=mx.int32), out)
+
+
+DFlash2DraftModel.draft_lazy = _draft_lazy
+DFlash2DraftModel.draft_lazy_consumes_rng = True
+DFlash2DraftModel.draft_lazy_greedy_only = True
+DFlash2DraftModel.draft_lazy_width_one = True
+DFlash2DraftModel.draft_lazy_processors = True
+
+
 def tree_codebooks(self):
     """Return ``(predecessor, successor, cache_hit)`` float32 host codebooks.
 

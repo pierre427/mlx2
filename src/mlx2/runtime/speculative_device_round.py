@@ -42,6 +42,19 @@ calls into this module.  Switches (``device_round`` policy object):
     a miss.  Without this switch such requests keep the host verifier
     (counted decline).
 
+``processors`` (needs ``lazy_draft`` or ``decide``; device_round v2 slice
+    1a-2, design section 4.7)
+    Lanes whose logits processors all declare the stateless branch contract
+    (``speculative_topology.processors_branch_safe``: history-pure, no
+    mutable state; e.g. the presence penalty that vendor profiles such as
+    Raon's set by default) keep the device round.  The lane's own processor
+    functions run on token arrays that hold the lazy drafts, on every verify
+    row (``_target_law``'s per-row history) and, for a drafter that declares
+    ``draft_lazy_processors``, at every drafting position, so the processed
+    laws are those of the host path with no host read.  Without this switch
+    (or for any other processor kind) such lanes keep the host path
+    (counted ``logits_processors`` decline).
+
 ``prompt_copy_round`` (separate policy object, ``prompt_copy_round.py``)
     replaces a round's drafter proposals with a long copy from the prompt.
 
@@ -58,7 +71,7 @@ import numpy as np
 
 VERSION = "speculative-device-round-v1"
 POLICY_KEY = "device_round"
-_SWITCHES = ("lazy_draft", "decide", "sampled_drafts", "nucleus")
+_SWITCHES = ("lazy_draft", "decide", "sampled_drafts", "nucleus", "processors")
 _SEED_SCALE = float(1 << 53)
 
 # Present in ``scheduler_stats`` only when the option is configured.
@@ -83,6 +96,7 @@ class DeviceRoundPolicy:
     decide: bool = False
     sampled_drafts: bool = False
     nucleus: bool = False
+    processors: bool = False
 
     @classmethod
     def from_value(cls, value):
@@ -102,12 +116,24 @@ class DeviceRoundPolicy:
             raise ValueError(f"{POLICY_KEY}.sampled_drafts requires lazy_draft and decide")
         if policy.nucleus and not policy.decide:
             raise ValueError(f"{POLICY_KEY}.nucleus requires decide")
+        if policy.processors and not (policy.lazy_draft or policy.decide):
+            raise ValueError(f"{POLICY_KEY}.processors requires lazy_draft or decide")
         if not any(getattr(policy, key) for key in _SWITCHES):
             return None
         return policy
 
     def as_dict(self):
         return {key: getattr(self, key) for key in _SWITCHES}
+
+
+class HostRedo(Exception):  # noqa: N818 - control flow, not an error
+    """A lazy draft asks for this round on the host path (restored first)."""
+
+
+def _host_redo(tokens):
+    from .drafters.dflash2 import DRAFT_LAZY_HOST_REDO
+
+    return any(int(token) == DRAFT_LAZY_HOST_REDO for token in tokens)
 
 
 def _bump(stats, key, amount=1):
@@ -219,21 +245,38 @@ class DeviceRound:
             return "proposal_contexts"
         if getattr(owner.draft, "requires_target_caches", False):
             return "target_caches"
+        if (getattr(owner.draft, "requires_proposal_score_states", False)
+                and not getattr(owner.draft, "draft_lazy_composed", False)):
+            # Source arbitration and its lagged score feedback live in the
+            # host proposal path unless the wrapper drafts composed rows
+            # lazily (ComposedDraftModel.draft_lazy, slice 1a-1b).
+            return "proposal_composition"
         if getattr(getattr(owner.model, "model", None), "residual_taps", None) is not None:
             return "residual_steer"
         if os.environ.get("MLX2_EXTERNAL_VERIFY_PREBUILD", "0") == "1":
             return "verify_prebuild"
         return None
 
-    @staticmethod
-    def _lane_reason(lane):
+    def _processors_ok(self, lane):
+        """``processors`` switch: every processor is stateless and history-pure."""
+        from .speculative_topology import processors_branch_safe
+
+        return bool(
+            self.policy is not None and self.policy.processors
+            and processors_branch_safe(lane.processors)
+            # A verify ledger snapshots per-row state through VerifyWindow.
+            and not any(callable(getattr(processor, "verify_ledger", None))
+                        for processor in lane.processors)
+        )
+
+    def _lane_reason(self, lane):
         from .external_speculative import _speculation_parked
 
         if lane.cancelled:
             return "cancelled_lane"
         if lane.ordinary or _speculation_parked(lane):
             return "ordinary_lane"
-        if lane.processors:
+        if lane.processors and not self._processors_ok(lane):
             return "logits_processors"
         if lane.anchor is None:
             return "no_anchor"
@@ -250,6 +293,16 @@ class DeviceRound:
         if forced_depth is not None:
             return _decline(owner, "forced_depth", len(cohort))
         reason = self._engine_reason(owner)
+        if reason is None and getattr(owner.draft, "requires_proposal_score_states", False):
+            if not lazy or self.copy is not None:
+                # Prompt-copy rounds (and decide-only rounds) would bypass
+                # composition's source arbitration; keep its host path.
+                reason = "proposal_composition"
+            elif int(getattr(owner.draft, "maximum_proposal_length", 0)) > int(
+                    getattr(owner.draft, "backend_proposal_length", 0)):
+                # ``prompt_lookup_max_span``: the host plans copies for the
+                # engine depth, beyond the backend's; keep that path exact.
+                reason = "composition_long_copies"
         if reason is None:
             for lane in cohort:
                 reason = self._lane_reason(lane)
@@ -257,6 +310,16 @@ class DeviceRound:
                     break
         if reason is None and lazy and not callable(getattr(owner.draft, "draft_lazy", None)):
             reason = "drafter_without_lazy_draft"
+        if reason is None and lazy:
+            # Drafter-declared limits of its lazy draft (DFlash2: greedy, one lane).
+            if getattr(owner.draft, "draft_lazy_greedy_only", False) and any(
+                    _temperature(lane) > 0 for lane in cohort):
+                reason = "lazy_draft_sampled_lane"
+            elif getattr(owner.draft, "draft_lazy_width_one", False) and len(cohort) > 1:
+                reason = "lazy_draft_width"
+            elif any(lane.processors for lane in cohort) and not getattr(
+                    owner.draft, "draft_lazy_processors", False):
+                reason = "lazy_draft_processors"
         if reason is not None:
             return _decline(owner, reason, len(cohort))
         base = min(owner.num_draft, min(l.maximum - l.generated - 1 for l in cohort))
@@ -276,8 +339,36 @@ class DeviceRound:
             for lane, outcome in zip(cohort, outcomes, strict=True):
                 self.copy.book(owner, lane, outcome)
         draft_depth = min(base, int(getattr(owner.draft, "num_draft", base)))
-        self._run(owner, cohort, copies, draft_depth)
+        try:
+            self._run(owner, cohort, copies, draft_depth)
+        except HostRedo:
+            # ``_run`` restored the lanes and statistics before re-raising.
+            return _decline(owner, "host_redo", len(cohort))
+        except Exception as error:
+            from .proposal_composition import LazyDecline
+
+            if not isinstance(error, LazyDecline):
+                raise
+            # A composed row selected another source (prompt-lookup copy,
+            # native MTP, trusted PLD): restored, the host path proposes it.
+            return _decline(owner, error.reason, len(cohort))
         return True
+
+    @staticmethod
+    def _composition_row(draft):
+        """The composed row's attributes, as ``_propose`` sets them on its block."""
+        sources = getattr(draft, "last_proposal_sources", None)
+        if not sources or len(sources) != 1 or sources[0] != "external":
+            raise RuntimeError("composed lazy draft published no external source row")
+        return {
+            "proposal_source": sources[0],
+            "proposal_score_key": draft.last_proposal_score_keys[0],
+            "proposal_score": float(draft.last_proposal_scores[0]),
+            "proposal_trust_key": draft.last_proposal_trust_keys[0],
+            "proposal_trusted": bool(draft.last_proposal_trusted[0]),
+            "proposal_audit": bool(draft.last_proposal_audits[0]),
+            "proposal_periodic_audit": bool(draft.last_proposal_periodic_audits[0]),
+        }
 
     @staticmethod
     def _lane_exact_copy_cap(owner, cohort):
@@ -305,6 +396,12 @@ class DeviceRound:
         recovery = owner._snapshot_round(cohort)
         owner.scheduler_stats["recovery_checkpoint_captures"] += len(recovery)
         stats_snapshot = owner._snapshot_scheduler_stats()
+        # A composed lazy draft books ``composition_stats`` before the read; a
+        # restored round (redo, decline, failure) must not count it twice.
+        composition_snapshot = (
+            dict(owner.draft.composition_stats)
+            if getattr(owner.draft, "draft_lazy_composed", False) else None
+        )
         owner._open = True
         transaction = None
         # Whether this cohort's decision runs on the device (``_plan`` keeps
@@ -346,9 +443,23 @@ class DeviceRound:
                         ).astype(mx.int32)
 
                 try:
+                    extra = ({"rng": lane.rng}
+                             if getattr(owner.draft, "draft_lazy_consumes_rng", False) else {})
+                    if lane.processors:
+                        # Admitted by ``_lane_reason``/``run`` (``processors``).
+                        extra.update(logits_processors=lane.processors,
+                                     processor_history=list(lane.history))
+                    composed = getattr(owner.draft, "draft_lazy_composed", False)
+                    if composed:
+                        # The executor-owned lane states ``_propose`` passes.
+                        extra.update(processor_history=list(lane.history),
+                                     proposal_score_state=lane.proposal_score_counts,
+                                     proposal_trust_state=lane.proposal_trust_states,
+                                     cohort_width=len(cohort))
                     drafts = owner.draft.draft_lazy(
-                        lane.anchor, lane.tail, lane.draft_cache, draft_depth, sampler
+                        lane.anchor, lane.tail, lane.draft_cache, draft_depth, sampler, **extra
                     )
+                    composition = self._composition_row(owner.draft) if composed else None
                 except Exception as error:
                     from .external_speculative import DraftUnavailable
 
@@ -360,7 +471,9 @@ class DeviceRound:
                 if ratio:
                     q = mx.concatenate(recorded, axis=0)
                 rows.append(SimpleNamespace(
-                    lane=lane, count=draft_depth, host=None, drafts=drafts, q=q,
+                    # A composed backend may draft fewer than the round depth.
+                    lane=lane, count=int(drafts.shape[0]), host=None, drafts=drafts, q=q,
+                    composition=composition,
                     source="device_round", seed=seed, ratio=ratio, keys=None,
                 ))
                 _bump(owner.scheduler_stats, "external_device_round_lazy_draft_lanes")
@@ -400,6 +513,8 @@ class DeviceRound:
                     else [int(t) for t in row.drafts.tolist()]
                     for row in rows
                 ]
+                if any(_host_redo(tokens) for tokens in hosts):
+                    raise HostRedo()
                 vocab = int(logits.shape[-1])
                 for tokens in hosts:
                     if any(not 0 <= token < vocab for token in tokens):
@@ -415,6 +530,10 @@ class DeviceRound:
                 block = HostDraftRow(tokens, laws, len(cohort))
                 if row.source == "prompt_copy":
                     block.proposal_source = row.source
+                for key, value in (getattr(row, "composition", None) or {}).items():
+                    # ``_propose``'s composed-row attributes: ``_commit`` learns
+                    # the lagged score and trust feedback from them.
+                    setattr(block, key, value)
                 blocks.append(block)
             # Book this round before ``_commit`` builds the round receipts, so
             # they include it (a failing commit restores lanes and stats).
@@ -440,6 +559,9 @@ class DeviceRound:
                     pass
             owner._restore_round(cohort, recovery)
             owner.scheduler_stats = stats_snapshot
+            if composition_snapshot is not None:
+                owner.draft.composition_stats.clear()
+                owner.draft.composition_stats.update(composition_snapshot)
             owner.scheduler_stats["recovery_checkpoint_restores"] += len(recovery)
             raise
         finally:
@@ -462,7 +584,7 @@ class DeviceRound:
         mx = owner.mx
         rows = []
         for lane, block in zip(cohort, blocks, strict=True):
-            if lane.processors:
+            if lane.processors and not self._processors_ok(lane):
                 _decline(owner, "logits_processors", len(cohort))
                 return owner._verify(cohort, blocks, logits)
             if block is None:
@@ -524,6 +646,24 @@ class DeviceRound:
             temp, top_p=top_p, top_k=top_k, min_p=min_p
         )
 
+    @staticmethod
+    def _row_value(owner, row, rows_logits, j):
+        """Verify row ``j`` as ``_target_law`` builds it: float32, then the
+        lane's processors on ``history + [anchor] + drafts[:j]``, with the
+        drafts still lazy on the device (``processors`` switch)."""
+        mx = owner.mx
+        value = rows_logits[j][None].astype(mx.float32)
+        lane = row.lane
+        if getattr(lane, "processors", None):
+            prefix = getattr(row, "processor_prefix", None)
+            if prefix is None:  # built once per lane-round, not per verify row
+                prefix = row.processor_prefix = mx.array(
+                    [*lane.history, int(lane.anchor)], dtype=mx.int32)
+            tokens = mx.concatenate([prefix, row.drafts.reshape(-1)[:j].astype(mx.int32)])
+            for processor in lane.processors:
+                value = processor(tokens, value)
+        return value
+
     def _lane_plan(self, owner, row, rows_logits, *, redo=False):
         mx = owner.mx
         lane, count = row.lane, row.count
@@ -535,7 +675,7 @@ class DeviceRound:
             plan.kind = "greedy"
             selected, norms, response = [], [], []
             for j in range(count + 1):
-                value = rows_logits[j][None].astype(mx.float32)[0].astype(mx.float32)
+                value = self._row_value(owner, row, rows_logits, j)[0].astype(mx.float32)
                 norm = mx.logsumexp(value)
                 selected.append(mx.argmax(value).astype(int32))
                 norms.append(norm)
@@ -555,7 +695,7 @@ class DeviceRound:
 
             logp, deferred = [], []
             for j in range(count + 1):
-                value = rows_logits[j][None].astype(mx.float32)
+                value = self._row_value(owner, row, rows_logits, j)
                 pending = transform_top_p_deferred(transform, value)
                 deferred.append(pending)
                 logp.append(pending.redo()[0] if redo and pending.fits is not None
@@ -640,12 +780,18 @@ class DeviceRound:
                     packet = [int(v) for v in np.asarray(plan.packet).tolist()]
             accepted, finite, last = packet[0], packet[1], packet[2]
             drafts = packet[3: 3 + row.count]
+            if _host_redo(drafts):
+                raise HostRedo()
+            vocab = int(logits.shape[-1])
+            # Drafts first: the host path refuses an invalid draft row (a
+            # DFlash2 lazy draft's -1 tokens) before it ever verifies.
+            if any(not 0 <= token < vocab for token in drafts):
+                raise ValueError("device-round token outside the vocabulary")
             if not finite:
                 raise LaneFailure(
                     lane.uid, "external draft target law is not a probability distribution"
                 )
-            vocab = int(logits.shape[-1])
-            if any(not 0 <= token < vocab for token in drafts) or not 0 <= last < vocab:
+            if not 0 <= last < vocab:
                 raise ValueError("device-round token outside the vocabulary")
             if row.host is not None and drafts != row.host:
                 raise RuntimeError("device-round packet drafts differ from the host proposals")

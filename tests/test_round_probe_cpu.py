@@ -719,3 +719,20 @@ def test_rerun_options_are_refused_before_evidence_is_written(tmp_path):
     args = SimpleNamespace(max_requests=8, max_tokens=256, rounds=136, contended_rounds=60,
                            size_max_tokens={65536: 64})
     harness.validate_rerun_options(args, [65536], ["quiet", "contended"])  # the rerun recipe fits
+
+
+def test_request_extra_fields_and_output_digest(monkeypatch):
+    sent = []
+
+    class Client:
+        def call(self, path, payload=None, **kwargs):
+            sent.append(payload)
+            return {"usage": {"completion_tokens": 3, "prompt_tokens": 9},
+                    "choices": [{"message": {"content": "abc"}, "finish_reason": "length"}],
+                    "mlx2": {"timing": {"ttft_seconds": 0.001}, "round_probe": {"enabled": True}}}
+
+    monkeypatch.setattr(harness, "REQUEST_EXTRA", {"presence_penalty": 0})
+    row, block = harness.request(Client(), "m", "hello", 4)
+    assert sent[0]["presence_penalty"] == 0 and sent[0]["temperature"] == 0
+    assert row["text_sha256"] == __import__("hashlib").sha256(b"abc").hexdigest()
+    assert block == {"enabled": True}
