@@ -4,7 +4,10 @@ Original mlx2 script (2026-11-23).  The served check of
 ``inkling2_attn_decode_kernel`` (inkattn-d006a66a4-serve) counted fewer
 one-row decode forwards than generated tokens in both arms (about 107-112
 for 128 tokens), inferred from per-layer kernel counters.  This probe
-counts the forwards directly so the gap is either explained or confirmed:
+counts the forwards directly so the gap is either explained or confirmed.
+Answer (2026-11-24 night run at 98883cc60): forwards equal generated tokens;
+the gap was ``/v1/status`` staleness (the worker republishes it at most once
+a second), so counters are now read with ``_fresh_status``:
 
 * one loopback ``mlx2.server`` per arm (never port 8282, ``--max-lanes 1``,
   ``--execution-policy`` with only ``inkling2_attn_decode_kernel`` set, every
@@ -47,7 +50,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from inkling2_attn_decode_serve import ORACLES, _find, _get, _post  # noqa: E402
+from inkling2_attn_decode_serve import ORACLES, _find, _fresh_status, _get, _post  # noqa: E402
 
 SITECUSTOMIZE = '''
 import builtins, json, os, sys, threading
@@ -180,7 +183,8 @@ def arm(model, run_dir, port, name, on, prompts, max_tokens):
         result["hook_installed"] = any('"hook"' in x for x in _lines(log_path))
         for label, prompt, pattern, limit in prompts:
             _post(port, "/v1/admin/apc/clear", {"reason": "step-count-probe"}, token)
-            before = _counters(_get(port, "/v1/status", token))
+            status, fresh_before = _fresh_status(port, token)
+            before = _counters(status)
             start = len(_lines(log_path))
             body = {"model": model_id, "messages": [{"role": "user", "content": prompt}],
                     "temperature": 0, "max_tokens": min(limit, max_tokens),
@@ -188,11 +192,13 @@ def arm(model, run_dir, port, name, on, prompts, max_tokens):
             payload = _post(port, "/v1/chat/completions", body)
             logged = [json.loads(x) for x in _lines(log_path)[start:]]
             rows = [r for r in logged if r.get("cls") == "Model"]
-            after = _counters(_get(port, "/v1/status", token))
+            status, fresh_after = _fresh_status(port, token)
+            after = _counters(status)
             choice = payload["choices"][0]
             message = choice.get("message") or {}
             token_ids = [int(r["id"]) for r in (choice.get("logprobs") or {}).get("content") or []]
             entry = _summarize(rows, payload.get("usage"), token_ids, before, after)
+            entry["status_fresh"] = {"before": fresh_before, "after": fresh_after}
             entry["text_model_forwards"] = sum(r.get("cls") == "TextModel" for r in logged)
             entry.update(finish_reason=choice.get("finish_reason"), usage=payload.get("usage"),
                          token_ids=token_ids, route=(payload.get("mlx2") or {}).get("route"),

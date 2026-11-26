@@ -57,6 +57,36 @@ def _get(port, path, token=None):
         return json.loads(response.read())
 
 
+def _fresh_status(port, token=None, timeout=15.0, poll=0.25):
+    """``/v1/status`` once the worker has published a snapshot collected after
+    this call started.
+
+    The model worker republishes ``/v1/status`` at most once a second
+    (serving.py, ``publish_worker_snapshot``), so a read right after a
+    response can miss up to a second of decode steps in ``kernel_counters``
+    (the 2026-11-24 step-count probe: 19, 7 and 1 missing steps). Two
+    increments of ``host_snapshot_timing.collections`` after the first read
+    mean one collection started after it. Returns ``(status, fresh)``;
+    ``fresh`` is False when the count did not advance within ``timeout`` (or
+    the server publishes no count), and the last read is returned.
+    """
+    def collections(status):
+        timing = status.get("host_snapshot_timing") or {}
+        return timing.get("collections") if isinstance(timing, dict) else None
+
+    status = _get(port, "/v1/status", token)
+    start = collections(status)
+    if start is None:
+        return status, False
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        time.sleep(poll)
+        status = _get(port, "/v1/status", token)
+        if (collections(status) or 0) >= start + 2:
+            return status, True
+    return status, False
+
+
 def _find(value, key, path=""):
     """Every ``key`` entry in a nested JSON value, with its path."""
     found = []
@@ -153,11 +183,12 @@ def arm(model, run_dir, port, name, on, prompt, max_tokens, timing):
                 raise RuntimeError(f"{name} server did not become healthy; see server.log")
             time.sleep(2)
         model_id = _get(port, "/v1/models")["data"][0]["id"]
-        before = _get(port, "/v1/status", token)
+        before, result["status_fresh_before"] = _fresh_status(port, token)
         _post(port, "/v1/admin/apc/clear", {"reason": "attn-decode-serve"}, token)
         body, main = _request(port, model_id, prompt, max_tokens)
-        after = _get(port, "/v1/status", token)
+        after, fresh_after = _fresh_status(port, token)
         result.update(main)
+        result["status_fresh_after"] = fresh_after
         result["attn_decode_before"] = _find(before, "attn_decode")
         result["attn_decode_after"] = _find(after, "attn_decode")
         result["oracles"] = {}
@@ -168,13 +199,13 @@ def arm(model, run_dir, port, name, on, prompt, max_tokens, timing):
 
             got["oracle_pass"] = bool(re.search(pattern, got["text"] or ""))
             result["oracles"][label] = got
-        result["attn_decode_after_oracles"] = _find(_get(port, "/v1/status", token),
-                                                    "attn_decode")
+        status, result["status_fresh_after_oracles"] = _fresh_status(port, token)
+        result["attn_decode_after_oracles"] = _find(status, "attn_decode")
         result["kernel_policy"] = _find(after, "kernel_policy")[:1]
         result["checkpoint"] = _find(after, "checkpoint")[:4]
         result["timing"] = [_stream_timing(port, body) for _ in range(timing)]
-        result["attn_decode_after_timing"] = _find(_get(port, "/v1/status", token),
-                                                   "attn_decode")
+        status, result["status_fresh_after_timing"] = _fresh_status(port, token)
+        result["attn_decode_after_timing"] = _find(status, "attn_decode")
         (arm_dir / "status-after.json").write_text(json.dumps(after, indent=1, default=str))
     finally:
         try:
