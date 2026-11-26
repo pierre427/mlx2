@@ -16,6 +16,7 @@ from . import qwen3_next
 from . import qwen4_fused_gdn_verify as _verify
 from .qwen_gdn_contracts import QWEN36_GDN_CONTRACT
 from .gdn_state import check_state
+from ..technologies import linear_recurrence as _lr
 from .import_env import snapshot as _import_env_snapshot
 from .pipeline import PipelineMixin
 from .qwen3_5 import GatedDeltaNet as ReferenceGatedDeltaNet
@@ -177,6 +178,10 @@ class GatedDeltaNet(ReferenceGatedDeltaNet):
         return None
 
     def _try_fused_decode(self, qkv, z, b, a, mask, cache, *, account=True):
+        if _lr.kernel_refused("fused_gdn"):
+            # A gradient trace: the fused kernels have no VJP; run the ordinary
+            # recurrence (not a serving fallback, so no counter).
+            return None
         if cache is not None:
             # A state of the class this layer did not select never runs.
             check_state(cache[1], getattr(self, "_gdn_state_dtype", None))
@@ -386,22 +391,10 @@ class GatedDeltaNet(ReferenceGatedDeltaNet):
         def restore_rows(lengths):
             # Include checkpoint and final state: zero/full/ragged acceptance
             # must never read an unwritten padded snapshot.
-            ends = mx.broadcast_to(mx.array(lengths, mx.int32).reshape(-1), (rows,))
-            ends = mx.minimum(mx.maximum(ends, 0), mx.array(counts, mx.int32))
-            idx = mx.minimum(mx.maximum(ends - 1, 0), steps - 2)
-
-            def pick(snaps, before, final):
-                index = idx.reshape((rows, 1) + (1,) * (snaps.ndim - 2))
-                selected = mx.take_along_axis(snaps, index, axis=1).squeeze(1)
-                full = (ends == mx.array(counts)).reshape(
-                    (rows,) + (1,) * (before.ndim - 1)
-                )
-                zero = (ends == 0).reshape((rows,) + (1,) * (before.ndim - 1))
-                return mx.contiguous(
-                    mx.where(zero, before, mx.where(full, final, selected))
-                )
-
-            return [pick(convs, initial[0], conv), pick(states, initial[1], state)]
+            return [
+                _lr.select_rollback_rows(lengths, counts, convs, initial[0], conv),
+                _lr.select_rollback_rows(lengths, counts, states, initial[1], state),
+            ]
 
         def restore(m):
             return restore_rows(m if isinstance(m, mx.array) else [m] * rows)

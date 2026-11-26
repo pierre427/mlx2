@@ -126,7 +126,9 @@ if __name__ == '__main__':
             print(json.dumps({'length': length, 'gate': gate, 'passed': result['passed'],
                               'timings': result['cpu_forward_and_vjp_seconds']}), flush=True)
     paths = [Path(__file__), ROOT / 'src/mlx2/runtime/models/kda_chunk_wy.py',
-             ROOT / 'src/mlx2/runtime/models/gated_delta.py', ROOT / 'src/mlx2/runtime/models/kimi_linear.py']
+             ROOT / 'src/mlx2/runtime/models/gated_delta.py', ROOT / 'src/mlx2/runtime/models/kimi_linear.py',
+             ROOT / 'src/mlx2/runtime/technologies/mla.py',
+             ROOT / 'src/mlx2/runtime/technologies/dispatch.py']
     receipt = {'schema': 'mlx2.kimi-kda-wy-cpu-vjp.v1', 'checkpoint': 'synthetic-kda-wy-cpu@fixture-v1',
                'source_revision': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip(),
                'code_sha256': {str(p.relative_to(ROOT)): hashlib.sha256(p.read_bytes()).hexdigest() for p in paths},

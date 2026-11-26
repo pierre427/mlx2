@@ -16,6 +16,7 @@ from typing import Any, Callable, Dict, List, Optional
 import mlx.core as mx
 import mlx.nn as nn
 from mlx.utils import tree_flatten, tree_map, tree_reduce, tree_unflatten
+from ..technologies import window_attention as _window_attention
 from .base import create_causal_mask, hadamard_size_ok, rotate_last
 
 _ROOT_PACKAGE = __name__.split(".")[0]
@@ -1675,10 +1676,13 @@ class SinkWindowKVCache(_BaseCache):
             range(self.offset, self.offset + length)
         )
         query_positions = list(range(self.offset, self.offset + length))
-        keys = mx.array(key_positions, dtype=mx.int32)[None]
-        queries = mx.array(query_positions, dtype=mx.int32)[:, None]
-        causal = queries >= keys
-        return causal & ((keys < self.sink_size) | (keys >= queries - effective))
+        return _window_attention.window_keep(
+            mx.array(query_positions, dtype=mx.int32),
+            mx.array(key_positions, dtype=mx.int32),
+            effective,
+            sink_tokens=self.sink_size,
+            window_counts_query=False,
+        )
 
     def size(self):
         return self.offset
@@ -2415,11 +2419,8 @@ class RotatingKVCache(_BaseCache):
                 # columns hold the newest ``max_size - keep`` tokens.  Apply
                 # causality to both regions and keep exactly ``max_size``
                 # visible positions once the window is full.
-                rinds = mx.arange(offset + N)[None]
-                linds = mx.arange(offset, offset + N)[:, None]
-                return (linds >= rinds) & (
-                    (rinds < self.keep)
-                    | (linds < rinds + window_size - self.keep)
+                return _window_attention.sink_prefix_window_mask(
+                    N, offset, window_size, self.keep
                 )
             else:
                 return "causal"
@@ -2427,16 +2428,9 @@ class RotatingKVCache(_BaseCache):
             if window_size is None:
                 return None
             if self.offset >= window_size and self.max_size > window_size:
-                idx = self._idx
-                if idx >= self.max_size:
-                    idx = 0
-                if self.offset < self.max_size:
-                    mask_size = self.offset + 1
-                else:
-                    mask_size = self.max_size
-                mask = mx.arange(mask_size) >= mask_size - window_size
-                mask = mx.roll(mask, shift=idx + 1)
-                return mask
+                return _window_attention.ring_decode_window_mask(
+                    self.offset, self._idx, self.max_size, window_size
+                )
 
     @classmethod
     def merge(_, caches):
@@ -2666,16 +2660,9 @@ class RotatingQuantizedKVCache(_BaseCache):
             if window_size is None:
                 return None
             if self.offset >= window_size and self.max_size > window_size:
-                idx = self._idx
-                if idx >= self.max_size:
-                    idx = 0
-                if self.offset < self.max_size:
-                    mask_size = self.offset + 1
-                else:
-                    mask_size = self.max_size
-                mask = mx.arange(mask_size) >= mask_size - window_size
-                mask = mx.roll(mask, shift=idx + 1)
-                return mask
+                return _window_attention.ring_decode_window_mask(
+                    self.offset, self._idx, self.max_size, window_size
+                )
 
     @classmethod
     def merge(_, caches):
@@ -5449,12 +5436,8 @@ class BatchRotatingKVCache(_BaseCache):
         left_padding = self.left_padding
         window_size = window_size or self.max_size
         offset = min(self.max_size - 1, self._offset)
-        rinds = mx.arange(offset + N)
-        linds = mx.arange(offset, offset + N) if offset else rinds
-        linds = linds[:, None]
-        rinds = rinds[None]
-        mask = linds >= rinds
-        mask &= linds < rinds + window_size
+        rinds = mx.arange(offset + N)[None]
+        mask = _window_attention.causal_window_mask(N, offset, window_size=window_size)
         # A multi-token update first restores temporal order, which moves a
         # rotated ring's write cursor to its width, then trims from there.
         idx = self._idx
@@ -5921,12 +5904,8 @@ class BatchRotatingQuantizedKVCache(_BaseCache):
         left_padding = self.left_padding
         window_size = window_size or self.max_size
         offset = min(self.max_size - 1, self._offset)
-        rinds = mx.arange(offset + N)
-        linds = mx.arange(offset, offset + N) if offset else rinds
-        linds = linds[:, None]
-        rinds = rinds[None]
-        mask = linds >= rinds
-        mask &= linds < rinds + window_size
+        rinds = mx.arange(offset + N)[None]
+        mask = _window_attention.causal_window_mask(N, offset, window_size=window_size)
         # A multi-token update first restores temporal order, which moves a
         # rotated ring's write cursor to its width, then trims from there.
         idx = self._idx

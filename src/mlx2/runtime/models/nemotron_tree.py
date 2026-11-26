@@ -30,35 +30,35 @@ provenance/nemotron-h-mamba-tree.json.
 from __future__ import annotations
 
 import copy
-from collections import deque
 
 import mlx.core as mx
 
+from ..technologies.tree_verify import (
+    KV_RAW_ROWS_SKIP_CHAIN,
+    KVTreeOps,
+    MambaReplayOps,
+    TreeTopology,
+    legacy_topology,
+    publish_descriptors,
+)
 from .cache import ArraysCache, KVCache
 
-NEMOTRON_TREE_MAX_ROWS = 16
+TOPOLOGY = legacy_topology("nemotron_packed")
+NEMOTRON_TREE_MAX_ROWS = TOPOLOGY.max_rows
+_KV = KVTreeOps(KV_RAW_ROWS_SKIP_CHAIN)
+_MAMBA = MambaReplayOps()
 
 
 class NemotronTree:
     """One request's verify tile: rooted parent-first rows, private state."""
 
     def __init__(self, parents, cache):
-        parents = tuple(parents)
-        if not 1 <= len(parents) <= NEMOTRON_TREE_MAX_ROWS:
-            raise ValueError("Nemotron tree requires 1..16 rows")
-        self.parents = parents
-        self.paths = []
-        self.depths = []
-        for row, parent in enumerate(parents):
-            if type(parent) is not int or (
-                (row == 0 and parent != -1) or (row and not 0 <= parent < row)
-            ):
-                raise ValueError("Nemotron tree requires one parent-first root")
-            path = [] if parent < 0 else self.paths[parent]
-            self.paths.append([*path, row])
-            self.depths.append(len(path))
+        self.topology = TreeTopology(parents, TOPOLOGY)
+        self.parents = self.topology.parents
+        self.paths = self.topology.path_lists()
+        self.depths = list(self.topology.depths)
         # A node whose path is rows 0..d reads a contiguous KV view.
-        self.chain_prefix = [path == list(range(len(path))) for path in self.paths]
+        self.chain_prefix = self.topology.chain_prefix()
         for item in cache:
             if type(item) is KVCache:
                 if item.keys is None or item.values is None or item.offset <= 0:
@@ -79,8 +79,6 @@ class NemotronTree:
                 raise ValueError("Nemotron tree requires prefilled Mamba state")
         self.live = cache
         self._live_ids = {id(item) for item in self.live}
-        self._parents_array = None
-        self._windows = {}
         self._mamba = {}
         self._kv = {}
         self.backends = {}
@@ -88,25 +86,14 @@ class NemotronTree:
     # -- topology -----------------------------------------------------------
 
     def parents_array(self) -> mx.array:
-        if self._parents_array is None:
-            self._parents_array = mx.array(self.parents, dtype=mx.int32)
-        return self._parents_array
+        return self.topology.parents_array()
 
     def window_rows(self, kernel_size: int) -> list[list[int]]:
         """Each node's K-1 path predecessors in ``[state rows; tile rows]``."""
-        count = kernel_size - 1
-        windows = []
-        for path in self.paths:
-            history = [*range(count), *(count + row for row in path[:-1])]
-            windows.append(history[-count:])
-        return windows
+        return self.topology.history_rows(kernel_size - 1, kernel_size - 1, include_self=False)
 
     def window_array(self, kernel_size: int) -> mx.array:
-        cached = self._windows.get(kernel_size)
-        if cached is None:
-            cached = mx.array(self.window_rows(kernel_size), dtype=mx.int32)
-            self._windows[kernel_size] = cached
-        return cached
+        return self.topology.history_array(kernel_size - 1, kernel_size - 1, include_self=False)
 
     def note_backend(self, stage: str, backend: str) -> None:
         bucket = self.backends.setdefault(stage, {})
@@ -182,14 +169,7 @@ class NemotronTree:
     # -- commit -------------------------------------------------------------------
 
     def validate_path(self, path):
-        path = list(path)
-        if (
-            not path
-            or any(type(row) is not int or not 0 <= row < len(self.parents) for row in path)
-            or path != self.paths[path[-1]]
-        ):
-            raise ValueError("Nemotron tree commit must follow one complete root path")
-        return path
+        return self.topology.validate_path(path)
 
     def prepare_commit(self, path):
         """Build every layer's committed descriptor; publish none of them."""
@@ -201,39 +181,20 @@ class NemotronTree:
                 entry = self._kv.get(id(live))
                 if entry is None:
                     raise RuntimeError("Nemotron tree attention layer did not run")
-                private, start = entry["private"], entry["start"]
-                if not self.chain_prefix[path[-1]]:
-                    for field, rows in (("keys", entry["keys"]), ("values", entry["values"])):
-                        buffer = getattr(private, field)
-                        buffer[..., start : start + len(path), :] = mx.take(
-                            rows, indices, axis=2
-                        )
-                        setattr(private, field, buffer)
-                private.offset = start + len(path)
+                private = _KV.prepare_commit(
+                    entry["private"], start=entry["start"], path=path,
+                    width=len(self.parents), raw=(entry["keys"], entry["values"]),
+                )
                 prepared.append((live, dict(private.__dict__)))
                 continue
             material = self._mamba.get(id(live))
             if material is None:
                 raise RuntimeError("Nemotron tree Mamba layer did not run")
-            state = material["mixer"].tree_commit_state(material, path, indices)
-            count = material["kernel"] - 1
-            history = [*range(count), *(count + row for row in path)]
-            conv = mx.take(
-                material["source"], mx.array(history[-count:], dtype=mx.int32), axis=1
-            )
-            private = copy.copy(live)
-            private.__dict__ = dict(live.__dict__)
-            private.cache = [conv, state]
-            private._rollbacks = deque()
-            private.advance(len(path))
+            private = _MAMBA.prepare_commit(live, material, path, indices)
             prepared.append((live, dict(private.__dict__)))
         return prepared
 
-    @staticmethod
-    def publish(prepared):
-        for live, fields in prepared:
-            live.__dict__.clear()
-            live.__dict__.update(fields)
+    publish = staticmethod(publish_descriptors)
 
     def commit(self, path):
         self.publish(self.prepare_commit(path))

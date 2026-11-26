@@ -50,6 +50,12 @@ def load_cpu_classes():
         module="__future__", names=[ast.alias(name="annotations")], level=0
     )
     nodes = [future]
+    # create_causal_mask delegates to the window-attention technology's masks.
+    window_masks = ("window_keep", "causal_window_mask", "sink_prefix_window_mask", "ring_decode_window_mask")
+    window = ast.parse((ROOT / "technologies/window_attention/__init__.py").read_text())
+    nodes.extend(
+        n for n in window.body if isinstance(n, ast.FunctionDef) and n.name in window_masks
+    )
     base = ast.parse((ROOT / "models/base.py").read_text())
     nodes.extend(
         n
@@ -78,6 +84,7 @@ def load_cpu_classes():
         ),
         namespace,
     )
+    namespace["_window_attention"] = SimpleNamespace(**{n: namespace[n] for n in window_masks})
     return namespace["KVCache"], namespace["SegmentedBatchKVCache"]
 
 

@@ -15,7 +15,8 @@ from pathlib import Path
 import mlx.core as mx
 
 from ..runtime.approximate_kv import KVQuantizationDescriptor, operation_revision
-from ..runtime.attention_tree_executor import AttentionTreeExecutor, _depths
+from ..runtime.attention_tree_executor import AttentionTreeExecutor
+from ..runtime.technologies.tree_verify import TreeTopology, legacy_topology
 from ..runtime.models.base import _composed_qsdpa
 from ..runtime.models.cache import QuantizedKVCache
 from ..runtime.target_tree_executor import TargetTreeDispatchMetrics
@@ -23,6 +24,7 @@ from .nanbeige43_tree import DEFAULT_TEMPORARY_BUDGET_BYTES, _Plan, _scope
 
 PROTOCOL = "nanbeige43_q8_attention_tree_v1"
 LAYOUT = "native-q8g64-lane-owned-quantized-tree-v1"
+_TOPOLOGY = legacy_topology("q8_attention_tile")
 
 
 def source_identity():
@@ -125,9 +127,8 @@ class Q8TreeTransaction:
         result = []
         for states, parents, path in zip(self.snapshots, self.parents, paths, strict=True):
             path = tuple(path)
-            if (not path or path[0] != 0 or any(type(row) is not int or not 0 <= row < len(parents) for row in path)
-                    or any(parents[row] != parent for parent, row in zip((-1, *path[:-1]), path, strict=True))):
-                raise ValueError("Q8 tree commit needs a root-connected path")
+            if not TreeTopology(parents, _TOPOLOGY).is_root_path(path):
+                raise ValueError(_TOPOLOGY.path_error)
             if any(state.owner.offset != state.offset + len(parents) for state in states):
                 raise RuntimeError("Q8 tree owner moved before commit")
             if any(_format(state.owner) != state.format for state in states):
@@ -301,9 +302,7 @@ class NanbeigeQ8TreeExecutor(AttentionTreeExecutor):
                 raise ValueError("Q8 tree requires one committed boundary per lane")
             prefixes.append(offsets.pop())
         for tree in parents:
-            if tree[0] != -1 or any(type(p)is not int or not 0<=p<row for row,p in enumerate(tree[1:],start=1)):
-                raise ValueError("Q8 tree parents must form one rooted topological tree")
-            _depths(tree)
+            TreeTopology(tree, _TOPOLOGY)
         # Packed projections share one target traversal. Attention consumes
         # independent quantized views, so no historical KV is padded/copied.
         useful_columns = sum(prefix + width for prefix in prefixes)

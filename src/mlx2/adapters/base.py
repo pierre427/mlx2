@@ -151,7 +151,15 @@ def route_diagnostics_snapshot(adapter) -> dict:
     snapshot = provider.snapshot()
     if not isinstance(snapshot, Mapping):
         raise TypeError("route diagnostics snapshot must be a mapping")
-    return dict(snapshot)
+    snapshot = dict(snapshot)
+    # Shared technology dispatch counts (runtime/technologies); absent until a
+    # technology reference has dispatched, so existing receipts are unchanged.
+    from ..runtime.technologies.dispatch import counters_snapshot
+
+    technologies = counters_snapshot()
+    if technologies["selections"] and "technologies" not in snapshot:
+        snapshot["technologies"] = technologies
+    return snapshot
 
 
 def route_diagnostics_delta(adapter, before, after) -> dict:

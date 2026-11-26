@@ -72,6 +72,7 @@ import mlx.core as mx
 import mlx.nn as nn
 
 from .. import row_exact_verify as REV
+from ..row_exact.spec import RowExactSpec, merge_window_routes, ordinary_b1_mask
 from . import row_exact_components as REC
 from . import row_exact_qmv as REQ
 
@@ -91,6 +92,14 @@ ENV = "MLX_QWEN4_ROW_EXACT_VERIFY"
 # qualification/runs/batched-gdn-verify-20261001/README.md. Do not raise this
 # until the complete target path (including one-token rounds) is evidenced.
 MAX_EVIDENCED_LANES = 8
+# The row-exact technology's parameters for Flash-Next: a one-element
+# ``mx.array`` offset (a B=1 ``BatchKVCache``) is read from its host ``_idx``
+# (the Qwen hybrids refuse it instead; docs/technologies/row_exact.md).
+ROW_EXACT_SPEC = RowExactSpec(
+    mask_law="ordinary_b1_explicit",
+    array_offset="physical_idx",
+    host_offset="int",
+)
 # Token widths whose complete fused target path has an exact executor law.
 # Safety/admission capability only; this is not a qualification claim.
 EXACT_PROGRESSIVE_TILE_WIDTHS = (1, 2, 3, 4)
@@ -116,16 +125,7 @@ def _ordinary_b1_mask(cache):
     caches give none, and MLX's SDPA does not produce the same bits for the
     two.  ``None`` when the physical offset is not a host integer.
     """
-    from .base import create_causal_mask
-
-    offset = getattr(cache, "offset", None)
-    if isinstance(offset, mx.array):
-        if offset.size != 1:
-            return None
-        offset = getattr(cache, "_idx", None)
-    if not isinstance(offset, int):
-        return None
-    return create_causal_mask(1, offset=offset, left_padding=mx.array([0]))
+    return ordinary_b1_mask(cache, ROW_EXACT_SPEC)
 
 
 class _RowExactAttention:
@@ -645,12 +645,7 @@ class RowExactVerify:
             counts["windows"] += 1
             counts["rows"] += record.rows
             counts["windows_row_exact" if record.exact else "windows_not_exact"] += 1
-            for stage, routes in record.stages.items():
-                target = counts["stages"].setdefault(stage, {})
-                for route, n in routes.items():
-                    target[route] = target.get(route, 0) + n
-            for reason, n in record.failures.items():
-                counts["failures"][reason] = counts["failures"].get(reason, 0) + n
+            merge_window_routes(counts, record)
 
     # -- receipts --------------------------------------------------------------
     def snapshot(self) -> _RequestStart:

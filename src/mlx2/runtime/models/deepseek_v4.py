@@ -10,12 +10,16 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, fields
+from functools import lru_cache
 
 import mlx.core as mx
 from mlx import nn
 
 from ..prefill_checkpoint_rows import select_checkpoint_rows
+from ..technologies import hyper_connections as _hc
+from ..technologies.moe_router import cached_spec, route as _route_reference
 from .deepseek_v4_cache import DeepSeekV4LayerCache
+from ..technologies import sparse_selection as _sparse
 
 
 @dataclass
@@ -153,50 +157,42 @@ def limited_swiglu(gate, up, limit=10.0):
 def route_experts(
     logits, *, top_k, scale, correction=None, token_ids=None, table=None, normalize=True
 ):
-    scores = mx.sqrt(nn.softplus(logits.astype(mx.float32)))
-    if table is not None:
-        if token_ids is None:
-            raise ValueError("hash routing requires original token IDs")
-        indices = table[token_ids].astype(mx.int32)
-    else:
-        if correction is None:
-            raise ValueError("learned routing requires correction bias")
-        indices = mx.argpartition(-(scores + correction), kth=top_k - 1, axis=-1)[
-            ..., :top_k
-        ]
-    weights = mx.take_along_axis(scores, indices, axis=-1)
-    if normalize:
-        weights = weights / (mx.sum(weights, axis=-1, keepdims=True) + 1e-20)
-    return indices.astype(mx.uint32), weights * scale
+    hashed = table is not None
+    spec = cached_spec(
+        top_k=top_k, score_func="sqrtsoftplus", score_dtype="float32",
+        use_bias=not hashed, hash_layer=hashed, topk_method="argpartition_neg",
+        norm_topk_prob=bool(normalize), norm_eps=1e-20,
+        routed_scaling_factor=float(scale), index_dtype="uint32",
+    )
+    return _route_reference(
+        logits, spec, None if hashed else correction,
+        hash_table=table, token_ids=token_ids,
+    )
+
+
+@lru_cache(maxsize=64)
+def hc_spec(count=4, iterations=20, eps=1e-6, norm_eps=1e-20):
+    """The DeepSeek V4 hyper-connection law (technologies.hyper_connections defaults)."""
+    return _hc.HCSpec(
+        hc_mult=count, sinkhorn_iters=iterations, eps=eps, norm_eps=norm_eps
+    )
+
+
+_HC_EXPAND_SPEC = hc_spec()  # expand reads only orientation/upcast/expand_out
+
+
+def config_hc_spec(config):
+    return hc_spec(config.hc_mult, config.hc_sinkhorn_iters, config.hc_eps, config.rms_norm_eps)
 
 
 def sinkhorn_mix(mixes, scale, base, count, iterations, eps):
     """Always compute hyper-connection coefficients in FP32, including loaded base."""
-    return _sinkhorn_mix_fp32(
-        mixes.astype(mx.float32),
-        scale.astype(mx.float32),
-        base.astype(mx.float32),
-        count,
-        iterations,
-        eps,
-    )
+    return _hc.hc_coefficients(hc_spec(count, iterations, eps), mixes, scale, base)
 
 
 def _sinkhorn_mix_fp32(z, scale, base, count, iterations, eps):
     """Same equation order with already resident FP32 static HC parameters."""
-    pre = mx.sigmoid(z[..., :count] * scale[0] + base[:count]) + eps
-    post = 2 * mx.sigmoid(
-        z[..., count : 2 * count] * scale[1] + base[count : 2 * count]
-    )
-    comb = (z[..., 2 * count :] * scale[2] + base[2 * count :]).reshape(
-        *z.shape[:-1], count, count
-    )
-    comb = mx.softmax(comb, axis=-1, precise=True) + eps
-    comb /= mx.sum(comb, axis=-2, keepdims=True) + eps
-    for _ in range(iterations - 1):
-        comb /= mx.sum(comb, axis=-1, keepdims=True) + eps
-        comb /= mx.sum(comb, axis=-2, keepdims=True) + eps
-    return pre, post, comb
+    return _hc.hc_coefficients(hc_spec(count, iterations, eps), z, scale, base)
 
 
 def hc_expand(branch, residual, post, comb, *, policy="reference"):
@@ -204,9 +200,7 @@ def hc_expand(branch, residual, post, comb, *, policy="reference"):
         from .deepseek_v4_hc import expand
 
         return expand(branch, residual, post, comb).astype(branch.dtype)
-    value = post[..., None] * branch[..., None, :].astype(mx.float32)
-    value += mx.matmul(mx.swapaxes(comb, -1, -2), residual.astype(mx.float32))
-    return value.astype(branch.dtype)
+    return _hc.hc_expand(_HC_EXPAND_SPEC, branch, residual, post, comb)
 
 
 def simulate_fp8_kv(value, rope_dims=64, group_size=64):
@@ -297,21 +291,22 @@ class HyperConnection:
             )
         self.base_fp32 = self.base.astype(mx.float32)
         self.scale_fp32 = self.scale.astype(mx.float32)
+        self.hc_spec = config_hc_spec(config)
 
     def static_parameters(self):
         return {"fn": self.fn_fp32, "base": self.base_fp32, "scale": self.scale_fp32}
 
     def __call__(self, value):
         c = self.config
+        spec = self.__dict__.get("hc_spec") or config_hc_spec(c)
         value32 = value.astype(mx.float32)
         flat = value32.reshape(*value.shape[:-2], -1)
-        normalized = mx.fast.rms_norm(flat, None, c.rms_norm_eps)
+        project = None
         if self.projection_policy == "fixed_fp32":
-            from .deepseek_v4_hc_projection import project
+            from .deepseek_v4_hc_projection import project as fixed_project
 
-            mixes = project(normalized, self.fn_fp32)
-        else:
-            mixes = normalized @ self.fn_fp32.T
+            project = lambda normalized: fixed_project(normalized, self.fn_fp32)  # noqa: E731
+        mixes = _hc.hc_mixes(spec, flat, self.fn_fp32, project=project)
         if self.policy == "fused_fp32":
             from .deepseek_v4_hc import head_reduce, split_sinkhorn, weighted_sum
 
@@ -328,17 +323,11 @@ class HyperConnection:
             )
             return weighted_sum(value32, pre).astype(value.dtype), post, comb
         if self.head:
-            pre = mx.sigmoid(mixes * self.scale_fp32 + self.base_fp32) + c.hc_eps
-            return mx.sum(pre[..., None] * value32, axis=-2).astype(value.dtype)
-        pre, post, comb = _sinkhorn_mix_fp32(
-            mixes,
-            self.scale_fp32,
-            self.base_fp32,
-            c.hc_mult,
-            c.hc_sinkhorn_iters,
-            c.hc_eps,
-        )
-        return mx.sum(pre[..., None] * value32, axis=-2).astype(value.dtype), post, comb
+            return _hc.hc_head(spec, value32, mixes, self.scale_fp32, self.base_fp32).astype(
+                value.dtype
+            )
+        pre, post, comb = _hc.hc_coefficients(spec, mixes, self.scale_fp32, self.base_fp32)
+        return _hc.hc_collapse(spec, value32, pre).astype(value.dtype), post, comb
 
 
 class Rotary:
@@ -430,16 +419,9 @@ def attend(
             if pooled is None
             else mx.concatenate((local_mask, pool_mask), axis=-1)
         )
-        scores = (q.astype(mx.float32) * scale) @ mx.swapaxes(
-            kv.astype(mx.float32), -1, -2
+        return _sparse.gather_attend(
+            q, (_sparse.Source(kv, mask),), sinks=sinks, scale=scale
         )
-        scores = mx.where(mask, scores, -mx.inf)
-        normalizer = mx.logsumexp(scores, axis=-1, keepdims=True)
-        if sinks is not None:
-            normalizer = mx.logaddexp(
-                normalizer, sinks[None, :, None, None].astype(mx.float32)
-            )
-        return (mx.exp(scores - normalizer) @ kv.astype(mx.float32)).astype(q.dtype)
     # Each query has its own indexer-selected compressed vectors.
     b, _heads, length, dim = q.shape
     gathered = mx.take_along_axis(
@@ -447,24 +429,17 @@ def attend(
         mx.broadcast_to(indices[..., None], (*indices.shape, dim)),
         axis=2,
     )
-    query = q.transpose(0, 2, 1, 3).astype(mx.float32) * scale
-    ls = (q.astype(mx.float32) * scale) @ mx.swapaxes(local.astype(mx.float32), -1, -2)
-    ls = mx.where(local_mask, ls, -mx.inf)
-    ps = (query @ mx.swapaxes(gathered.astype(mx.float32), -1, -2)).transpose(
-        0, 2, 1, 3
-    )
     selected_mask = mx.take_along_axis(pool_mask[:, 0], indices, axis=-1)[:, None]
-    ps = mx.where(selected_mask, ps, -mx.inf)
-    norm = mx.logaddexp(
-        mx.logsumexp(ls, -1, keepdims=True), mx.logsumexp(ps, -1, keepdims=True)
+    return _sparse.gather_attend(
+        q,
+        (
+            _sparse.Source(local, local_mask),
+            _sparse.Source(gathered, selected_mask, per_row=True),
+        ),
+        sinks=sinks,
+        scale=scale,
+        contraction="matmul",
     )
-    if sinks is not None:
-        norm = mx.logaddexp(norm, sinks[None, :, None, None].astype(mx.float32))
-    result = mx.exp(ls - norm) @ local.astype(mx.float32)
-    result += (
-        mx.exp(ps - norm).transpose(0, 2, 1, 3) @ gathered.astype(mx.float32)
-    ).transpose(0, 2, 1, 3)
-    return result.astype(q.dtype)
 
 
 def index_select(
@@ -486,51 +461,47 @@ def index_select(
             128, workspace_bytes // max(1, query.shape[0] * heads * pooled.shape[1] * 4)
         ),
     )
+    spec = _sparse.SelectionSpec(
+        n_heads=heads,
+        head_dim=dim,
+        topk=top_k,
+        ratio=ratio,
+        pooling="gated_softmax",
+        **INDEX_SELECTION_LAWS,
+    )
     selected = []
     for start in range(0, length, tile):
         end = start + tile
-        score = query[:, :, start:end].astype(mx.float32) @ mx.swapaxes(
-            pooled[:, None].astype(mx.float32), -1, -2
+        score = _sparse.score(
+            spec, query[:, :, start:end], pooled, weights[:, start:end]
         )
-        score = mx.maximum(score, 0)
-        weight = weights[:, start:end].transpose(0, 2, 1)[..., None]
-        score = mx.sum(score * weight * dim**-0.5, axis=1)
         if mask is None:
             if type(offset) is not int or offset < 0 or ratio != 4:
                 raise ValueError(
                     "flat indexer requires explicit ratio4 causal geometry"
                 )
-            visible = (mx.arange(start, min(end, length)) + offset + 1) // ratio
-            valid = mx.arange(pooled.shape[1])[None, :] < visible[:, None]
+            valid = _sparse.visible(spec, mx.arange(start, min(end, length)) + offset,
+                                    pooled.shape[1])
         else:
             valid = mask[:, 0, start:end]
         score = mx.where(valid, score, -mx.inf)
-        selected.append(stable_pool_topk(score, top_k))
+        selected.append(_sparse.topk(spec, score, top_k))
     return mx.concatenate(selected, axis=1)
 
 
-def stable_pool_topk(scores, top_k):
-    """Select exact scores with a chronological cutoff tie-break and order.
+# DeepSeek V4 CSA indexer laws (historical values, sparse_selection spec):
+# relu(q.k) * w * d^-1/2 summed over heads in fp32, chronological top-k over
+# complete ratio-4 pools.
+INDEX_SELECTION_LAWS = dict(
+    score_layout="bhld_matmul",
+    score_scale_site="post_relu",
+    score_cast="float32",
+    tie_break="stable_chronological",
+    visibility="pool_complete",
+)
 
-    ReLU indexer scores have exact zero ties. Partition's unspecified ordering
-    must not change the attended set or summation order across replay shapes.
-    See provenance/deepseek-v4-audit-64k.json for the peer mechanism review.
-    """
-    count = scores.shape[-1]
-    if type(top_k) is not int or not 1 <= top_k <= count:
-        raise ValueError("pool top-k must fit the available rows")
-    candidates = mx.argpartition(-scores, kth=top_k - 1, axis=-1)[..., :top_k]
-    cutoff = mx.min(
-        mx.take_along_axis(scores, candidates, axis=-1), axis=-1, keepdims=True
-    )
-    better = scores > cutoff
-    tied = scores == cutoff
-    remaining = top_k - mx.sum(better, axis=-1, keepdims=True)
-    keep = better | (tied & (mx.cumsum(tied.astype(mx.int32), axis=-1) <= remaining))
-    positions = mx.arange(count, dtype=mx.int32)
-    ordered = mx.where(keep, positions, count)
-    selected = mx.argpartition(ordered, kth=top_k - 1, axis=-1)[..., :top_k]
-    return mx.sort(selected, axis=-1)
+# Moved to technologies.sparse_selection (same law, same ops); kept for importers.
+stable_pool_topk = _sparse.stable_topk
 
 
 class Compressor:

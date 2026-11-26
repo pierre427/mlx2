@@ -30,6 +30,9 @@ from functools import cache
 
 import mlx.core as mx
 
+from ..technologies.window_attention import vector_launch as _VL
+from ..technologies.window_attention import vector_sources as _VS
+
 MLX_SOURCE_REVISION = "39400a0d4cf1641bc6e543cb5e3585757f491854"
 MLX_SDPA_DISPATCH_SHA256 = (
     "575e29a36b2d0c653f17b4f55062b644243d2e3dbc362f6725686bef959dd9dd"
@@ -70,29 +73,7 @@ def _device_class() -> str:
 
 def _select_blocks(device_class: str, n_keys: int, n_simds: int) -> int | None:
     """MLX 0.32.4 ``select_sdpa_blocks`` for local s/d device classes."""
-    if device_class == "s":
-        blocks = 64
-        if n_keys > 1024 and n_simds > 4:
-            if n_keys <= 8192:
-                blocks = 128
-            elif n_keys <= 32768:
-                blocks = 256
-            elif n_keys <= 65536:
-                blocks = 512
-            else:
-                blocks = 1024
-        return blocks
-    if device_class == "d":
-        blocks = 128
-        if n_simds <= 2 and n_keys > 8192:
-            blocks = 256
-        elif n_simds >= 6:
-            if 16384 <= n_keys < 65536:
-                blocks = 512
-            elif n_keys >= 65536:
-                blocks = 1024
-        return blocks
-    return None
+    return _VL.select_sdpa_blocks(device_class, n_keys, n_simds)
 
 
 def _serial_plan(device_class: str, n_keys: int, gqa: int):
@@ -125,13 +106,7 @@ def row_plans(
 
 def _plan_runs(plans):
     """Maximal consecutive row runs with the same ordinary one-row plan."""
-    runs = []
-    start = 0
-    for row in range(1, len(plans) + 1):
-        if row == len(plans) or plans[row] != plans[start]:
-            runs.append((start, row, plans[start]))
-            start = row
-    return tuple(runs)
+    return tuple(_VL.plan_runs(plans))
 
 
 def plan_signature(
@@ -187,246 +162,20 @@ def window_supported(queries, keys, values, n_first: int) -> str | None:
     return None
 
 
-# The per-key update in MLX's one- and two-pass vector-SDPA sources.  The
-# operation order and float accumulators are intentionally literal.
-_KEY_STEP = r"""
-#define MUSE_D128_KEY_STEP(QV, KP, VP, MAXV, SUMV, OV)                   \
-    {                                                                    \
-        U score = 0;                                                     \
-        for (int e = 0; e < PT; e++) {                                   \
-            score += QV[e] * KP[e];                                      \
-        }                                                                \
-        score = simd_sum(score);                                         \
-        U new_max = max(MAXV, score);                                    \
-        U factor = fast::exp(MAXV - new_max);                            \
-        U exp_score = fast::exp(score - new_max);                        \
-        MAXV = new_max;                                                  \
-        SUMV = SUMV * factor + exp_score;                                \
-        for (int e = 0; e < PT; e++) {                                   \
-            OV[e] = OV[e] * factor + exp_score * VP[e];                  \
-        }                                                                \
-    }
-"""
-
-
-_ONE_PASS = r"""
-    constexpr int BN = 32;
-    constexpr int PT = D / 32;
-    typedef float U;
-    const uint lane = thread_index_in_simdgroup;
-    const uint f = threadgroup_position_in_grid.x * SG + simdgroup_index_in_threadgroup;
-    const int s = int(f % BN);
-    const int hg = int(f / BN);
-    const int kv = threadgroup_position_in_grid.y;
-    const int row = threadgroup_position_in_grid.z;
-    const int rows = threadgroups_per_grid.z;
-    const int H = GQA * int(threadgroups_per_grid.y);
-    const int N = n_first[0] + row;
-    const float sc = scale[0];
-
-    U q[HPT][PT];
-    U o[HPT][PT];
-    U max_score[HPT];
-    U sum_exp_score[HPT];
-    for (int j = 0; j < HPT; j++) {
-        const int head = kv * GQA + hg * HPT + j;
-        const device T* qp = queries + (size_t)head * queries_strides[1]
-            + (size_t)row * queries_strides[2] + lane * PT;
-        for (int e = 0; e < PT; e++) {
-            q[j][e] = static_cast<U>(sc) * qp[e];
-            o[j][e] = 0;
-        }
-        max_score[j] = Limits<U>::finite_min;
-        sum_exp_score[j] = 0;
-    }
-    const device T* kp = keys + kv * keys_strides[1] + s * keys_strides[2] + lane * PT;
-    const device T* vp = values + kv * values_strides[1] + s * values_strides[2] + lane * PT;
-    const int k_step = BN * int(keys_strides[2]);
-    const int v_step = BN * int(values_strides[2]);
-@MASK_SETUP(s, BN)@
-    for (int i = s; i < N; i += BN) {
-        if (@USE_KEY@) {
-            for (int j = 0; j < HPT; j++) {
-                MUSE_D128_KEY_STEP(q[j], kp, vp, max_score[j], sum_exp_score[j], o[j])
-            }
-        }
-        kp += k_step;
-        vp += v_step;
-        @MASK_ADVANCE@
-    }
-
-    for (int j = 0; j < HPT; j++) {
-        const int head = kv * GQA + hg * HPT + j;
-        const size_t c = (size_t)(row * H + head) * BN + s;
-        if (lane == 0) {
-            maxs[c] = max_score[j];
-            sums[c] = sum_exp_score[j];
-        }
-        for (int e = 0; e < PT; e++) {
-            outs[((size_t)(row * H + head) * D + lane * PT + e) * BN + s] = o[j][e];
-        }
-    }
-"""
-
-
-_ONE_COMBINE = r"""
-    constexpr int BN = 32;
-    constexpr int BD = 32;
-    constexpr int PT = D / BD;
-    typedef float U;
-    const uint simd_gid = simdgroup_index_in_threadgroup;
-    const uint simd_lid = thread_index_in_simdgroup;
-    const int head = threadgroup_position_in_grid.x;
-    const int row = threadgroup_position_in_grid.y;
-    const int H = threadgroups_per_grid.x;
-    const size_t c0 = (size_t)(row * H + head) * BN;
-
-    U max_score = maxs[c0 + simd_lid];
-    U new_max = simd_max(max_score);
-    U factor = fast::exp(max_score - new_max);
-    U sum_exp_score = simd_sum(sums[c0 + simd_lid] * factor);
-    U o[PT];
-    for (int i = 0; i < PT; i++) {
-        o[i] = simd_sum(
-            outs[((size_t)(row * H + head) * D + simd_gid * PT + i) * BN + simd_lid] * factor);
-        o[i] = sum_exp_score == 0 ? o[i] : (o[i] / sum_exp_score);
-    }
-    if (simd_lid == 0) {
-        const size_t base = (size_t)row * (H * D) + head * D + simd_gid * PT;
-        for (int i = 0; i < PT; i++) {
-            out[base + i] = static_cast<T>(o[i]);
-        }
-    }
-"""
-
-
-_TWO_PASS = r"""
-    constexpr int PT = D / 32;
-    typedef float U;
-    const uint lane = thread_index_in_simdgroup;
-    const int kv = threadgroup_position_in_grid.x;
-    const int block = int(threadgroup_position_in_grid.z) % BLOCKS;
-    const int g = thread_position_in_threadgroup.y;
-    const int row = int(threadgroup_position_in_grid.z) / BLOCKS;
-    const int rows = int(threadgroups_per_grid.z) / BLOCKS;
-    const int head = GQA * kv + g;
-    const int N = n_first[0] + row;
-    const float sc = scale[0];
-    const int o_offset = head * rows + row;
-
-    U q[PT];
-    U o[PT] = {0};
-    const device T* qp = queries + (size_t)head * queries_strides[1]
-        + (size_t)row * queries_strides[2] + lane * PT;
-    for (int e = 0; e < PT; e++) {
-        q[e] = static_cast<U>(sc) * qp[e];
-    }
-    U max_score = Limits<U>::finite_min;
-    U sum_exp_score = 0;
-    const device T* kp = keys + kv * keys_strides[1] + block * keys_strides[2] + lane * PT;
-    const device T* vp = values + kv * values_strides[1] + block * values_strides[2] + lane * PT;
-    const int k_step = BLOCKS * int(keys_strides[2]);
-    const int v_step = BLOCKS * int(values_strides[2]);
-@MASK_SETUP(block, BLOCKS)@
-    for (int i = block; i < N; i += BLOCKS) {
-        if (@USE_KEY@) {
-            MUSE_D128_KEY_STEP(q, kp, vp, max_score, sum_exp_score, o)
-        }
-        kp += k_step;
-        vp += v_step;
-        @MASK_ADVANCE@
-    }
-    const size_t c = (size_t)o_offset * BLOCKS + block;
-    if (lane == 0) {
-        sums[c] = sum_exp_score;
-        maxs[c] = max_score;
-    }
-    for (int e = 0; e < PT; e++) {
-        partials[c * D + lane * PT + e] = static_cast<T>(o[e]);
-    }
-"""
-
-
-_TWO_COMBINE = r"""
-    constexpr int BN = 32;
-    constexpr int BD = 32;
-    constexpr int elem_per_thread = D / BD;
-    typedef float U;
-
-    thread U o[elem_per_thread] = {0};
-    threadgroup U outputs[BN * BD];
-
-    const uint simd_gid = simdgroup_index_in_threadgroup;
-    const uint simd_lid = thread_index_in_simdgroup;
-    const int head = threadgroup_position_in_grid.x;
-    const int row = threadgroup_position_in_grid.y;
-    const int H = threadgroups_per_grid.x;
-    const int rows = threadgroups_per_grid.y;
-    const size_t q_offset = (size_t)head * rows + row;
-    const device T* pp = partials + q_offset * BLOCKS * D + simd_gid * D
-        + simd_lid * elem_per_thread;
-    const device float* sp = sums + q_offset * BLOCKS;
-    const device float* mp = maxs + q_offset * BLOCKS;
-
-    U sum_exp_score = 0.0;
-    U max_score = Limits<U>::finite_min;
-    for (int b = 0; b < BLOCKS / BN; ++b) {
-        max_score = max(max_score, mp[simd_lid + BN * b]);
-    }
-    max_score = simd_max(max_score);
-    for (int b = 0; b < BLOCKS / BN; ++b) {
-        U factor = fast::exp(mp[simd_lid + BN * b] - max_score);
-        sum_exp_score += factor * sp[simd_lid + BN * b];
-    }
-    sum_exp_score = simd_sum(sum_exp_score);
-    for (int b = 0; b < BLOCKS / BN; ++b) {
-        U factor = fast::exp(mp[simd_gid] - max_score);
-        for (int i = 0; i < elem_per_thread; i++) {
-            o[i] += factor * static_cast<U>(pp[i]);
-        }
-        mp += BN;
-        sp += BN;
-        pp += BN * D;
-    }
-    for (int i = 0; i < elem_per_thread; i++) {
-        outputs[simd_lid * BD + simd_gid] = o[i];
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-        o[i] = simd_sum(outputs[simd_gid * BD + simd_lid]);
-        o[i] = sum_exp_score == 0 ? o[i] : (o[i] / sum_exp_score);
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-    }
-    if (simd_lid == 0) {
-        const size_t base = (size_t)row * (H * D) + head * D + simd_gid * elem_per_thread;
-        for (int i = 0; i < elem_per_thread; i++) {
-            out[base + i] = static_cast<T>(o[i]);
-        }
-    }
-"""
-
-
-def _masked_source(source: str, chain: str, step: str, masked: bool) -> str:
-    if masked:
-        setup = (
-            "auto mp = masks + mask_base[0] + row * n_first[0]"
-            f" + (row * (row - 1)) / 2 + {chain};\n"
-            f"    const int m_step = {step};"
-        )
-        use_key, advance = "mp[0]", "mp += m_step;"
-    else:
-        setup, use_key, advance = "", "true", ""
-    return (
-        source.replace(f"@MASK_SETUP({chain}, {step})@", setup)
-        .replace("@USE_KEY@", use_key)
-        .replace("@MASK_ADVANCE@", advance)
-    )
+# The Metal text is the window-attention technology's vector-SDPA source
+# generator: ``_VS.MUSE_D128_WINDOW`` (row ``r`` reads ``n_first + r`` keys,
+# two-pass rows on the grid, concatenated one-token mask rows, the compact
+# text style this module carried).  Byte-identical to this module's previous
+# copy (tests/test_technologies_window_attention_sources.py); it does not
+# share compiled kernels, names or admission with the Qwen D256 family.
 
 
 def _one_pass_source(masked: bool) -> str:
-    return _masked_source(_ONE_PASS, "s", "BN", masked)
+    return _VS.kernel_kwargs(_VS.MUSE_D128_WINDOW, "one_chains", masked=masked)["source"]
 
 
 def _two_pass_source(masked: bool) -> str:
-    return _masked_source(_TWO_PASS, "block", "BLOCKS", masked)
+    return _VS.kernel_kwargs(_VS.MUSE_D128_WINDOW, "two_chains", masked=masked)["source"]
 
 
 _KERNELS: dict = {}
@@ -437,45 +186,12 @@ def _kernel(name: str):
     if kernel is not None:
         return kernel
     masked = name.endswith("_mask")
-    extra = ["masks", "mask_base"] if masked else []
-    if name.startswith("one_chains"):
-        kernel = mx.fast.metal_kernel(
-            name="mlx2_muse_d128_window_sdpa1_chains"
-            + ("_mask" if masked else ""),
-            input_names=["queries", "keys", "values", "scale", "n_first"]
-            + extra,
-            output_names=["maxs", "sums", "outs"],
-            header=_KEY_STEP,
-            source=_one_pass_source(masked),
-            ensure_row_contiguous=False,
-        )
-    elif name.startswith("two_chains"):
-        kernel = mx.fast.metal_kernel(
-            name="mlx2_muse_d128_window_sdpa2_chains"
-            + ("_mask" if masked else ""),
-            input_names=["queries", "keys", "values", "scale", "n_first"]
-            + extra,
-            output_names=["partials", "sums", "maxs"],
-            header=_KEY_STEP,
-            source=_two_pass_source(masked),
-            ensure_row_contiguous=False,
-        )
-    elif name == "one_combine":
-        kernel = mx.fast.metal_kernel(
-            name="mlx2_muse_d128_window_sdpa1_combine",
-            input_names=["maxs", "sums", "outs"],
-            output_names=["out"],
-            source=_ONE_COMBINE,
-        )
-    elif name == "two_combine":
-        kernel = mx.fast.metal_kernel(
-            name="mlx2_muse_d128_window_sdpa2_combine",
-            input_names=["partials", "sums", "maxs"],
-            output_names=["out"],
-            source=_TWO_COMBINE,
-        )
-    else:  # pragma: no cover - every caller uses a fixed internal name
+    stage = name[: -len("_mask")] if masked else name
+    if stage not in _VS.STAGES:  # pragma: no cover - every caller uses a fixed internal name
         raise KeyError(name)
+    kernel = mx.fast.metal_kernel(
+        **_VS.kernel_kwargs(_VS.MUSE_D128_WINDOW, stage, masked=masked)
+    )
     _KERNELS[name] = kernel
     return kernel
 
@@ -515,78 +231,22 @@ def window_sdpa(
     """Attention-only D128 rows over exactly ``n_first + row`` keys."""
     _, heads, rows, _head_dim = queries.shape
     kv_heads = keys.shape[1]
-    gqa = heads // kv_heads
-    dtype = queries.dtype
-    scale_array = _scalar(float(scale))
     plans = plan_signature(n_first, rows, heads, kv_heads)
     suffix = "_mask" if masks is not None else ""
-    outputs = []
-    for start, stop, plan in plans:
-        count = stop - start
-        q = queries[:, :, start:stop]
-        first = n_first + start
-        extra = []
-        if masks is not None:
-            base = start * n_first + (start * (start - 1)) // 2
-            extra = [masks, _int(base)]
-        passes, blocks = plan
-        if passes == 1:
-            chains = 32 * (gqa // _ONE_PASS_HPT)
-            maxs, sums, outs = _kernel("one_chains" + suffix)(
-                inputs=[q, keys, values, scale_array, _int(first)] + extra,
-                template=[
-                    ("T", dtype),
-                    ("D", HEAD_DIM),
-                    ("GQA", gqa),
-                    ("HPT", _ONE_PASS_HPT),
-                    ("SG", _ONE_PASS_SG),
-                ],
-                grid=(32 * chains, kv_heads, count),
-                threadgroup=(32 * _ONE_PASS_SG, 1, 1),
-                output_shapes=[
-                    (count * heads * 32,),
-                    (count * heads * 32,),
-                    (count * heads * HEAD_DIM * 32,),
-                ],
-                output_dtypes=[mx.float32] * 3,
-            )
-            out = _kernel("one_combine")(
-                inputs=[maxs, sums, outs],
-                template=[("T", dtype), ("D", HEAD_DIM)],
-                grid=(heads * 1024, count, 1),
-                threadgroup=(1024, 1, 1),
-                output_shapes=[(count, heads * HEAD_DIM)],
-                output_dtypes=[dtype],
-            )[0]
-        else:
-            partials, sums, maxs = _kernel("two_chains" + suffix)(
-                inputs=[q, keys, values, scale_array, _int(first)] + extra,
-                template=[
-                    ("T", dtype),
-                    ("D", HEAD_DIM),
-                    ("GQA", gqa),
-                    ("BLOCKS", blocks),
-                ],
-                grid=(32 * kv_heads, gqa, blocks * count),
-                threadgroup=(32, gqa, 1),
-                output_shapes=[
-                    (heads * count * blocks * HEAD_DIM,),
-                    (heads * count * blocks,),
-                    (heads * count * blocks,),
-                ],
-                output_dtypes=[dtype, mx.float32, mx.float32],
-            )
-            out = _kernel("two_combine")(
-                inputs=[partials, sums, maxs],
-                template=[("T", dtype), ("D", HEAD_DIM), ("BLOCKS", blocks)],
-                grid=(heads * 1024, count, 1),
-                threadgroup=(1024, 1, 1),
-                output_shapes=[(count, heads * HEAD_DIM)],
-                output_dtypes=[dtype],
-            )[0]
-        outputs.append(out)
-    output = outputs[0] if len(outputs) == 1 else mx.concatenate(outputs, axis=0)
-    return output.reshape(1, rows, heads * HEAD_DIM)
+    return _VL.run_window(
+        lambda passes: _kernel(("one" if passes == 1 else "two") + "_chains" + suffix),
+        lambda passes: _kernel(("one" if passes == 1 else "two") + "_combine"),
+        queries,
+        keys,
+        values,
+        _scalar(float(scale)),
+        runs=plans,
+        n_first=n_first,
+        int_array=_int,
+        hpt=_ONE_PASS_HPT,
+        sg=_ONE_PASS_SG,
+        masks=masks,
+    )
 
 
 @cache
@@ -598,27 +258,37 @@ def source_identity() -> str:
         MLX_SDPA_DISPATCH_SHA256,
         MLX_SDPA_VECTOR_SHA256,
         repr((HEAD_DIM, MAX_ROWS, TWO_PASS_KEYS, _ONE_PASS_HPT, _ONE_PASS_SG)),
-        _KEY_STEP,
-        _ONE_PASS,
-        _ONE_COMBINE,
-        _TWO_PASS,
-        _TWO_COMBINE,
+        *(
+            repr(sorted(_VS.kernel_kwargs(_VS.MUSE_D128_WINDOW, stage, masked=masked).items()))
+            for stage, masked in (
+                ("one_chains", False),
+                ("one_chains", True),
+                ("two_chains", False),
+                ("two_chains", True),
+                ("one_combine", False),
+                ("two_combine", False),
+            )
+        ),
         *(
             inspect.getsource(fn)
             for fn in (
                 _select_blocks,
+                _VL.select_sdpa_blocks,
                 _serial_plan,
                 row_plans,
                 _plan_runs,
+                _VL.plan_runs,
                 plan_signature,
                 window_supported,
-                _masked_source,
                 _one_pass_source,
                 _two_pass_source,
                 _kernel,
                 _scalar,
                 _int,
                 window_sdpa,
+                _VL.run_window,
+                _VL._one_pass,
+                _VL._two_pass,
             )
         ),
     ]

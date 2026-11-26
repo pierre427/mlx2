@@ -44,8 +44,9 @@ from . import bailing_hybrid as ling
 from . import kimi_linear as kimi
 from .base import BaseModelArgs
 from .cache import ArraysCache, KVCache
-from .gated_delta import gated_delta_kernel, gated_delta_ops
+from ..technologies import linear_recurrence as _lr
 from .switch_layers import SwitchGLU
+from ..technologies.moe_router import cached_spec, route as _route_reference
 
 MODEL_TYPE = "raon1_mini"
 
@@ -220,9 +221,10 @@ class MergedProjection:
             y = mx.quantized_matmul(x, self.weight, scales=self.scales, biases=self.biases, transpose=True,
                                     group_size=self.group_size, bits=self.bits, mode="affine")
         else:
-            y = mx.quantized_matmul(x, self.weight, scales=self.scales, biases=None, transpose=True,
-                                    group_size=16, bits=4, mode="nvfp4")
-            y = (y.astype(mx.float32) * self.column_scale).astype(y.dtype)
+            from ..nvfp4_linear import GLOBAL_SCALED_SPEC
+            from ..technologies.nvfp4_linear import reference
+
+            y = reference(x, self.weight, self.scales, self.column_scale, None, GLOBAL_SCALED_SPEC)
         return mx.split(y, self.splits, axis=-1)
 
 
@@ -344,44 +346,28 @@ class RaonMHC(nn.Module):
 # RDA (Raon Delta Attention)
 # ---------------------------------------------------------------------------
 
+# Raon RDA's laws: fp32 l2 (epsilon floors the norm) rounded to the
+# activation dtype before the query scale, the lower-bounded RDA gate with its
+# value write ratio, fp32 one-rounding short convolutions.  The WY chunk scan
+# receives log(decay) (legacy; Kimi passes the finite log decay).
+RAON_RDA_LAWS = dict(
+    gate_kind="vector", decay_law="rda", beta_law="sigmoid_float32",
+    qk_norm="l2_clamp", qk_norm_dtype="float32", qk_norm_round=True,
+    conv_layout="separate_qkv", conv_precision="float32", core_scan=False,
+    chunk_log_decay="log_of_decay",
+)
+
+
 class ShortConv(ling.ShortConv1d):
     """Depthwise causal conv with fp32 accumulation and SiLU, one rounding."""
 
     def __call__(self, x, state, mask, lengths):
-        if mask is not None:
-            x = mx.where(mask[..., None], x, 0)
-        if state is None:
-            state = mx.zeros((x.shape[0], self.kernel_size - 1, x.shape[-1]), dtype=x.dtype)
-        conv_input = mx.concatenate([state, x], axis=1)
-        out = mx.conv1d(conv_input.astype(mx.float32), self.conv.weight.astype(mx.float32),
-                        groups=x.shape[-1])
-        output = nn.silu(out).astype(x.dtype)
-        keep = self.kernel_size - 1
-        if lengths is not None:
-            ends = mx.clip(lengths, 0, x.shape[1])
-            positions = (ends[:, None] + mx.arange(keep))[..., None]
-            new_state = mx.take_along_axis(conv_input, positions, axis=1)
-        else:
-            new_state = mx.contiguous(conv_input[:, -keep:, :])
-        return output, new_state
+        return _lr.short_conv(x, state, mask, lengths, None, kernel_size=self.kernel_size,
+                              precision=RAON_RDA_LAWS["conv_precision"],
+                              weight=self.conv.weight)
 
 
-@partial(mx.compile, shapeless=True)
-def _rda_gates(decay_raw, dt_bias, a_exp, beta_raw, write_raw, lower_bound):
-    """fp32 RDA gates: (decay = exp(log_alpha), beta, value ratio)."""
-    scaled = a_exp * (decay_raw.astype(mx.float32) + dt_bias.astype(mx.float32))
-    log_alpha = lower_bound * mx.sigmoid(scaled)
-    b32 = beta_raw.astype(mx.float32)
-    beta = mx.sigmoid(b32)
-    # sigmoid(b + w) / sigmoid(b) in log space, as the reference.
-    ratio = mx.exp(nn.log_sigmoid(b32 + write_raw.astype(mx.float32)) - nn.log_sigmoid(b32))
-    return mx.exp(log_alpha), beta, ratio
-
-
-def _l2_normalize(x):
-    # torch.nn.functional.normalize: x / max(||x||, 1e-6), in fp32.
-    x = x.astype(mx.float32)
-    return x / mx.maximum(mx.sqrt(mx.sum(x * x, -1, keepdims=True)), 1e-6)
+_rda_gates = _lr.rda_gates
 
 
 class RDA(kimi.KimiDeltaAttention):
@@ -404,6 +390,7 @@ class RDA(kimi.KimiDeltaAttention):
         self.dt_bias = mx.zeros((h * d,), dtype=mx.float32)
         self.o_norm = nn.RMSNorm(d, eps=args.rms_norm_eps)
         object.__setattr__(self, "_lower_bound", mx.array(float(args.kda_lower_bound), mx.float32))
+        self.recurrence_spec = _lr.LinearRecurrenceSpec.from_config(args, **RAON_RDA_LAWS)
 
     _PROJECTIONS = ("q_proj", "k_proj", "v_proj", "b_proj", "f_a_proj", "f_b_proj",
                     "g_proj", "rda_w_proj")
@@ -456,12 +443,12 @@ class RDA(kimi.KimiDeltaAttention):
         v, states[2] = self.v_conv1d(v, states[2], mask, lengths)
         q, k, v = (z.reshape(b, t, h, d) for z in (q, k, v))
         # Reference: l2 normalize in fp32, round, then scale q by d**-0.5.
-        q = _l2_normalize(q).astype(dtype) * (d ** -0.5)
-        k = _l2_normalize(k).astype(dtype)
-        decay, beta, ratio = _rda_gates(
-            decay_raw.reshape(b, t, h, d), self.dt_bias.reshape(h, d),
-            mx.exp(self.A_log.astype(mx.float32)).reshape(h, 1), beta_raw, write,
-            self._lower_bound)
+        q, k = _lr.normalize_qk(self.recurrence_spec, q, k)
+        gates = _lr.gates(
+            self.recurrence_spec, decay_raw.reshape(b, t, h, d), beta_raw,
+            mx.exp(self.A_log.astype(mx.float32)).reshape(h, 1), self.dt_bias.reshape(h, d),
+            write=write, lower_bound=self._lower_bound)
+        decay, beta, ratio = gates.decay, gates.beta, gates.value_ratio
         beta = beta.astype(dtype).astype(mx.float32)
         v = (v.astype(mx.float32) * ratio[..., None]).astype(dtype)
         q, k, v = q.astype(mx.float32), k.astype(mx.float32), v.astype(mx.float32)
@@ -471,20 +458,13 @@ class RDA(kimi.KimiDeltaAttention):
         if spans is not None:
             self._record_rollback(cache, t, spans, snapshot, raw, mask, (q, k, v, decay, beta), state, b)
         chunked = t >= 17 and mask is None and not getattr(cache, "speculating", False)
-        if self.chunk_wy and chunked:
-            from .kda_chunk_wy import chunk_wy
-            out, state = chunk_wy(q, k, v, mx.log(decay), beta, state)
-            self.calls["chunk_wy"] += 1
-        elif self.chunk32 and chunked:
-            from .gdn_chunk32 import chunk32
-            out, state = chunk32(q, k, v, decay, beta, state)
-            self.calls["chunk32"] += 1
-        elif not self.reference and mx.default_device() == mx.gpu:
-            out, state = gated_delta_kernel(q, k, v, decay, beta, state, mask)
-            self.calls["vector_kernel"] += 1
-        else:
-            out, state = gated_delta_ops(q, k, v, decay, beta, state, mask)
-            self.calls["reference"] += 1
+        chunk = ("wy" if self.chunk_wy else "chunk32" if self.chunk32 else None) if chunked else None
+        out, state, receipt = _lr.recurrence(
+            q, k, v, decay, beta, state, mask, use_kernel=not self.reference,
+            allow_core=False, chunk=chunk,
+            # chunk_log_decay="log_of_decay": the legacy log of the rounded decay.
+            log_decay=mx.log(decay) if chunk == "wy" else None, with_receipt=True)
+        self.calls[kimi._RECURRENCE_COUNTERS[receipt.selected]] += 1
         if cache is not None:
             for i in range(3):
                 cache[i] = states[i]
@@ -623,14 +603,13 @@ class Router(nn.Module):
         return cached[1]
 
     def __call__(self, x):
-        scores = mx.sigmoid(x.astype(mx.float32) @ self.weight32().T)
-        choice = scores + self.e_score_correction_bias.astype(mx.float32)
-        k = self._top_k
-        ids = mx.argpartition(-choice, kth=k - 1, axis=-1)[..., :k]
-        weights = mx.take_along_axis(scores, ids, -1)
-        if self._renorm:
-            weights = weights / (weights.sum(-1, keepdims=True) + 1e-20)
-        return ids, weights * self._scale if self._scale != 1.0 else weights
+        spec = cached_spec(
+            top_k=self._top_k, score_func="sigmoid", use_bias=True, bias_cast="to_scores",
+            topk_method="argpartition_neg", norm_topk_prob=self._renorm, norm_eps=1e-20,
+            routed_scaling_factor=self._scale,
+        )
+        return _route_reference(x.astype(mx.float32) @ self.weight32().T, spec,
+                                self.e_score_correction_bias)
 
 
 class MoE(nn.Module):

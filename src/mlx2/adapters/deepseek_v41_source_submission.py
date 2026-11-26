@@ -17,7 +17,10 @@ def implementation_identity():
     root = Path(__file__).resolve().parents[1]
     paths = ('adapters/deepseek_v41_source_submission.py',
              'adapters/deepseek_v41_source_weights.py',
-             'runtime/models/deepseek_v41.py')
+             'runtime/models/deepseek_v41.py',
+             'runtime/technologies/sparse_selection.py', 'runtime/technologies/hyper_connections.py',
+             'runtime/technologies/dispatch.py', 'runtime/technologies/window_attention/__init__.py',
+             'runtime/technologies/window_attention/vector_sources.py', 'runtime/technologies/window_attention/vector_launch.py')
     records = '\n'.join(p + ':' + hashlib.sha256((root/p).read_bytes()).hexdigest()
                         for p in paths)
     return hashlib.sha256((POLICY+'\n'+records).encode()).hexdigest()

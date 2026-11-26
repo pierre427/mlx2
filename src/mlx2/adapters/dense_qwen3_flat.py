@@ -51,7 +51,11 @@ _PACKAGE_PREFIX = "src/mlx2/"
 _SOURCE_PATHS = (
     "src/mlx2/adapters/dense_qwen3_flat.py",
     "src/mlx2/runtime/models/standard_decoder.py",
+    "src/mlx2/runtime/technologies/moe_router.py",
+    "src/mlx2/runtime/technologies/dispatch.py",
     "src/mlx2/runtime/models/base.py",
+    "src/mlx2/runtime/technologies/window_attention/__init__.py", "src/mlx2/runtime/technologies/window_attention/vector_sources.py",
+    "src/mlx2/runtime/technologies/window_attention/vector_launch.py", 
     "src/mlx2/runtime/models/activations.py",
     "src/mlx2/runtime/models/rope_utils.py",
     "src/mlx2/runtime/flat_segmented_ast.py",

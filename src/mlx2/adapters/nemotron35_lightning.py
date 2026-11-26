@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 
 from ..contracts import Capability, ModelDescriptor, StatePlane
@@ -140,7 +141,31 @@ def _validate_target(path: Path) -> tuple[dict, dict, list[str]]:
     return config, weights, names
 
 
-def _inspect_mtp(path: Path) -> tuple[Path, dict] | None:
+def _sidecar_candidates(path: Path, raw: Path, given: Path | None) -> list[Path]:
+    """Where a manifest-relative sidecar may live, most specific first.
+
+    A relative manifest path names a location next to the model folder as the
+    user sees it. When that folder is a symlink (models moved to an external
+    disk behind ``~/mlx-models/<name>``), ``..`` must be applied to the link's
+    location before symlinks are resolved; resolving first would look beside
+    the link target instead. The resolved-folder reading is kept as the
+    fallback so a manifest written for the real folder still works. Identity
+    is still bound by the size and SHA-256 checks, so a second location can
+    never admit a different file.
+    """
+    if raw.is_absolute():
+        return [raw.resolve()]
+    bases = [Path(os.path.normpath(given))] if given is not None else []
+    bases.append(path)
+    candidates = []
+    for base in bases:
+        candidate = Path(os.path.normpath(base / raw)).resolve()
+        if candidate not in candidates:
+            candidates.append(candidate)
+    return candidates
+
+
+def _inspect_mtp(path: Path, given: Path | None = None) -> tuple[Path, dict] | None:
     manifest_path = path / MTP_MANIFEST
     if not manifest_path.exists():
         return None
@@ -157,8 +182,8 @@ def _inspect_mtp(path: Path) -> tuple[Path, dict] | None:
     raw = manifest.get("path")
     if not isinstance(raw, str) or not raw or Path(raw).name != MTP_SHARD:
         raise ValueError("Nemotron 3.5 Lightning MTP path is invalid")
-    shard = Path(raw).expanduser()
-    shard = (shard if shard.is_absolute() else path / shard).resolve()
+    candidates = _sidecar_candidates(path, Path(raw).expanduser(), given)
+    shard = next((c for c in candidates if c.is_file()), candidates[0])
     if shard.is_relative_to(path) or not shard.is_file() or shard.stat().st_size != MTP_SIZE:
         raise ValueError("Nemotron 3.5 Lightning MTP shard is missing, misplaced or incomplete")
     if _sha256(shard) != MTP_SHA256:
@@ -180,9 +205,10 @@ def _inspect_mtp(path: Path) -> tuple[Path, dict] | None:
 
 
 def inspect_artifact(model_path: str | Path) -> dict:
-    path = Path(model_path).expanduser().resolve()
+    given = Path(model_path).expanduser().absolute()
+    path = given.resolve()
     config, weights, names = _validate_target(path)
-    mtp = _inspect_mtp(path)
+    mtp = _inspect_mtp(path, given)
     digest = hashlib.sha256()
     for name in ("config.json", "model.safetensors.index.json", "tokenizer.json",
                  "tokenizer_config.json", "chat_template.jinja", "generation_config.json"):

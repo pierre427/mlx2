@@ -8,7 +8,8 @@ import mlx.nn as nn
 from mlx.nn.layers.distributed import sum_gradients
 from .base import BaseModelArgs
 from . import invariant_prefill as _invariant
-from .gated_delta import gated_delta_update, normalize_gdn_qk
+from .gated_delta import gated_delta_update, normalize_gdn_qk  # noqa: F401
+from ..technologies import linear_recurrence as _lr
 from .qwen3_next import Qwen3NextRMSNormGated as RMSNormGated
 
 _GDN_FUSED_MAX_ROWS = 8
@@ -83,6 +84,12 @@ class TextModelArgs(BaseModelArgs):
 
 
 class GatedDeltaNet(nn.Module):
+    # Legacy-numerics laws of this layer class (linear-recurrence spec
+    # fields); a subclass names its own.  The class-level spec serves
+    # instances built without ``__init__``.
+    _RECURRENCE_LAWS: Dict[str, Any] = {}
+    recurrence_spec = _lr.QWEN35_GDN
+
     def __init__(self, config: TextModelArgs):
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -119,9 +126,11 @@ class GatedDeltaNet(nn.Module):
         self.norm = RMSNormGated(self.head_v_dim, eps=self.layer_norm_epsilon)
         self.out_proj = nn.Linear(self.value_dim, self.hidden_size, bias=False)
         self.sharding_group = None
+        self.recurrence_spec = _lr.LinearRecurrenceSpec.from_config(
+            config, **self._RECURRENCE_LAWS)
 
     def _normalize_qk(self, q, k):
-        return normalize_gdn_qk(q, k)
+        return _lr.normalize_qk(getattr(self, "recurrence_spec", _lr.QWEN35_GDN), q, k)
 
     def _gated_delta_update(
         self, q, k, v, a, b, state, mask, use_kernel, *, prefill=False, allow_core=True
@@ -137,6 +146,7 @@ class GatedDeltaNet(nn.Module):
             state,
             mask,
             use_kernel=use_kernel,
+            **_lr.gdn_update_flags(getattr(self, "recurrence_spec", _lr.QWEN35_GDN)),
             prefill_chunk_size=getattr(self, "_prefill_scan_chunk", 0)
             if prefill
             else 0,
@@ -291,17 +301,9 @@ class GatedDeltaNet(nn.Module):
             conv_state = mx.zeros(
                 (B, self.conv_kernel_size - 1, self.conv_dim), dtype=dtype
             )
-        if mask is not None:
-            qkv = mx.where(mask[..., None], qkv, 0)
-        conv_input = mx.concatenate([conv_state, qkv], axis=1)
+        conv_input = _lr.conv_window(qkv, conv_state, mask, self.conv_kernel_size)
         if cache is not None:
-            n_keep = self.conv_kernel_size - 1
-            if cache.lengths is not None:
-                ends = mx.clip(cache.lengths, 0, S)
-                positions = (ends[:, None] + mx.arange(n_keep))[..., None]
-                cache[0] = mx.take_along_axis(conv_input, positions, axis=1)
-            else:
-                cache[0] = mx.contiguous(conv_input[:, -n_keep:, :])
+            cache[0] = _lr.conv_tail(conv_input, cache.lengths, self.conv_kernel_size - 1, S)
         conv_out = nn.silu(self.conv1d(conv_input))
         (q, k, v) = [
             t.reshape(B, S, h, d)

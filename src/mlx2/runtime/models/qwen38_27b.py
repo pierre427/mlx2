@@ -28,6 +28,7 @@ from .rope_utils import initialize_rope
 from ..ragged_verify_observation import current_observer, observed_stage
 from ..prefill_checkpoint_rows import select_checkpoint_rows
 from ..prefill_tail_skip import STATS, claim_adapter_tail, tail_skip_mode
+from ..technologies.drafter_blocks import PRE_FC_NORM_FUSION, fuse_mtp_module
 
 
 class Qwen3NextAttention(nn.Module):
@@ -857,9 +858,7 @@ class TextModel(nn.Module):
         uniformly shifted by -1 vs absolute; the shift cancels in q·k
         since the MTP layer only attends within its own cache.
         """
-        e = self.mtp.pre_fc_norm_embedding(self.model.embed_tokens(tokens))
-        h = self.mtp.pre_fc_norm_hidden(hidden)
-        x = self.mtp.fc(mx.concatenate([e, h], axis=-1))
+        x = fuse_mtp_module(PRE_FC_NORM_FUSION, self.mtp, self.model.embed_tokens(tokens), hidden)
         mask = create_attention_mask(x, mtp_cache[0])
         x = self.mtp.layers[0](x, mask=mask, cache=mtp_cache[0])
         post = self.mtp.norm(x)
@@ -1003,12 +1002,20 @@ class Model(nn.Module):
                 "source_paths": (
                     "src/mlx2/adapters/qwen38_27b.py",
                     "src/mlx2/runtime/models/qwen38_27b.py",
+                    "src/mlx2/runtime/technologies/drafter_blocks.py",
                     "src/mlx2/runtime/models/qwen3_next.py",
+                    "src/mlx2/runtime/technologies/moe_router.py",
+                    "src/mlx2/runtime/technologies/dispatch.py",
                     "src/mlx2/runtime/models/qwen38_fused_gdn.py",
+                    "src/mlx2/runtime/technologies/linear_recurrence.py",
+                    
+                    "src/mlx2/runtime/models/differentiable.py",
                     "src/mlx2/runtime/models/qwen_gdn_contracts.py",
                     "src/mlx2/runtime/models/gdn_kernel_contract.py",
                     "src/mlx2/runtime/models/cache.py",
                     "src/mlx2/runtime/models/base.py",
+                    "src/mlx2/runtime/technologies/window_attention/__init__.py", "src/mlx2/runtime/technologies/window_attention/vector_sources.py",
+                    "src/mlx2/runtime/technologies/window_attention/vector_launch.py", 
                     "src/mlx2/runtime/segmented_plain_kv.py",
                     "src/mlx2/runtime/segmented_batch_cache.py",
                 ),

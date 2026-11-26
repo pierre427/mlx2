@@ -61,11 +61,18 @@ _SOURCE_PATHS = (
     "src/mlx2/runtime/ast_execution_capability.py",
     "src/mlx2/runtime/cache_operations.py",
     "src/mlx2/runtime/models/cache.py",
+    "src/mlx2/runtime/technologies/window_attention/__init__.py", "src/mlx2/runtime/technologies/window_attention/vector_sources.py",
+    "src/mlx2/runtime/technologies/window_attention/vector_launch.py", "src/mlx2/runtime/technologies/dispatch.py",
     "src/mlx2/runtime/models/import_env.py",
     "src/mlx2/runtime/models/invariant_prefill.py",
     "src/mlx2/runtime/models/moe_nax_gather.py",
     "src/mlx2/runtime/models/qsdpa_verify_metal.py",
     "src/mlx2/runtime/models/qwen4_exp.py",
+    "src/mlx2/runtime/technologies/drafter_blocks.py",
+    "src/mlx2/runtime/technologies/linear_recurrence.py",
+    "src/mlx2/runtime/models/differentiable.py",
+    "src/mlx2/runtime/technologies/sparse_selection.py",
+    "src/mlx2/runtime/technologies/embedding_tables.py",
     "src/mlx2/runtime/models/qwen4_qsa_indexed.py",
     "src/mlx2/runtime/models/served_exp.py",
     "src/mlx2/runtime/paged_kv_cache.py",
@@ -80,6 +87,8 @@ _NATIVE_SOURCE_PATHS = (
     "src/mlx2/runtime/hybrid_speculative.py",
     "src/mlx2/runtime/cache_operations.py",
     "src/mlx2/runtime/models/cache.py",
+    "src/mlx2/runtime/technologies/window_attention/__init__.py", "src/mlx2/runtime/technologies/window_attention/vector_sources.py",
+    "src/mlx2/runtime/technologies/window_attention/vector_launch.py", "src/mlx2/runtime/technologies/dispatch.py",
 )
 
 

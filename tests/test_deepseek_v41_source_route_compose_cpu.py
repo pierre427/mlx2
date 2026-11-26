@@ -241,8 +241,17 @@ def test_composed_model_decodes_stamps_and_reports_both(monkeypatch):
 
 # ---------------------------------------------------------------- identity
 
+# Technology modules joined BASE when DS4.1 code moved into them (2026-11-25,
+# intended salt changes): sparse_selection (CSA2 indexer, selected-attention
+# merge), hyper_connections + dispatch (HC math), window_attention (local
+# window), and deepseek_v4.py + moe_router (route_experts and its reference).
 BASE = ['adapters/deepseek_v41_source_approx.py', 'runtime/models/deepseek_v41.py',
-        'runtime/models/deepseek_v41_cache.py']
+        'runtime/models/deepseek_v41_cache.py', 'runtime/technologies/sparse_selection.py',
+        'runtime/technologies/hyper_connections.py', 'runtime/technologies/dispatch.py',
+        'runtime/technologies/window_attention/__init__.py',
+        'runtime/technologies/window_attention/vector_sources.py',
+        'runtime/technologies/window_attention/vector_launch.py',
+        'runtime/models/deepseek_v4.py', 'runtime/technologies/moe_router.py']
 BIAS_FILES = ['adapters/deepseek_v41_source_route_bias.py', 'runtime/models/deepseek_v4.py',
               'runtime/models/deepseek_v41_fused.py']
 DROP_FILES = ['adapters/deepseek_v41_source_route_drop.py', 'runtime/models/deepseek_v4.py',
@@ -252,7 +261,7 @@ DROP_FILES = ['adapters/deepseek_v41_source_route_drop.py', 'runtime/models/deep
 def _historical_salt(policy, files):
     """The binding every operation used before composition existed."""
     binding = {key: policy[key] for key in sorted(approx.POLICY_KEYS) if key in policy}
-    binding['implementation'] = approx._file_identity(BASE + files)
+    binding['implementation'] = approx._file_identity(list(dict.fromkeys(BASE + files)))
     binding['qualification'] = 'unqualified'
     return hashlib.sha256(json.dumps(binding, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
 

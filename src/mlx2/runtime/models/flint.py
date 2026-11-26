@@ -24,6 +24,7 @@ from .base import BaseModelArgs, create_attention_mask, scaled_dot_product_atten
 from .cache import KVCache, RotatingKVCache
 from .rope_utils import initialize_rope
 from .switch_layers import SwitchGLU
+from ..technologies.moe_router import cached_spec, route as _route_reference
 
 
 @dataclass
@@ -210,10 +211,11 @@ class SparseMoE(nn.Module):
     def __call__(self, x):
         # SGLang routes in fp32: bias-free sigmoid scores choose the experts,
         # and the chosen raw sigmoid weights are renormalized to sum to one.
-        scores = mx.sigmoid(self.gate(x).astype(mx.float32))
-        indices = mx.argpartition(scores, kth=-self.top_k, axis=-1)[..., -self.top_k :]
-        weights = mx.take_along_axis(scores, indices, axis=-1)
-        weights = weights / (mx.sum(weights, axis=-1, keepdims=True) + 1e-20)
+        spec = cached_spec(
+            top_k=self.top_k, score_func="sigmoid", score_dtype="float32",
+            norm_topk_prob=True, norm_eps=1e-20,
+        )
+        indices, weights = _route_reference(self.gate(x), spec)
         expert_rows = self._routed_rows(x, indices)
         if expert_rows is None:
             expert_rows = self.switch_mlp(x, indices)

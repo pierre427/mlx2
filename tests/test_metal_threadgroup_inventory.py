@@ -29,19 +29,21 @@ M1_REGISTER_HEAVY_FLOOR = 768
 
 # file (relative to src/mlx2) -> number of launches above the M1 floor.
 ABOVE_M1_FLOOR = {
-    # Flash-Next (qwen4) attention rows / window and indexed QSA: 1024.
-    "runtime/models/qwen4_attn_rows.py": 2,
-    "runtime/models/qwen4_attn_window.py": 2,
+    # Vector-SDPA one/two-pass combines (window-attention technology), shared
+    # by Flash-Next (qwen4) attention rows / window and the Muse D128
+    # window: 1024.  The Muse window runs only on device classes s/d
+    # (_serial_plan returns None elsewhere), so M1-M4 keep the stock SDPA.
+    "runtime/technologies/window_attention/vector_launch.py": 2,
+    # Head-dim-512 TK-2 decode (opt-in MLX2_SDPA_D512_TK2): MLX's own
+    # sdpa_vector_2pass_2 width, 1024.
+    "runtime/models/sdpa_vector_d512.py": 1,
+    # Flash-Next indexed QSA: 1024.
     "runtime/models/qwen4_qsa_indexed.py": 1,
     # Flash-Next fused GDN decode: 32 x 32.
     "runtime/models/qwen4_fused_gdn.py": 1,
     # NAX (M5-only) MoE gather and its research twin.
     "runtime/models/moe_nax_gather.py": 1,
     "adapters/segmented_moe_prefill_research.py": 1,
-    # Muse D128 attention window: the one_combine/two_combine reductions
-    # launch 1024; the fused window runs only on device classes s/d
-    # (_serial_plan returns None elsewhere), so M1-M4 keep the stock SDPA.
-    "runtime/models/muse_attn_window.py": 2,
     # DeepSeek V4.1 Source mHC ``mega_v1`` pre kernel (ea78d82ff): one
     # 1024-thread threadgroup matching MLX's 1024-lane reduction laws. Opt-in,
     # not selected by default, behind a first-use bitwise self-check.

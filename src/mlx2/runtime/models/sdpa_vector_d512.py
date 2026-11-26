@@ -46,182 +46,30 @@ from functools import lru_cache
 import mlx.core as mx
 
 from .cache import DECODE_MASK_STATS, decode_mask_mode
+from ..technologies.window_attention import vector_launch as _VL
+from ..technologies.window_attention import vector_sources as _VS
 
 VERSION = "sdpa-vector-d512-tk2-v1"
 TK = 2
 HEAD_DIM = 512
 STATS = {"d512_decode_calls": 0}
 
-_PASS1 = r"""
-    constexpr int BD = 32;
-    constexpr int qk_per_thread = D / BD;
-    constexpr int v_per_thread = D / BD;
-    typedef float U;
-
-    thread U q[qk_per_thread];
-    thread U o[v_per_thread] = {0};
-
-    const int kv_head_idx = threadgroup_position_in_grid.x;
-    const int batch_idx = threadgroup_position_in_grid.y;
-    const int block_idx = threadgroup_position_in_grid.z;
-    const int blocks = threadgroups_per_grid.z;
-    const int gqa_factor = threads_per_threadgroup.y;
-    const int q_head_idx = gqa_factor * kv_head_idx + thread_position_in_threadgroup.y;
-    const int num_kv_heads = threadgroups_per_grid.x;
-    const int num_q_heads = num_kv_heads * gqa_factor;
-    const int o_offset = batch_idx * num_q_heads + q_head_idx;
-    const uint simd_lid = thread_index_in_simdgroup;
-    const int N = keys_shape[2];
-    const int64_t k_seq_stride = keys_strides[2];
-    const int64_t v_seq_stride = values_strides[2];
-    const int64_t qd = queries_strides[3];
-    const int64_t kd = keys_strides[3];
-    const int64_t vd = values_strides[3];
-
-    const device T* qp = queries + batch_idx * queries_strides[0]
-        + q_head_idx * queries_strides[1] + simd_lid * qk_per_thread * qd;
-    const device T* kp = keys + batch_idx * keys_strides[0] + kv_head_idx * keys_strides[1]
-        + block_idx * k_seq_stride + simd_lid * qk_per_thread * kd;
-    const device T* vp = values + batch_idx * values_strides[0]
-        + kv_head_idx * values_strides[1] + block_idx * v_seq_stride
-        + simd_lid * v_per_thread * vd;
-    device T* op = out + o_offset * blocks * D + block_idx * D + simd_lid * v_per_thread;
-
-    for (int i = 0; i < qk_per_thread; i++) {
-        q[i] = static_cast<U>(scale[0]) * qp[i * qd];
-    }
-
-    U max_score = Limits<U>::finite_min;
-    U sum_exp_score = 0;
-
-    const int64_t stride_k_tok = blocks * k_seq_stride;
-    const int64_t stride_v_tok = blocks * v_seq_stride;
-
-    int i = block_idx;
-    for (; i + (TK - 1) * blocks < N; i += blocks * TK) {
-        T k_reg[TK][qk_per_thread];
-        T v_reg[TK][v_per_thread];
-        for (int t = 0; t < TK; t++) {
-            const device T* kt = kp + t * stride_k_tok;
-            for (int j = 0; j < qk_per_thread; j++) { k_reg[t][j] = kt[j * kd]; }
-        }
-        for (int t = 0; t < TK; t++) {
-            const device T* vt = vp + t * stride_v_tok;
-            for (int j = 0; j < v_per_thread; j++) { v_reg[t][j] = vt[j * vd]; }
-        }
-        for (int t = 0; t < TK; t++) {
-            U score = 0;
-            for (int j = 0; j < qk_per_thread; j++) {
-                score += q[j] * static_cast<U>(k_reg[t][j]);
-            }
-            score = simd_sum(score);
-            U new_max = max(max_score, score);
-            U factor = fast::exp(max_score - new_max);
-            U exp_score = fast::exp(score - new_max);
-            max_score = new_max;
-            sum_exp_score = sum_exp_score * factor + exp_score;
-            for (int j = 0; j < v_per_thread; j++) {
-                o[j] = o[j] * factor + exp_score * static_cast<U>(v_reg[t][j]);
-            }
-        }
-        kp += TK * stride_k_tok;
-        vp += TK * stride_v_tok;
-    }
-
-    for (; i < N; i += blocks) {
-        U score = 0;
-        for (int j = 0; j < qk_per_thread; j++) { score += q[j] * kp[j * kd]; }
-        score = simd_sum(score);
-        U new_max = max(max_score, score);
-        U factor = fast::exp(max_score - new_max);
-        U exp_score = fast::exp(score - new_max);
-        max_score = new_max;
-        sum_exp_score = sum_exp_score * factor + exp_score;
-        for (int j = 0; j < v_per_thread; j++) {
-            o[j] = o[j] * factor + exp_score * vp[j * vd];
-        }
-        kp += stride_k_tok;
-        vp += stride_v_tok;
-    }
-
-    if (simd_lid == 0) {
-        sums[o_offset * blocks + block_idx] = sum_exp_score;
-        maxs[o_offset * blocks + block_idx] = max_score;
-    }
-    for (int j = 0; j < v_per_thread; j++) {
-        op[j] = static_cast<T>(o[j]);
-    }
-"""
-
-_PASS2 = r"""
-    constexpr int BN = 32;
-    constexpr int BD = 32;
-    constexpr int elem_per_thread = D / BD;
-    typedef float U;
-
-    thread U o[elem_per_thread] = {0};
-    threadgroup U outputs[BN * BD];
-
-    const uint simd_gid = simdgroup_index_in_threadgroup;
-    const uint simd_lid = thread_index_in_simdgroup;
-    const int q_offset = threadgroup_position_in_grid.x;
-    const device T* pp = partials + q_offset * BLOCKS * D + simd_gid * D + simd_lid * elem_per_thread;
-    const device float* sp = sums + q_offset * BLOCKS;
-    const device float* mp = maxs + q_offset * BLOCKS;
-    device T* op = out + q_offset * D + simd_gid * elem_per_thread;
-
-    U sum_exp_score = 0.0;
-    U max_score = Limits<U>::finite_min;
-
-    for (int b = 0; b < BLOCKS / BN; ++b) {
-        max_score = max(max_score, mp[simd_lid + BN * b]);
-    }
-    max_score = simd_max(max_score);
-
-    for (int b = 0; b < BLOCKS / BN; ++b) {
-        U factor = fast::exp(mp[simd_lid + BN * b] - max_score);
-        sum_exp_score += factor * sp[simd_lid + BN * b];
-    }
-    sum_exp_score = simd_sum(sum_exp_score);
-
-    for (int b = 0; b < BLOCKS / BN; ++b) {
-        U factor = fast::exp(mp[simd_gid] - max_score);
-        for (int i = 0; i < elem_per_thread; i++) {
-            o[i] += factor * static_cast<U>(pp[i]);
-        }
-        mp += BN;
-        sp += BN;
-        pp += BN * D;
-    }
-
-    for (int i = 0; i < elem_per_thread; i++) {
-        outputs[simd_lid * BD + simd_gid] = o[i];
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-        o[i] = simd_sum(outputs[simd_gid * BD + simd_lid]);
-        o[i] = sum_exp_score == 0 ? o[i] : (o[i] / sum_exp_score);
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-    }
-
-    if (simd_lid == 0) {
-        for (int i = 0; i < elem_per_thread; i++) {
-            op[i] = static_cast<T>(o[i]);
-        }
-    }
-"""
+# The kernel pair's Metal text comes from the window-attention technology's
+# vector-SDPA generator (``strided_tk_pass1_source`` and the single-row
+# ``sdpa_vector_2pass_2``), byte-identical to the copy this module carried
+# (tests/test_technologies_window_attention_sources.py).
+_PASS1 = _VS.strided_tk_kwargs("pass1")["source"]
+_PASS2 = _VS.strided_tk_kwargs("pass2")["source"]
 
 
 @lru_cache(maxsize=None)
 def _pass1():
-    return mx.fast.metal_kernel(
-        name="mlx2_sdpa_vector_d512_pass1", input_names=["queries", "keys", "values", "scale"],
-        output_names=["out", "sums", "maxs"], source=_PASS1, ensure_row_contiguous=False)
+    return mx.fast.metal_kernel(**_VS.strided_tk_kwargs("pass1"))
 
 
 @lru_cache(maxsize=None)
 def _pass2():
-    return mx.fast.metal_kernel(
-        name="mlx2_sdpa_vector_d512_pass2", input_names=["partials", "sums", "maxs"],
-        output_names=["out"], source=_PASS2)
+    return mx.fast.metal_kernel(**_VS.strided_tk_kwargs("pass2"))
 
 
 @lru_cache(maxsize=None)
@@ -242,20 +90,8 @@ def stock_blocks(n: int, gqa: int, devc: str) -> int:
     ``MLX_SDPA_BLOCKS`` overrides it in MLX, so it does here too.
     """
     n_simds = gqa
-    if devc == "s":
-        blocks = 64
-        if n > 1024 and n_simds > 4:
-            blocks = 128 if n <= 8192 else 256 if n <= 32768 else 512 if n <= 65536 else 1024
-    elif devc == "d":
-        blocks = 128
-        if n_simds <= 2 and n > 8192:
-            blocks = 256
-        elif n_simds >= 6:
-            if 16384 <= n < 65536:
-                blocks = 512
-            elif n >= 65536:
-                blocks = 1024
-    else:
+    blocks = _VL.select_sdpa_blocks(devc, n, n_simds)
+    if blocks is None:
         blocks = 64 if n_simds >= 4 else 32
     env = int(os.environ.get("MLX_SDPA_BLOCKS", "0") or 0)
     if env > 0:

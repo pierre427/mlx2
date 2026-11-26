@@ -39,6 +39,7 @@ from .switch_layers import (
     _sort_routes,
     _scatter_unsort,
 )
+from ..technologies.moe_router import cached_spec, route as _route_reference
 
 logger = logging.getLogger(__name__)
 
@@ -969,13 +970,8 @@ def _shared_fold_ok(block, x) -> bool:
 
 def _stock_routing(block, gates):
     """The block's own composed routing (the one-token reference)."""
-    gates = mx.softmax(gates, axis=-1, precise=True)
-    k = block.top_k
-    inds = mx.argpartition(gates, kth=-k, axis=-1)[..., -k:]
-    scores = mx.take_along_axis(gates, inds, axis=-1)
-    if block.norm_topk_prob:
-        scores = scores / scores.sum(axis=-1, keepdims=True)
-    return inds, scores
+    spec = cached_spec(top_k=block.top_k, norm_topk_prob=bool(block.norm_topk_prob))
+    return _route_reference(gates, spec)
 
 
 def _row_projections(window, linears, x):
@@ -1534,12 +1530,8 @@ def transform_moe_weights(
 
 @mx.compile
 def _select_experts(gates: mx.array, top_k: int, norm_topk_prob: bool):
-    gates = mx.softmax(gates, axis=-1, precise=True)
-    inds = mx.argpartition(gates, kth=-top_k, axis=-1)[..., -top_k:]
-    scores = mx.take_along_axis(gates, inds, axis=-1)
-    if norm_topk_prob:
-        scores = scores / scores.sum(axis=-1, keepdims=True)
-    return (inds, scores)
+    spec = cached_spec(top_k=top_k, norm_topk_prob=bool(norm_topk_prob))
+    return _route_reference(gates, spec)
 
 
 @dataclass
@@ -1950,12 +1942,7 @@ class Qwen3NextSparseMoeBlock(nn.Module):
                 gates, self.top_k, bool(self.norm_topk_prob)
             )
         elif not router_fused:
-            gates = mx.softmax(gates, axis=-1, precise=True)
-            k = self.top_k
-            inds = mx.argpartition(gates, kth=-k, axis=-1)[..., -k:]
-            scores = mx.take_along_axis(gates, inds, axis=-1)
-            if self.norm_topk_prob:
-                scores = scores / scores.sum(axis=-1, keepdims=True)
+            (inds, scores) = _stock_routing(self, gates)
         # A switch module that owns the whole tail (experts, shared expert,
         # shared gate and combine) at this width runs it; None declines.
         decode_tail = getattr(self.switch_mlp, "decode_tail", None)

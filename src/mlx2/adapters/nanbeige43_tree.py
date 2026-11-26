@@ -25,15 +25,22 @@ from ..runtime.attention_tree_executor import (
 )
 from ..runtime.models.cache import KVCache
 from ..runtime.target_tree_executor import TargetTreeDispatchMetrics
+from ..runtime.technologies.tree_verify import TreeTopology, legacy_topology
 
 PROTOCOL = "nanbeige43_packed_attention_tree_v1"
+_TOPOLOGY = legacy_topology("packed_attention_tile")
 DEFAULT_TEMPORARY_BUDGET_BYTES = 2 << 30
 
 
 def source_identity():
     from .nanbeige43_attention import source_identity as attention_identity
     from .nanbeige43_segmented_attention import source_identity as segmented_identity
-    return hashlib.sha256((Path(__file__).read_text() + attention_identity() + segmented_identity()).encode()).hexdigest()
+    from ..runtime.technologies.tree_verify import TECHNOLOGY_SOURCES, file_sha256
+
+    # The shared attention executor and tree topology run on this route too.
+    shared = "".join(file_sha256(path) for path in (
+        Path(__file__).parents[1] / "runtime/attention_tree_executor.py", *TECHNOLOGY_SOURCES))
+    return hashlib.sha256((Path(__file__).read_text() + attention_identity() + segmented_identity() + shared).encode()).hexdigest()
 
 
 def estimate_temporary_memory(*, prefixes, width, layer_geometry, query_heads, implicit_attention, segmented_attention=False):
@@ -320,8 +327,7 @@ class NanbeigePackedTreeExecutor(AttentionTreeExecutor):
                 raise ValueError("packed tree requires one committed boundary per lane")
             prefixes.append(offsets.pop())
         for tree in parents:
-            if tree[0] != -1 or any(type(p) is not int or not 0 <= p < row for row, p in enumerate(tree[1:], start=1)):
-                raise ValueError("packed tree parents must form a rooted topological tree")
+            TreeTopology(tree, _TOPOLOGY)
         if self.implicit_attention:
             args = model.args
             if (args.num_attention_heads, args.num_key_value_heads, args.head_dim) != (56, 8, 128):

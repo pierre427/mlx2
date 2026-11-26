@@ -352,8 +352,12 @@ def hasher_metadata(backend, args):
                 seen.add(current)
                 layer.append(current)
         primes.append(layer)
-    bound = max(1, (np.iinfo(np.int64).max // len(mapping)) // 2)
-    multipliers = [np.random.default_rng(10007*layer).integers(0, bound, size=4, dtype=np.int64)*2+1 for layer in args.engram_layer_ids]
+    from ..runtime.technologies.embedding_tables import EngramSpec, seeded_multipliers
+    # The sealed law is the seeded numpy law at seed 0 (the Hy4 law too).
+    law = EngramSpec(max_ngram=4, heads_per_ngram=8, multiplier_law="numpy_default_rng",
+                     history_law="blocked_pad", pad_id=lookup[2], seed=0)
+    multipliers = [seeded_multipliers(law, layer=layer, compressed_vocab=len(mapping))
+                   for layer in args.engram_layer_ids]
     prefix = "deepseek41.engram."
     return {prefix+"token_map": lookup, prefix+"rows": list(args.engram_num_embeddings), prefix+"primes": primes,
             prefix+"multipliers": np.array(multipliers).tolist(), prefix+"compressed_vocab_size": len(mapping), prefix+"pad_id": lookup[2]}

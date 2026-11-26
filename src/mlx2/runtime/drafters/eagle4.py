@@ -25,6 +25,7 @@ import mlx.core as mx
 import numpy as np
 from mlx import nn
 
+from ..technologies.drafter_blocks import chain_attend_rows
 from .cohere_eagle import EagleWindowKVCache, _Rows
 from .eagle3 import Eagle3Layer
 from .eagle4_config import (  # model-free; re-exported
@@ -34,6 +35,36 @@ from .eagle4_config import (  # model-free; re-exported
     expected_weight_schema,
     validate_eagle4_tree,
 )
+
+
+class _CommitWindowView:
+    """A committed row cache as a new committed context query sees it.
+
+    The trained window includes the current context position. Keep W
+    committed rows for subsequent tree steps, but a new committed context
+    query reads only W-1 prior rows before adding itself.
+    """
+
+    __slots__ = ("_cache", "_window")
+
+    def __init__(self, cache, window):
+        self._cache = cache
+        self._window = window
+
+    @property
+    def offset(self):
+        return self._cache.offset
+
+    def keys_and_values(self):
+        prior_k, prior_v = self._cache.keys_and_values()
+        if prior_k.shape[2] >= self._window:
+            keep = self._window - 1
+            prior_k = prior_k[:, :, -keep:] if keep else prior_k[:, :, :0]
+            prior_v = prior_v[:, :, -keep:] if keep else prior_v[:, :, :0]
+        return prior_k, prior_v
+
+    def append(self, keys, values):
+        self._cache.append(keys, values)
 
 
 class Eagle4DraftModel(nn.Module):
@@ -145,53 +176,16 @@ class Eagle4DraftModel(nn.Module):
         g = layer.hidden_norm(features)
         residual = g if self.config.norm_before_residual else features
         q, k, v = layer.self_attn.project(mx.concatenate([e, g], axis=-1))
-        outputs = []
-        for row, caches in enumerate(rows):
-            cache = caches[0]
-            prior_k, prior_v = cache.keys_and_values()
-            local = None if commit else chain[row]
-            # The trained window includes the current context position. Keep
-            # W committed rows for subsequent tree steps, but a new committed
-            # context query reads only W-1 prior rows before adding itself.
-            if commit and prior_k.shape[2] >= self.config.sliding_window:
-                keep = self.config.sliding_window - 1
-                prior_k = prior_k[:, :, -keep:] if keep else prior_k[:, :, :0]
-                prior_v = prior_v[:, :, -keep:] if keep else prior_v[:, :, :0]
-            if local is not None and local[0] is not None:
-                prior_k = (
-                    mx.concatenate([prior_k, local[0]], axis=2)
-                    if prior_k.shape[2]
-                    else local[0]
-                )
-                prior_v = (
-                    mx.concatenate([prior_v, local[1]], axis=2)
-                    if prior_v.shape[2]
-                    else local[1]
-                )
-            position = cache.offset + (
-                0 if local is None or local[0] is None else local[0].shape[2]
-            )
-            out, rotated = layer.self_attn.attend(
-                q[row : row + 1],
-                k[row : row + 1],
-                v[row : row + 1],
-                position=position,
-                prior_k=prior_k,
-                prior_v=prior_v,
-            )
-            outputs.append(out)
-            if commit:
-                cache.append(rotated, v[row : row + 1])
-            elif chain[row][0] is None:
-                chain[row] = (rotated, v[row : row + 1])
-            else:
-                old = chain[row]
-                chain[row] = (
-                    mx.concatenate([old[0], rotated], axis=2),
-                    mx.concatenate([old[1], v[row : row + 1]], axis=2),
-                )
+        entries = [caches[0] for caches in rows]
+        if commit:
+            entries = [_CommitWindowView(entry, self.config.sliding_window) for entry in entries]
+        attended, new_locals = chain_attend_rows(
+            layer.self_attn, q, k, v, entries, chain, commit=commit
+        )
+        if not commit:
+            chain[:] = new_locals
         out = (
-            mx.concatenate(outputs, axis=0)
+            attended
             .transpose(0, 2, 1, 3)
             .reshape(*features.shape)
         )

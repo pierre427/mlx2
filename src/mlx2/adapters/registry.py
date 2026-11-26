@@ -363,10 +363,12 @@ def _xing4_0(path: Path, config: dict) -> AdapterResolution:
     )
 
 
-def _nemotron_h(path: Path, config: dict) -> AdapterResolution:
+def _nemotron_h(path: Path, config: dict, given: Path | None = None) -> AdapterResolution:
     if (config.get("num_hidden_layers"), config.get("hidden_size")) == (52, 2688):
         module = importlib.import_module(".nemotron35_lightning", __package__)
-        artifact = module.inspect_artifact(path)
+        # The folder as given (before symlinks are resolved) locates a
+        # manifest-relative MTP sidecar beside a symlinked model folder.
+        artifact = module.inspect_artifact(given or path)
         return AdapterResolution(
             module.Nemotron35LightningAdapter,
             module.descriptor_for(has_mtp=artifact["has_mtp"]),
@@ -707,7 +709,8 @@ _EXL3_UPSTREAM_MODEL_TYPES = frozenset({"qwen3_5_moe"})
 
 
 def inspect_model(model_path: str | Path) -> AdapterResolution:
-    path = Path(model_path).expanduser().resolve()
+    given = Path(model_path).expanduser().absolute()
+    path = given.resolve()
     config = json.loads((path / "config.json").read_text())
     if not isinstance(config, dict):
         raise TypeError("Model config must be a JSON object")
@@ -728,6 +731,8 @@ def inspect_model(model_path: str | Path) -> AdapterResolution:
         and model_type not in _EXL3_UPSTREAM_MODEL_TYPES
     ):
         raise ValueError(f"No mlx2 adapter admits EXL3 checkpoints of {model_type!r}")
+    if resolver is _nemotron_h:
+        return resolver(path, config, given)
     return resolver(path, config)
 
 

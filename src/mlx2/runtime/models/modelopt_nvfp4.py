@@ -13,7 +13,15 @@ from collections import Counter
 import mlx.core as mx
 from mlx import nn
 
-MODEL_OPT_GLOBAL_SCALE_ENCODING = 448 * 6
+from ..technologies import nvfp4_linear as _tech
+from ..technologies.nvfp4_linear import NVFP4Linear, NVFP4Spec
+
+MODEL_OPT_GLOBAL_SCALE_ENCODING = _tech.MLX_GLOBAL_SCALE_ENCODING
+#: ModelOpt-native law: FP32 input, product, scale and bias, one rounding.
+MODELOPT_SPEC = NVFP4Spec(
+    global_scale_law="fp32_product", global_scale_name="global_scale",
+    bias_dtype="bfloat16", input_scale="ignored",
+)
 POLICIES = frozenset({"native", "auto", "fused_b1"})
 
 
@@ -54,16 +62,12 @@ def normalize_nvfp4_execution(value):
     }
 
 
-class ModelOptNVFP4Linear(nn.Module):
+class ModelOptNVFP4Linear(NVFP4Linear):
+    spec = MODELOPT_SPEC
+    _width_error = "NVFP4 input width must divide into blocks of 16"
+
     def __init__(self, inputs, outputs, *, bias=False):
-        super().__init__()
-        if inputs % 16:
-            raise ValueError("NVFP4 input width must divide into blocks of 16")
-        self.weight = mx.zeros((outputs, inputs // 8), dtype=mx.uint32)
-        self.scales = mx.zeros((outputs, inputs // 16), dtype=mx.uint8)
-        self.global_scale = mx.ones((), dtype=mx.float32)
-        if bias:
-            self.bias = mx.zeros((outputs,), dtype=mx.bfloat16)
+        super().__init__(inputs, outputs, bias=bias)
         self._dispatch_policy = "native"
         self._decoded_large_row_threshold = None
         self._decoded_weight = None
@@ -100,14 +104,8 @@ class ModelOptNVFP4Linear(nn.Module):
         if required > budget_bytes:
             self._refusal_counts["decoded_budget"] += 1
             return 0
-        decoded = mx.dequantize(
-            self.weight,
-            scales=self.scales,
-            group_size=16,
-            bits=4,
-            mode="nvfp4",
-            global_scale=self.global_scale * MODEL_OPT_GLOBAL_SCALE_ENCODING,
-            dtype=mx.bfloat16,
+        decoded = _tech.decode_weight(
+            self.weight, self.scales, self.global_scale, self.spec, dtype=mx.bfloat16
         )
         mx.eval(decoded)
         # Runtime-only derived data must not be promoted into the module's
@@ -134,41 +132,25 @@ class ModelOptNVFP4Linear(nn.Module):
     def _native(self, x):
         self._dispatch_counts["native"] += 1
         # FP32 input/output around the QMM preserves the established ModelOpt
-        # arithmetic.  The stored tensor multiplier is applied exactly once.
-        result = mx.quantized_matmul(
-            x.astype(mx.float32),
-            self.weight,
-            scales=self.scales,
-            group_size=16,
-            bits=4,
-            mode="nvfp4",
-            transpose=True,
-        ) * self.global_scale
-        if "bias" in self:
-            result = result + self.bias.astype(mx.float32)
-        return result.astype(x.dtype)
+        # arithmetic (spec law ``fp32_product``).  The stored tensor
+        # multiplier is applied exactly once.
+        return _tech.module_reference(self, x)
 
     def __call__(self, x):
         if x.ndim < 2 or x.size % x.shape[-1]:
             raise ValueError("ModelOpt NVFP4 input must end in complete rows")
         rows = int(x.size // x.shape[-1])
+        decoded = _tech.DECODED_LARGE_ROWS
         if (
             self._dispatch_policy == "auto"
-            and self._decoded_weight is not None
-            and self._decoded_large_row_threshold is not None
-            and rows >= self._decoded_large_row_threshold
+            and decoded.admits(self.spec, module=self, x=x) is None
         ):
             self._dispatch_counts["decoded_large_rows"] += 1
-            result = x @ self._decoded_weight.T
-            if "bias" in self:
-                result = result.astype(mx.float32) + self.bias.astype(mx.float32)
-                result = result.astype(x.dtype)
-            return result
+            return decoded.run(self, x)
         if self._dispatch_policy == "fused_b1" and rows == 1:
-            from .modelopt_nvfp4_b1 import project
-
+            # Fails closed (ValueError with the kernel's refusal reason).
             self._dispatch_counts["fused_b1"] += 1
-            return project(self, x)
+            return _tech.FUSED_B1.run(self, x)
         if self._dispatch_policy == "fused_b1":
             self._refusal_counts["fused_b1_rows"] += 1
         return self._native(x)

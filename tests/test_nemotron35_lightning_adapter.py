@@ -52,7 +52,7 @@ def test_missing_or_wrong_sidecar_fails_closed(tmp_path, monkeypatch):
     # Keep the pinned target in place; represent an absent attachment without
     # copying 33 GB of shards or loosening the inspector's path boundary.
     with monkeypatch.context() as patch:
-        patch.setattr(nemotron35_lightning, "_inspect_mtp", lambda _path: None)
+        patch.setattr(nemotron35_lightning, "_inspect_mtp", lambda *_args: None)
         ordinary = inspect_model(TARGET)
         assert not ordinary.artifact["has_mtp"]
         assert Capability.MTP not in ordinary.descriptor.capabilities
@@ -65,6 +65,52 @@ def test_missing_or_wrong_sidecar_fails_closed(tmp_path, monkeypatch):
     (tmp_path / "mlx2-nemotron35-mtp.json").write_text(json.dumps(bad))
     with pytest.raises(ValueError, match="provenance mismatch"):
         nemotron35_lightning._inspect_mtp(tmp_path)
+
+
+def test_relative_sidecar_resolves_beside_a_symlinked_model_folder(tmp_path, monkeypatch):
+    """A manifest's ``../sidecars/...`` names the folder beside the model as the
+    user sees it; a model folder that is a symlink to another disk must not move
+    the lookup beside the link target (regression: 2026-11-23 move to /Volumes)."""
+    import hashlib
+
+    from mlx2.adapters import nemotron35_lightning as L
+
+    real = tmp_path / "disk" / "models" / "target"
+    real.mkdir(parents=True)
+    home = tmp_path / "home" / "mlx-models"
+    (home / "sidecars" / "mtp").mkdir(parents=True)
+    link = home / "target"
+    link.symlink_to(real, target_is_directory=True)
+    shard = home / "sidecars" / "mtp" / L.MTP_SHARD
+    shard.write_bytes(b"not-a-real-shard")
+    digest = hashlib.sha256(shard.read_bytes()).hexdigest()
+    monkeypatch.setattr(L, "MTP_SIZE", shard.stat().st_size)
+    monkeypatch.setattr(L, "MTP_SHA256", digest)
+    (real / L.MTP_MANIFEST).write_text(json.dumps({
+        "schema": "mlx2-nemotron35-mtp-v1", "target_revision": L.TARGET_REVISION,
+        "source_repository": "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16",
+        "source_revision": L.MTP_REVISION, "source_sha256": digest,
+        "path": f"../sidecars/mtp/{L.MTP_SHARD}",
+    }))
+    resolved = link.resolve()
+
+    # Resolving the link first looks beside the target and fails closed, as before.
+    with pytest.raises(ValueError, match="missing, misplaced or incomplete"):
+        L._inspect_mtp(resolved)
+    # With the folder as given, the sidecar is found and passes size and SHA-256;
+    # the fake shard then fails the header read, which proves location was accepted.
+    assert L._sidecar_candidates(resolved, Path(f"../sidecars/mtp/{L.MTP_SHARD}"), link)[0] == shard.resolve()
+    with pytest.raises(Exception) as caught:
+        L._inspect_mtp(resolved, link)
+    assert "missing, misplaced" not in str(caught.value) and "SHA-256" not in str(caught.value)
+
+    # A sidecar placed inside the model folder is still refused through either base.
+    inside = real / L.MTP_SHARD
+    inside.write_bytes(shard.read_bytes())
+    (real / L.MTP_MANIFEST).write_text((real / L.MTP_MANIFEST).read_text().replace(
+        f"../sidecars/mtp/{L.MTP_SHARD}", L.MTP_SHARD))
+    with pytest.raises(ValueError, match="misplaced"):
+        L._inspect_mtp(resolved, link)
 
 
 def test_cpu_mtp_module_matches_source_keys_and_steps():
@@ -88,7 +134,9 @@ def test_cpu_mtp_module_matches_source_keys_and_steps():
     model = Model(ModelArgs.from_dict(config))
     actual = {key for key, _ in tree_flatten(model.parameters()) if key.startswith("mtp.")}
     manifest = json.loads((TARGET / "mlx2-nemotron35-mtp.json").read_text())
-    source = (TARGET / manifest["path"]).resolve()
+    from mlx2.adapters.nemotron35_lightning import _sidecar_candidates
+    source = next(c for c in _sidecar_candidates(TARGET.resolve(), Path(manifest["path"]), TARGET.absolute())
+                  if c.is_file())
     with source.open("rb") as stream:
         header_length = struct.unpack("<Q", stream.read(8))[0]
         header = json.loads(stream.read(header_length))

@@ -7,6 +7,7 @@ The head has ordinary residuals and its own latent/raw-indexer state.
 import mlx.core as mx
 from mlx import nn
 
+from ..technologies.drafter_blocks import NEXTN_FUSION, fuse_mtp
 from .glm53_gguf import rms
 
 
@@ -31,18 +32,19 @@ class Glm53MTPHead(nn.Module):
             raise ValueError(
                 "GLM-5.3 MTP requires paired B1 seed/token rows and one head cache"
             )
-        e = rms(
-            w.embedding(tokens.astype(mx.uint32)),
-            w.array(p + ".nextn.enorm.weight"),
-            eps,
-        )
-        h = rms(hidden, w.array(p + ".nextn.hnorm.weight"), eps)
         # The head owns its cache, whose positions differ from the trunk's:
         # its own integer offset is the MLA frontier, never the trunk's.
         frontier = cache[0].offset
         if type(frontier) is not int:
             raise ValueError("GLM-5.3 MTP head requires an integer MLA frontier")
-        x = w.linear(p + ".nextn.eh_proj.weight")(mx.concatenate((e, h), axis=-1))
+        x = fuse_mtp(
+            NEXTN_FUSION,
+            w.embedding(tokens.astype(mx.uint32)),
+            hidden,
+            embed_norm=lambda e: rms(e, w.array(p + ".nextn.enorm.weight"), eps),
+            hidden_norm=lambda h: rms(h, w.array(p + ".nextn.hnorm.weight"), eps),
+            projection=w.linear(p + ".nextn.eh_proj.weight"),
+        )
         x = x + m._mla(
             rms(x, w.array(p + ".attn_norm.weight"), eps), cache[0], p, frontier=frontier
         )

@@ -19,6 +19,16 @@ import numpy as np
 
 from ..io_ownership import CloseAction, ReadPool, ReadTimeout, storage_owner
 from ..read_advise import ReadAdvisor
+from ..technologies.embedding_tables import (
+    Affine4RowSpec,
+    EngramSpec,
+    bf16_bits_to_f32,
+    decode_affine4_g32,
+    head_offsets,
+    ngram_hash,
+    ngram_windows,
+    pread_exact,
+)
 
 # Opt-in read-ahead hint (omlx #5274 / #5464 analogue; runtime/read_advise.py):
 # each prefetch worker hints every span of its chunk (all planes of every row)
@@ -69,12 +79,8 @@ class EngramHasher:
             or np.any(self.multipliers > np.iinfo(np.int64).max // self.vocab)
         ):
             raise ValueError("invalid sealed V4.1 Engram hash layout")
-        self.offsets = np.cumsum(
-            np.concatenate(
-                (np.zeros((len(self.rows), 1), np.int64), self.primes[:, :-1]), axis=-1
-            ),
-            axis=-1,
-        )
+        self.offsets = head_offsets(self.primes)
+        self.spec = EngramSpec.from_metadata(metadata, p)
 
     def __call__(self, ids, tail, mask=None):
         ids, tail = np.asarray(ids), np.asarray(tail)
@@ -100,22 +106,9 @@ class EngramHasher:
             compressed[~mask] = -1
         history = np.concatenate((tail[::-1], compressed))
         positions = np.arange(len(ids)) + 3
-        blocked = np.zeros(len(ids), bool)
-        products = []
-        for shift in range(4):
-            current = history[positions - shift]
-            blocked |= current == -1
-            products.append(
-                np.where(blocked, self.pad_id, current)[:, None]
-                * self.multipliers[:, shift]
-            )
-        rolling, output = products[0], []
-        for shift in range(1, 4):
-            rolling = rolling ^ products[shift]
-            output.append(
-                rolling[..., None] % self.primes[:, (shift - 1) * 8 : shift * 8]
-            )
-        hashes = np.concatenate(output, axis=-1) + self.offsets
+        windows = ngram_windows(self.spec, history, positions)  # [n, 4], blocked -> pad
+        hashes = ngram_hash(windows[:, None, :], self.multipliers, self.primes,
+                            self.spec.heads_per_ngram, self.offsets)
         return hashes.astype(np.uint32), history[-3:][::-1].astype(np.int32).copy()
 
 
@@ -192,20 +185,12 @@ def decode_affine4_rows(codes, scales, biases, compact=False):
             or scales.dtype != np.uint16 or biases.dtype != np.uint16
             or scales.shape != (codes.shape[0], 8) or biases.shape != scales.shape):
         raise ValueError("Engram affine rows require U32[32] codes and BF16[8] scales/biases")
-    shifts = np.arange(0, 32, 4, dtype=np.uint32)
-    q = ((codes[:, :, None] >> shifts) & np.uint32(15)).reshape(codes.shape[0], 256).astype(np.float32)
-    as_f32 = lambda v: (v.astype(np.uint32) << 16).view(np.float32)
+    return decode_affine4_g32(_AFFINE4_BITS if compact else _AFFINE4_F32, codes,
+                              bf16_bits_to_f32(scales), bf16_bits_to_f32(biases))
 
-    def bf16(value):
-        bits = np.ascontiguousarray(value, np.float32).view(np.uint32)
-        return ((bits + np.uint32(0x7FFF) + ((bits >> 16) & 1)) & np.uint32(0xFFFF0000)).view(np.float32)
 
-    with np.errstate(over="ignore", invalid="ignore"):
-        values = bf16(q.reshape(-1, 8, 32)*as_f32(scales)[:, :, None]
-                      + as_f32(biases)[:, :, None]).reshape(-1, 256)
-    if not np.isfinite(values).all():
-        raise ValueError("nonfinite decoded Engram row")
-    return (values.view(np.uint32) >> 16).astype(np.uint16) if compact else values
+_AFFINE4_F32 = Affine4RowSpec(dim=256, rounding="bf16_rne", nonfinite="refuse", output="f32")
+_AFFINE4_BITS = Affine4RowSpec(dim=256, rounding="bf16_rne", nonfinite="refuse", output="bf16_bits")
 
 
 def _read_affine_chunk(fd, bases, rows, compact=False, advisor=None):
@@ -216,13 +201,7 @@ def _read_affine_chunk(fd, bases, rows, compact=False, advisor=None):
     for base, size in zip(bases, AFFINE4_ROW_PLANES):
         data = bytearray()
         for row in rows:
-            offset, consumed = base + int(row)*size, 0
-            while consumed < size:
-                block = os.pread(fd, size-consumed, offset+consumed)
-                if not block:
-                    raise OSError("short Engram row read")
-                data.extend(block)
-                consumed += len(block)
+            data.extend(pread_exact(fd, size, base + int(row)*size))
         planes.append(bytes(data))
     count = len(rows)
     return decode_affine4_rows(np.frombuffer(planes[0], "<u4").reshape(count, 32),
@@ -242,13 +221,7 @@ def _read_chunk(fd, base, rows, compact=False, scale_offset=None, advisor=None):
     for row in rows:
         data = bytearray()
         for offset, size in _row_spans(base, row, scale_offset):
-            consumed = 0
-            while consumed < size:
-                block = os.pread(fd, size-consumed, offset+consumed)
-                if not block:
-                    raise OSError("short Engram row read")
-                data.extend(block)
-                consumed += len(block)
+            data.extend(pread_exact(fd, size, offset))
         result.append(bytes(data))
     raw = np.frombuffer(b"".join(result), np.uint8).reshape(-1, 264)
     return decode_engram_bf16(raw) if compact else decode_engram_rows(raw)

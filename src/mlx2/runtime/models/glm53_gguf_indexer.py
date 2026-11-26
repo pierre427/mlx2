@@ -36,6 +36,8 @@ from functools import lru_cache, partial
 
 import mlx.core as mx
 
+from ..technologies import sparse_selection as _sparse
+
 # The indexer key norm is nn.LayerNorm(head_dim, eps=1e-6) in the official
 # modeling_glm5_next.py (GLM-5.3 DSA indexer); every other norm in the graph
 # uses the GGUF's rms_norm_eps (1e-5).  This GGUF carries no
@@ -54,6 +56,15 @@ SELECT_THREADS = 1024
 SCORE_LAWS = ("reference", "fused_v1", "kernel_v1")
 SCORE_KERNEL = "mlx2_glm53_pool_scores_rows_v1"
 SCORE_THREADS = 256
+
+# GLM-5.3 DSA indexer laws (historical values, sparse_selection spec):
+# relu(q.k * d^-1/2) * w summed over heads in the operands' dtype; the
+# default ``argsort`` select law, ``topk_v1`` = the stable chronological law.
+SELECTION_SPEC = _sparse.SelectionSpec(
+    n_heads=HEADS, head_dim=DIM, topk=TOPK, ratio=KPOOL, pooling="gated_softmax",
+    score_layout="blhd_matmul", score_scale_site="pre_relu", score_cast="none",
+    tie_break="argsort", visibility="pool_complete",
+)
 
 _SCHEDULED = Counter()
 _GATE = {"select_kernel_error": None, "score_kernel_error": None}
@@ -114,15 +125,12 @@ def pooled_selection_reference(x, qr, cache, weights, prefix, *, topk=2048, pool
         stop = min(length, start + 128)
         pos = total - length + mx.arange(start, stop)
         if score == "reference":
-            scores = mx.maximum(
-                q[:, start:stop] @ pooled[:, None].swapaxes(-1, -2) * hd**-0.5, 0
-            )
-            scores = (scores * score_weights[:, start:stop, :, None]).sum(axis=2)
+            scores = _sparse.score(SELECTION_SPEC, q[:, start:stop], pooled, score_weights[:, start:stop])
         else:
             scores = pool_scores(q[:, start:stop], score_weights[:, start:stop], pooled, law=score)
         visible = ends[None, None, :] <= pos[None, :, None]
         scores = mx.where(visible, scores, -1e30)
-        selected = mx.argsort(-scores, axis=-1)[..., :count]
+        selected = _sparse.topk(SELECTION_SPEC, scores, count)
         selected_valid = mx.take_along_axis(
             mx.broadcast_to(visible, (b, stop - start, pools)), selected, axis=-1
         )
@@ -281,8 +289,7 @@ def pool_scores(q, score_weights, pooled, *, law="reference"):
     Every law computes the same bits (module docstring, ``score``).
     """
     if law == "reference":
-        scores = mx.maximum(q @ pooled[:, None].swapaxes(-1, -2) * DIM**-0.5, 0)
-        return (scores * score_weights[..., None]).sum(axis=2)
+        return _sparse.score(SELECTION_SPEC, q, pooled, score_weights)
     _check_score(law)
     mm = q @ pooled[:, None].swapaxes(-1, -2)
     if law == "kernel_v1":
@@ -322,22 +329,21 @@ def visible_pools(positions, pools, start=0):
 def stable_topk(scores, count):
     """Exact top ``count`` columns: strictly greater, then ties by ascending index.
 
-    The law of deepseek_v4.stable_pool_topk, re-implemented here so GLM's
-    numerics identity binds GLM files only. Result sorted ascending.
+    The law of deepseek_v4.stable_pool_topk, now one implementation in
+    technologies.sparse_selection. GLM's numerics identity binds that module
+    by path (adapters/glm53_gguf.py and glm53_ast_target.py source lists).
+    Result sorted ascending.
     """
-    columns = scores.shape[-1]
-    if type(count) is not int or not 1 <= count <= columns:
-        raise ValueError("pool top-k must fit the available rows")
-    candidates = mx.argpartition(-scores, kth=count - 1, axis=-1)[..., :count]
-    cutoff = mx.min(mx.take_along_axis(scores, candidates, axis=-1), axis=-1, keepdims=True)
-    better = scores > cutoff
-    tied = scores == cutoff
-    remaining = count - mx.sum(better, axis=-1, keepdims=True)
-    keep = better | (tied & (mx.cumsum(tied.astype(mx.int32), axis=-1) <= remaining))
-    positions = mx.arange(columns, dtype=mx.int32)
-    ordered = mx.where(keep, positions, columns)
-    selected = mx.argpartition(ordered, kth=count - 1, axis=-1)[..., :count]
-    return mx.sort(selected, axis=-1)
+    return _sparse.stable_topk(scores, count)
+
+
+def selection_identity():
+    """sha256 of the GLM spec plus the sparse_selection laws it runs (over-binds).
+
+    Not used by the adapter's file-list identity, which binds
+    src/mlx2/runtime/technologies/sparse_selection.py by path.
+    """
+    return _sparse.implementation_identity(SELECTION_SPEC, laws=("stable_chronological",))
 
 
 def _masked(scores, visible):
@@ -349,7 +355,7 @@ def select_pools(scores, visible, count, *, law):
     """(pool_ids, pool_valid), both (B, L, count); pool_valid = selected score > -inf."""
     masked = _masked(scores, visible)
     if law == "argsort":
-        pool_ids = mx.argsort(-masked, axis=-1)[..., :count].astype(mx.int32)
+        pool_ids = _sparse.topk(SELECTION_SPEC, masked, count).astype(mx.int32)
     elif law in ("topk_v1", "topk_v1_kernel"):
         pool_ids = stable_topk(masked, count).astype(mx.int32)
     else:

@@ -23,6 +23,8 @@ SOURCE_PATHS = (
     "src/mlx2/runtime/models/qwen38_27b.py",
     "src/mlx2/runtime/models/qwen3_5.py",
     "src/mlx2/runtime/models/cache.py",
+    "src/mlx2/runtime/technologies/window_attention/__init__.py", "src/mlx2/runtime/technologies/window_attention/vector_sources.py",
+    "src/mlx2/runtime/technologies/window_attention/vector_launch.py", "src/mlx2/runtime/technologies/dispatch.py",
     "src/mlx2/runtime/hybrid_speculative.py",
     "src/mlx2/adapters/registry.py",
 )

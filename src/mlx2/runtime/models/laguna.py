@@ -21,6 +21,7 @@ from .base import BaseModelArgs, create_attention_mask, scaled_dot_product_atten
 from .cache import KVCache, RotatingKVCache
 from .rope_utils import initialize_rope
 from .switch_layers import SwitchGLU
+from ..technologies.moe_router import cached_spec, route as _route_reference
 
 
 def _kernel_enabled(name: str) -> bool:
@@ -193,16 +194,20 @@ class LagunaTopKRouter(nn.Module):
                 return result
             self.fused_fallbacks += 1
             self.last_fallback = admission.reason
-        if self.score_func == "sqrtsoftplus":
-            scores = mx.sqrt(nn.softplus(logits))
-        else:
-            scores = mx.sigmoid(logits) if self.use_sigmoid else mx.softmax(logits, axis=-1)
-        corrected = scores + self.e_score_correction_bias.astype(scores.dtype)
-        inds = mx.stop_gradient(mx.argpartition(-corrected, kth=self.top_k - 1, axis=-1)[..., :self.top_k])
-        weights = mx.take_along_axis(scores, inds, axis=-1)
-        if self.norm_topk_prob:
-            weights = weights / mx.sum(weights, axis=-1, keepdims=True)
-        return inds, weights.astype(dtype)
+        score_func = (
+            "sqrtsoftplus" if self.score_func == "sqrtsoftplus"
+            else "sigmoid" if self.use_sigmoid else "softmax"
+        )
+        # Legacy law: renormalised without the +1e-20 the other sigmoid
+        # routers add (RouterSpec.norm_eps); logits are already fp32 + capped.
+        spec = cached_spec(
+            top_k=self.top_k, score_func=score_func, softmax_precise=False,
+            use_bias=True, bias_cast="to_scores", topk_method="argpartition_neg",
+            norm_topk_prob=bool(self.norm_topk_prob),
+        )
+        return _route_reference(
+            logits, spec, self.e_score_correction_bias, out_dtype=dtype, prepared=True
+        )
 
 
 class LagunaSparseMoeBlock(nn.Module):

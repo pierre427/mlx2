@@ -38,16 +38,21 @@ from __future__ import annotations
 import mlx.core as mx
 
 from .. import row_exact_verify as REV
-from ..row_exact import ops
+from ..row_exact import ops, recipes
 from ..row_exact.canary import CANARIES, probe_input
+from ..row_exact.spec import RowExactSpec, row_mask
 from .activations import swiglu
-from .base import create_attention_mask
 from .cache import KVCache
 
 STATS = {"windows": 0, "rows": 0, "declined_multi_lane": 0, "inexact_windows": 0,
          "head_strip": 0, "head_per_row": 0}
 LAST = {"routes": None, "failures": None, "head": None}
 _VERDICT_SLOT = "_mlx2_maxwell_row_exact_head_verdicts"
+# The row-exact technology's parameters for Maxwell: rows attend with the
+# trunk cache's own decode mask, the recipe noted after each layer (one lane
+# is ``verify_backbone``'s own guard).
+# ``max_positions`` comes from the checkpoint (``ROW_EXACT_SPEC.with_config``).
+ROW_EXACT_SPEC = RowExactSpec(mask_law="cache_make_mask", route_note="after")
 
 
 def stats(reset: bool = False) -> dict:
@@ -116,19 +121,34 @@ def _layerwise(model, tokens, cache, window):
     if len(cache) != 2 * n:
         raise ValueError(f"Maxwell cache must hold {n} trunk and {n} indexer planes, got {len(cache)}")
     main, index = cache[:n], cache[n:]
+    spec = ROW_EXACT_SPEC.with_config(decoder.args)
+    if spec.max_positions is None:
+        # As before: a config without the limit cannot run this route.
+        raise AttributeError(
+            f"{type(decoder.args).__name__} has no max_position_embeddings; "
+            "the Maxwell row-exact verify needs the context limit"
+        )
     first = main[0]
     reach = first.offset if type(first) is KVCache else getattr(first, "_idx", 0) if first is not None else 0
-    if int(reach) + tokens.shape[1] > decoder.args.max_position_embeddings:
-        raise ValueError(f"Maxwell context exceeds {decoder.args.max_position_embeddings} positions")
+    if int(reach) + tokens.shape[1] > spec.max_positions:
+        raise ValueError(f"Maxwell context exceeds {spec.max_positions} positions")
     xs = _rows(decoder.expand(tokens))
     # Decode computes the mask and the row padding once per step from the
     # first trunk plane before layer 0 writes it.  Layer 0's row r sees that
     # plane in exactly that state, so record them there for every layer.
     masks, paddings = [], []
-    for i, (layer, c, ic) in enumerate(zip(decoder.layers, main, index, strict=True)):
-        xs = _layer_rows(layer, xs, c, ic, masks, paddings, first_layer=i == 0,
-                         dense_limit=decoder.args.dense_context_limit, row_padding=_row_padding)
-        window.note("blocks", "layerwise_exact")
+    order = iter(range(n))
+
+    def layer_rows(layer, rows, planes):
+        c, ic = planes
+        i = next(order)
+        return _layer_rows(layer, rows, c, ic, masks, paddings, first_layer=i == 0,
+                           dense_limit=decoder.args.dense_context_limit, row_padding=_row_padding,
+                           spec=spec)
+
+    recipe = recipes.Recipe("layerwise_exact", layer_rows)
+    xs, _ = recipes.run_layerwise(decoder.layers, lambda layer: recipe, xs, list(zip(main, index)),
+                                  route_note=spec.route_note)
     streams = _cat(xs)
     hidden = _cat([decoder.norm(x) for x in xs])
     model.completed_forwards += 1
@@ -139,7 +159,8 @@ def _linear(module, strip, stage):
     return ops.linear(module, strip, stage=stage)
 
 
-def _layer_rows(layer, xs, cache, index_cache, masks, paddings, *, first_layer, dense_limit, row_padding):
+def _layer_rows(layer, xs, cache, index_cache, masks, paddings, *, first_layer, dense_limit, row_padding,
+                spec=ROW_EXACT_SPEC):
     attn = layer.self_attn
     hc = layer.self_attn_hyper_connection
     pre = [hc.pre(x) for x in xs]
@@ -170,7 +191,7 @@ def _layer_rows(layer, xs, cache, index_cache, masks, paddings, *, first_layer, 
     outs = []
     for r in range(len(xs)):
         if first_layer:
-            masks.append(create_attention_mask(xs[r], cache))
+            masks.append(row_mask(xs[r], cache, spec))
             paddings.append(row_padding(cache, 1, dense_limit))
         sl = slice(r, r + 1)
         row_iq = (lambda r=r: iq_row(r)) if attn.sparse else None

@@ -344,7 +344,12 @@ def _reduced_tiers(policy):
 
 def implementation_identity(policy):
     names = ['adapters/deepseek_v41_source_approx.py', 'runtime/models/deepseek_v41.py',
-             'runtime/models/deepseek_v41_cache.py']
+             'runtime/models/deepseek_v41_cache.py', 'runtime/technologies/sparse_selection.py',
+             'runtime/technologies/hyper_connections.py', 'runtime/technologies/dispatch.py',
+             'runtime/technologies/window_attention/__init__.py', 'runtime/technologies/window_attention/vector_sources.py',
+             'runtime/technologies/window_attention/vector_launch.py',
+             # route_experts (runtime/models/deepseek_v4.py) -> the router reference
+             'runtime/models/deepseek_v4.py', 'runtime/technologies/moe_router.py']
     if policy.get(YOCO_KEY, 'off') != 'off':
         names += ['adapters/deepseek_v41_source_yoco.py', 'runtime/models/deepseek_v41_ced.py']
     if policy.get(ROUTE_KEY, 'off') != 'off':
@@ -357,7 +362,8 @@ def implementation_identity(policy):
             names += ['adapters/deepseek_v41_source_route_bias.py']   # drop_miss reads resident_mask
     elif policy.get(ROUTE_KEY, 'off') != 'off' and _reduced_tiers(policy):
         names += ['adapters/deepseek_v41_source_route_drop.py']   # bias reads resident_or_pooled
-    # De-duplicate in order; an operation alone has no duplicates, so its hash is unchanged.
+    # De-duplicate in order (deepseek_v4.py is in the base since the moe_router
+    # consolidation, so every policy's hash changed once then, ROUTE-only included).
     return _file_identity(list(dict.fromkeys(names)))
 
 

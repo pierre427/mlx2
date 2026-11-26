@@ -53,7 +53,8 @@ def source():
                                     text=True).stdout
     diff = git("diff", "HEAD", "--", "src", "scripts", "tests")
     files = ["src/mlx2/runtime/models/kimi_linear_mla_flash.py",
-             "src/mlx2/runtime/models/kimi_linear.py", "scripts/kimi_flash_law_ab.py"]
+             "src/mlx2/runtime/models/kimi_linear.py", "src/mlx2/runtime/technologies/mla.py",
+             "src/mlx2/runtime/technologies/dispatch.py", "scripts/kimi_flash_law_ab.py"]
     return {"commit": git("rev-parse", "HEAD").strip(), "src_dirty": bool(diff),
             "diff_sha256": hashlib.sha256(diff.encode()).hexdigest() if diff else None,
             "files": {p: hashlib.sha256((ROOT / p).read_bytes()).hexdigest() for p in files}}

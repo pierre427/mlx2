@@ -12,6 +12,7 @@ from functools import lru_cache
 import mlx.core as mx
 
 from .import_env import snapshot as _import_env_snapshot
+from ..technologies import sparse_selection as _sparse
 from .qwen4_qsa_nax import nax_kernel_available
 from .qwen4_qsa_selector import (
     select_scores_direct4,
@@ -948,10 +949,11 @@ def qsa_stage1_select(
             approximate, positions, topk=candidate_count, compress_ratio=compress_ratio
         )
         candidate_keys = mx.take(pooled[0], candidate_ids, axis=0)
-        exact = mx.einsum(
-            "lhd,lcd->lch", q[0].astype(mx.float32), candidate_keys.astype(mx.float32)
+        exact = _sparse.score(
+            _sparse.SelectionSpec(score_layout="lhd_rows_einsum", score_weighting="uniform",
+                                  score_scale_site="divide", score_cast="float32"),
+            q[0], candidate_keys,
         )
-        exact = mx.sum(mx.maximum(exact, 0), axis=-1) / math.sqrt(q.shape[-1])
         # Every selector emits a row's valid blocks first (ascending) and its
         # fill ids after them, so the valid candidates are a slot prefix.
         # Give the refine exactly that prefix as its valid count, by index:
@@ -973,10 +975,11 @@ def qsa_stage1_select(
         )
         selected = mx.take_along_axis(candidate_ids, selected_slots, axis=-1)
     else:
-        scores = mx.einsum(
-            "blhd,bnd->blnh", q.astype(mx.float32), pooled.astype(mx.float32)
+        scores = _sparse.score(
+            _sparse.SelectionSpec(score_layout="blhd_einsum", score_weighting="uniform",
+                                  score_scale_site="divide", score_cast="float32"),
+            q, pooled,
         )
-        scores = mx.sum(mx.maximum(scores, 0), axis=-1) / math.sqrt(q.shape[-1])
         selected = _select_scores(
             scores.reshape(rows, blocks),
             positions,

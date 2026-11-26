@@ -12,6 +12,8 @@ import mlx.core as mx
 
 from ..runtime.models.deepseek_v41 import candidate_blocks
 from ..runtime.models.deepseek_v4 import stable_pool_topk
+from ..runtime.models.deepseek_v41 import INDEX_SPEC
+from ..runtime.technologies import sparse_selection as _sparse
 
 PROFILE = "source_ast_descendant_batched_attention_v1"
 PARENTS = (-1, 0, 1, 2, 3, 4, 0, 6, 7, 8, 9, 0, 11, 12, 13, 14)
@@ -25,7 +27,10 @@ DESCENDANTS = tuple(sum(1 << row for row, path in enumerate(PATHS) if node in pa
 
 
 def implementation_identity():
-    return hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+    # The indexer score and attention merge run in technologies.sparse_selection;
+    # bind its spec-bound law identity (over-binds) with this file's bytes.
+    law = _sparse.implementation_identity(INDEX_SPEC, laws=("gather_attend",))
+    return hashlib.sha256(Path(__file__).read_bytes() + law.encode()).hexdigest()
 
 
 def _copy(value):
@@ -214,8 +219,7 @@ def _select(attn, x, qr, owner, positions, shared):
             weight=linear_tile(m,x,attn.prefix+'indexer.proj.weight')*(c.index_head_dim**-.5*c.index_n_heads**-.5)
             # One common physical key table. Only scalar scores are expanded
             # into query-private chronological order; prefix keys stay shared.
-            score=mx.einsum('bhld,btd->blht',query,owner.index_table)
-            score=mx.sum(mx.maximum(score,0)*weight[...,None],2)[0]
+            score=_sparse.score(INDEX_SPEC,query,owner.index_table,weight)[0]
             score=mx.take_along_axis(score,mapping,axis=1)
             score=mx.where(reachable,score,-mx.inf)
             candidates=candidate_blocks(score[:,None],lenses,c.candidate_topk_blocks,
@@ -267,19 +271,10 @@ def _gather_selected(owner,shared):
 
 def attention_core(q,segments,sinks,selected=None,valid=None):
     """One grouped16-query graph; local table is prefix+private delta once."""
-    query=q.astype(mx.float32)*q.shape[-1]**-.5
-    local=segments.local_table.astype(mx.float32)
-    ls=query@mx.swapaxes(local,-1,-2)
-    ls=mx.where(segments.local_visibility[None,None],ls,-mx.inf)
-    norm=mx.logsumexp(ls,-1,keepdims=True)
+    sources=[_sparse.Source(segments.local_table,segments.local_visibility[None,None])]
     if selected is not None:
-        ps=mx.einsum('bhld,blkd->bhlk',query,selected)
-        ps=mx.where(valid[:,None],ps,-mx.inf)
-        norm=mx.logaddexp(norm,mx.logsumexp(ps,-1,keepdims=True))
-    norm=mx.logaddexp(norm,sinks[None,:,None,None].astype(mx.float32))
-    out=mx.exp(ls-norm)@local
-    if selected is not None:out+=mx.einsum('bhlk,blkd->bhld',mx.exp(ps-norm),selected)
-    return out.astype(q.dtype)
+        sources.append(_sparse.Source(selected,valid[:,None],per_row=True,cast='none'))
+    return _sparse.gather_attend(q,sources,sinks=sinks,scale=q.shape[-1]**-.5,contraction='einsum')
 
 
 def attention_half_tile(block,h,pre,base_cache,layer_segments,shared):

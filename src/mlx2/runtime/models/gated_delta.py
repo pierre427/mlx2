@@ -8,6 +8,21 @@ import mlx.nn as nn
 from .precise_ops import gate_sigmoid
 from . import differentiable as _differentiable
 from . import gdn_state as _gdn_state
+# The pure-MLX recurrence, gate laws and q/k normalization live in the
+# linear-recurrence technology; these names stay importable from here.
+from ..technologies import linear_recurrence as _lr
+from ..technologies.linear_recurrence import (  # noqa: F401
+    _cast_readout,
+    _gated_delta_step_ops,
+    _readout_needs_widening,
+    _saturating_cast,
+    _SATURATING_CASTS,
+    compute_g,
+    compute_g_float32_inputs,
+    compute_lower_bound_g,
+    gated_delta_ops,
+    normalize_gdn_qk,
+)
 
 from .import_env import snapshot as _import_env_snapshot
 
@@ -57,47 +72,6 @@ def gdn_core_status() -> dict:
     }
 
 
-def _readout_needs_widening(input_type, state_type) -> bool:
-    """Whether the fp32 state's range can overflow the activation dtype.
-
-    A dtype with the state's exponent width holds its maximum to within a
-    factor of two (bfloat16: 3.39e38 vs float32 3.40e38); a narrower one is
-    smaller by many orders of magnitude (float16: 65504). So this comparison
-    is the exponent-width test.
-    """
-    if input_type == state_type:
-        return False
-    return mx.finfo(input_type).max < mx.finfo(state_type).max / 2
-
-
-_SATURATING_CASTS = {}
-
-
-def _saturating_cast(dtype):
-    """Compiled clamp-then-cast, so the narrowing is one elementwise pass."""
-    fn = _SATURATING_CASTS.get(dtype)
-    if fn is None:
-        info = mx.finfo(dtype)
-        fn = mx.compile(
-            lambda y, lo=info.min, hi=info.max: mx.clip(y, lo, hi).astype(dtype),
-            shapeless=True,
-        )
-        _SATURATING_CASTS[dtype] = fn
-    return fn
-
-
-def _cast_readout(y, input_type, state_type):
-    """Narrow the readout to the activation dtype, saturating on overflow.
-
-    Every GDN caller feeds the readout straight into a scale-invariant
-    RMSNorm, so one infinite component gives inf/inf = NaN and destroys the
-    layer. Clamping keeps the vector finite and signed. NaN still propagates.
-    """
-    if not _readout_needs_widening(input_type, state_type):
-        return y.astype(input_type)
-    return _saturating_cast(input_type)(y)
-
-
 def _can_use_core_gated_delta(q, k, v, g, state, mask):
     """Whether the fixed MLX primitive covers this exact recurrence layout."""
     if not _ENABLE_GDN_CORE or _core_gated_delta_update is None:
@@ -128,31 +102,12 @@ def _core_layout_supported(q, k, v, g, state):
     )
 
 
-def _chunked_prefill(
-    q, k, v, g, beta, state, mask, chunk_size, stats, segment_rows=256
-):
-    """Long prefill via bounded core scans, carrying the exact returned state.
-
-    This is a separate candidate from MLX_GDN_CORE's historical 17..256
-    admission. It never changes that switch or the scheduler's chunk size.
-    """
-    from ..prefill_plan import recurrence_segments
-
+def _prefill_scan_refusal(q, k, v, g, beta, state, mask, chunk_size):
+    """Why the bounded prefill scan declines this call, or ``None``."""
     if chunk_size == 32:
-        from .gdn_chunk32 import chunk32, refusal
+        from .gdn_chunk32 import refusal
 
-        reason = "short_sequence" if q.shape[1] < _CORE_GDN_MIN_T else refusal(q, k, v, g, beta, state, mask)
-        if reason:
-            if stats is not None:
-                stats["fallback_" + reason] += 1
-            return None
-        result = chunk32(q, k, v, g, beta, state)
-        if stats is not None:
-            stats["calls"] += 1
-            stats["chunk32_calls"] += 1
-            stats["tokens"] += int(q.shape[0]) * int(q.shape[1])
-        return result
-
+        return "short_sequence" if q.shape[1] < _CORE_GDN_MIN_T else refusal(q, k, v, g, beta, state, mask)
     reason = None
     if _core_gated_delta_update is None:
         reason = "primitive_unavailable"
@@ -170,10 +125,22 @@ def _chunked_prefill(
         reason = "unsupported_layout"
     elif chunk_size == 16 and "M5" not in str(mx.device_info().get("device_name", "")):
         reason = "chunk16_requires_m5"
-    if reason is not None:
+    return reason
+
+
+def _prefill_scan_run(q, k, v, g, beta, state, chunk_size, stats, segment_rows=256):
+    """The admitted bounded scan (``_prefill_scan_refusal`` returned None)."""
+    from ..prefill_plan import recurrence_segments
+
+    if chunk_size == 32:
+        from .gdn_chunk32 import chunk32
+
+        result = chunk32(q, k, v, g, beta, state)
         if stats is not None:
-            stats["fallback_" + reason] += 1
-        return None
+            stats["calls"] += 1
+            stats["chunk32_calls"] += 1
+            stats["tokens"] += int(q.shape[0]) * int(q.shape[1])
+        return result
     outputs = []
     for start, end in recurrence_segments(
         int(q.shape[1]), maximum=segment_rows, alignment=chunk_size
@@ -194,6 +161,24 @@ def _chunked_prefill(
         stats["segments"] += len(outputs)
         stats["tokens"] += int(q.shape[0]) * int(q.shape[1])
     return (outputs[0] if len(outputs) == 1 else mx.concatenate(outputs, axis=1), state)
+
+
+def _chunked_prefill(
+    q, k, v, g, beta, state, mask, chunk_size, stats, segment_rows=256
+):
+    """Long prefill via bounded core scans, carrying the exact returned state.
+
+    This is a separate candidate from MLX_GDN_CORE's historical 17..256
+    admission. It never changes that switch or the scheduler's chunk size.
+    The linear-recurrence dispatcher runs the same two halves as its
+    registered ``prefill_scan`` fast path.
+    """
+    reason = _prefill_scan_refusal(q, k, v, g, beta, state, mask, chunk_size)
+    if reason:
+        if stats is not None:
+            stats["fallback_" + reason] += 1
+        return None
+    return _prefill_scan_run(q, k, v, g, beta, state, chunk_size, stats, segment_rows)
 
 
 def install_prefill_scan(model, chunk_size, segment_rows=2048):
@@ -242,29 +227,6 @@ def install_prefill_scan(model, chunk_size, segment_rows=2048):
         "layers": count,
         "counters": stats,
     }
-
-
-@partial(mx.compile, shapeless=True)
-def compute_g(A_log, a, dt_bias):
-    return mx.exp(-mx.exp(A_log.astype(mx.float32)) * nn.softplus(a + dt_bias))
-
-
-@partial(mx.compile, shapeless=True)
-def compute_g_float32_inputs(A_log, a, dt_bias):
-    """Qwen4-Exp decay: widen before the dynamic addition and softplus."""
-    a = a.astype(mx.float32)
-    dt_bias = dt_bias.astype(mx.float32)
-    return mx.exp(-mx.exp(A_log.astype(mx.float32)) * nn.softplus(a + dt_bias))
-
-
-@partial(mx.compile, shapeless=True)
-def compute_lower_bound_g(A_log, a, dt_bias, lower_bound):
-    return mx.exp(
-        lower_bound
-        * mx.sigmoid(
-            mx.exp(A_log.astype(mx.float32)) * (a.astype(mx.float32) + dt_bias)
-        )
-    )
 
 
 def _make_gated_delta_kernel(has_mask=False, vectorized=False, round_state=False):
@@ -387,51 +349,6 @@ _gated_delta_kernel_vec_masked_st16 = _make_gated_delta_kernel(
 _gated_delta_kernel_packed_st16 = _make_gated_delta_packed_kernel(round_state=True)
 
 
-@mx.compile
-def _gated_delta_step_ops(
-    q: mx.array,
-    k: mx.array,
-    v: mx.array,
-    g: mx.array,
-    beta: mx.array,
-    state: mx.array,
-    mask: Optional[mx.array] = None,
-) -> Tuple[mx.array, mx.array]:
-    """
-    Ops-based reference implementation for a single recurrent step.
-
-    Shapes:
-      - q, k: [B, H, Dk]
-      - v: [B, H, Dv]
-      - g: [B, H] or [B, H, Dk]
-      - beta: [B, H]
-      - state: [B, H, Dv, Dk]
-    Returns:
-      - y: [B, H, Dv]
-      - new_state: [B, H, Dv, Dk]
-    """
-    old_state = state
-    if g.ndim == 2:
-        decay = g[..., None, None]
-    elif g.ndim == 3:
-        decay = g[..., None, :]
-    else:
-        raise ValueError(f"Unsupported gating shape {g.shape}")
-    state = state * decay
-    kv_mem = (state * k[..., None, :]).sum(axis=-1)
-    delta = (v - kv_mem) * beta[..., None]
-    state = state + k[..., None, :] * delta[..., None]
-    y = (state * q[..., None, :]).sum(axis=-1)
-    if mask is not None:
-        mask = mx.expand_dims(mask, axis=(1, 2, 3))
-        state = mx.where(mask, state, old_state)
-        # A masked (padding) step contributes nothing: the Metal kernels write
-        # a zero readout there, and the reference must agree so CPU oracles
-        # and CPU/GPU parity hold on left-padded batches.
-        y = mx.where(mask[..., 0], y, mx.zeros_like(y))
-    return (_cast_readout(y, q.dtype, old_state.dtype), state)
-
-
 def _gated_delta_kernel_impl(
     q: mx.array,
     k: mx.array,
@@ -528,78 +445,6 @@ def gated_delta_kernel(
     return _gated_delta_kernel_impl(q, k, v, g, beta, state, mask, allow_packed=True)
 
 
-def gated_delta_ops(
-    q: mx.array,
-    k: mx.array,
-    v: mx.array,
-    g: mx.array,
-    beta: mx.array,
-    state: Optional[mx.array] = None,
-    mask: Optional[mx.array] = None,
-) -> Tuple[mx.array, mx.array]:
-    """
-    Ops-based reference implementation for prompt prefill (sequential loop).
-    Supports both scalar and vectorized gating.
-
-    Shapes:
-      - q, k: [B, T, Hk, Dk]
-      - v: [B, T, Hv, Dv]
-      - g: [B, T, Hv] (scalar) or [B, T, Hv, Dk] (vectorized)
-      - beta: [B, T, Hv]
-      - state: [B, Hv, Dv, Dk]
-    Returns:
-      - y: [B, T, Hv, Dv]
-      - state: [B, Hv, Dv, Dk]
-    """
-    (B, T, Hk, Dk) = q.shape
-    (Hv, Dv) = v.shape[-2:]
-    if state is None:
-        state = mx.zeros((B, Hv, Dv, Dk), dtype=mx.float32)
-    if (repeat_factor := (Hv // Hk)) > 1:
-        q = mx.repeat(q, repeat_factor, -2)
-        k = mx.repeat(k, repeat_factor, -2)
-    # fp16 storage class: each step loads fp16, computes in fp32 and stores
-    # fp16 (the kernels' per-token rounding).
-    stored = state.dtype if state.dtype == mx.float16 else None
-    if stored is not None:
-        _gdn_state.STATS["ops_calls"] += 1
-    ys = []
-    for t in range(T):
-        (y, state) = _gated_delta_step_ops(
-            q[:, t],
-            k[:, t],
-            v[:, t],
-            g[:, t],
-            beta[:, t],
-            state if stored is None else state.astype(mx.float32),
-            None if mask is None else mask[:, t],
-        )
-        if stored is not None:
-            state = state.astype(stored)
-        ys.append(y)
-    y = mx.stack(ys, axis=1)
-    return (y, state)
-
-
-def normalize_gdn_qk(q: mx.array, k: mx.array) -> Tuple[mx.array, mx.array]:
-    """L2-normalize GDN q/k and fold in the delta-rule query scale.
-
-    Matches the reference FLA l2norm, ``x * rsqrt(sum(x^2) + 1e-6)``, followed
-    by the delta rule's ``scale = head_dim ** -0.5`` applied to the query only.
-
-    ``mx.fast.rms_norm(x, None, eps)`` computes ``x / sqrt(mean(x^2) + eps)``,
-    i.e. it adds eps to the MEAN of squares, so the equivalent epsilon is
-    ``1e-6 / head_dim``. Passing ``1e-6`` straight through inflates the
-    effective epsilon on the sum by head_dim (128x at head_dim=128), which
-    systematically shrinks q/k whenever their norm is small.
-    """
-    inv_scale = k.shape[-1] ** (-0.5)
-    eps = 1e-06 * inv_scale**2
-    q = inv_scale**2 * mx.fast.rms_norm(q, None, eps)
-    k = inv_scale * mx.fast.rms_norm(k, None, eps)
-    return (q, k)
-
-
 def gated_delta_update(
     q: mx.array,
     k: mx.array,
@@ -622,58 +467,35 @@ def gated_delta_update(
 ) -> Tuple[mx.array, mx.array]:
     """``state_dtype``: the layer's storage class (``gdn_state``); ``None``
     is fp32.  A fresh state is created in it and a carried state of the
-    other class is refused."""
-    beta = gate_sigmoid(b) if beta_input_dtype else gate_sigmoid(b.astype(mx.float32))
+    other class is refused.
+
+    The GDN entry of the linear-recurrence technology: the flags name the
+    spec's decay/beta laws (``lower_bound`` -> ``lower_bound_sigmoid``,
+    ``decay_input_float32`` -> ``softplus_float32_inputs``,
+    ``beta_input_dtype`` -> ``gate_sigmoid_input``) and the recurrence runs
+    through ``linear_recurrence.recurrence``.
+    """
+    beta = _lr.beta("gate_sigmoid_input" if beta_input_dtype else "gate_sigmoid_float32", b)
     if lower_bound is None:
-        g = (
-            compute_g_float32_inputs(A_log, a, dt_bias)
-            if decay_input_float32
-            else compute_g(A_log, a, dt_bias)
-        )
+        law = "softplus_float32_inputs" if decay_input_float32 else "softplus"
     else:
-        g = compute_lower_bound_g(A_log, a, dt_bias, lower_bound)
+        law = "lower_bound_sigmoid"
+    g = _lr.decay(law, A_log, a, dt_bias, lower_bound)
     if state is None:
         (B, _, Hk, Dk) = q.shape
         (Hv, Dv) = v.shape[-2:]
         state = mx.zeros((B, Hv, Dv, Dk), dtype=state_dtype or mx.float32)
     else:
         _gdn_state.check_state(state, state_dtype)
-    if (not use_kernel or _differentiable.routed("gated_delta") or mx.default_device() != mx.gpu
-            or (not mx.metal.is_available())):
-        # The ops reference: CPU, training mode, and gradient traces (a Metal
-        # kernel launch has no VJP; runtime/models/differentiable.py).
-        return gated_delta_ops(q, k, v, g, beta, state, mask)
-    if prefill_chunk_size:
-        if type(prefill_chunk_size) is not int or prefill_chunk_size not in (8, 16, 32):
-            raise ValueError("prefill_chunk_size must be 0, 8, 16 or 32")
-        result = _chunked_prefill(
-            q,
-            k,
-            v,
-            g,
-            beta,
-            state,
-            mask,
-            prefill_chunk_size,
-            prefill_stats,
-            prefill_segment_rows,
-        )
-        if result is not None:
-            return result
     # A speculative strip and every accepted-prefix replay must share the
     # one-token recurrence. The core scan changes arithmetic with row count
-    # (notably across its 17-row admission boundary).
-    if allow_core and _can_use_core_gated_delta(q, k, v, g, state, mask):
-        _count_gdn_core_call()
-        chunking = {"chunk_size": _CORE_GDN_CHUNK_SIZE} if _CORE_ACCEPTS_CHUNK_SIZE else {}
-        return _core_gated_delta_update(
-            q,
-            k,
-            v,
-            g,
-            beta,
-            initial_state=state,
-            stream=mx.gpu,
-            **chunking,
-        )
-    return gated_delta_kernel(q, k, v, g, beta, state, mask)
+    # (notably across its 17-row admission boundary); callers pass
+    # allow_core=False there.
+    return _lr.recurrence(
+        q, k, v, g, beta, state, mask,
+        use_kernel=use_kernel,
+        allow_core=allow_core,
+        prefill_chunk_size=prefill_chunk_size,
+        prefill_segment_rows=prefill_segment_rows,
+        prefill_stats=prefill_stats,
+    )

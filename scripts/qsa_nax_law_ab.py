@@ -75,6 +75,8 @@ def source():
                               text=True, check=True).stdout
     diff = git("diff", "HEAD", "--", "src", "scripts", "tests")
     files = ["src/mlx2/runtime/models/qwen4_qsa_nax.py", "src/mlx2/runtime/models/qwen4_exp.py",
+             "src/mlx2/runtime/technologies/embedding_tables.py",
+             "src/mlx2/runtime/technologies/dispatch.py",
              "scripts/qsa_nax_law_ab.py"]
     return {
         "commit": git("rev-parse", "HEAD").strip(),

@@ -25,6 +25,12 @@ flat stream before the mixing matmul, so the kernels differ.
 
 from functools import lru_cache
 
+from mlx2.runtime.technologies.hyper_connections import (
+    expand_lines as _expand_lines,
+    split_sinkhorn_body as _split_sinkhorn_body,
+    weighted_sum_lines as _weighted_sum_lines,
+)
+
 POLICY = "mega_v1"
 LANES = True  # lane-parallel Sinkhorn (False: the serial body on one thread)
 FLAT_FMA = True  # flat (looped) rms_norm accumulation as fma(v, v, acc)
@@ -37,50 +43,15 @@ _HEADER = r"""
 // Verbatim pieces (default FP options, as deepseek_v4_hc's kernels).
 template<typename M, typename S, typename B>
 inline void glm_hc_split(M mixes, S scale, B base, float e, uint ITERS, threadgroup float *out) {
-    float c[16];
-    for(uint i=0;i<4;i++) {
-      const float pre=mixes[i]*scale[0]+base[i];
-      const float post=mixes[4+i]*scale[1]+base[4+i];
-      out[i]=1.0f/(1.0f+exp(-pre))+e;
-      out[4+i]=2.0f/(1.0f+exp(-post));
-    }
-    for(uint r=0;r<4;r++) {
-      float maximum=-INFINITY;
-      for(uint s=0;s<4;s++) { c[r*4+s]=mixes[8+r*4+s]*scale[2]+base[8+r*4+s]; maximum=max(maximum,c[r*4+s]); }
-      float sum=0.0f;
-      for(uint s=0;s<4;s++) { c[r*4+s]=exp(c[r*4+s]-maximum); sum+=c[r*4+s]; }
-      for(uint s=0;s<4;s++) c[r*4+s]=c[r*4+s]/sum+e;
-    }
-    for(uint s=0;s<4;s++) {
-      float sum=0.0f;
-      for(uint r=0;r<4;r++) sum+=c[r*4+s];
-      for(uint r=0;r<4;r++) c[r*4+s]/=(sum+e);
-    }
-    for(uint it=1;it<ITERS;it++) {
-      for(uint r=0;r<4;r++) {
-        float sum=0.0f;
-        for(uint s=0;s<4;s++) sum+=c[r*4+s];
-        for(uint s=0;s<4;s++) c[r*4+s]/=(sum+e);
-      }
-      for(uint s=0;s<4;s++) {
-        float sum=0.0f;
-        for(uint r=0;r<4;r++) sum+=c[r*4+s];
-        for(uint r=0;r<4;r++) c[r*4+s]/=(sum+e);
-      }
-    }
-    for(uint i=0;i<16;i++) out[8+i]=c[i];
-}
+""" + _split_sinkhorn_body(row_offset="", indent="    ") + r"""}
 template<typename V>
 inline float glm_hc_sum(V value, threadgroup const float *weights, uint d, uint DIMS) {
-    float sum=0.0f;
-    for(uint h=0;h<4;h++) sum+=value[h*DIMS+d]*weights[h];
-    return sum;
+""" + _weighted_sum_lines(value_index="h*DIMS+d", weight_index="h", indent="    ") + r"""    return sum;
 }
 template<typename Br, typename R, typename P, typename C>
 inline float glm_hc_expand(Br branch, R residual, P post, C comb, uint h, uint d, uint DIMS) {
-    float sum=branch[d]*post[h];
-    for(uint s=0;s<4;s++) sum+=residual[s*DIMS+d]*comb[s*4+h];
-    return sum;
+""" + _expand_lines(branch_index="d", post_index="h", residual_index="s*DIMS+d",
+                   comb_index="s*4+h", indent="    ") + r"""    return sum;
 }
 // Lane-parallel form of glm_hc_split for simdgroup 0: lane e<16 owns comb
 // element (r,s)=(e/4,e%4), lanes 16..19 pre, 20..23 post. Each four-term sum

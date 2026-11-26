@@ -86,6 +86,12 @@ from mlx import nn
 from .. import row_exact
 from .. import row_exact_verify as REV
 from ..row_exact import ops
+from ..row_exact.spec import (
+    RowExactSpec,
+    merge_window_routes,
+    ordinary_b1_mask,
+    serial_attention_rows,
+)
 from ..segmented_plain_kv import SegmentedBatchKVCache
 from . import row_exact_qmv as REQ
 from .base import create_causal_mask
@@ -106,6 +112,15 @@ ORDINARY_TERMINAL_PROTOCOL = "committed-stock-ordinary-terminal-v1"
 # cohort forward is bounded to 2..8 lanes and 16 rows as well).
 MAX_PHYSICAL_LANES = 8
 MAX_TOKEN_ROWS = 16
+# The row-exact technology's parameters for the Qwen hybrids.  An offset
+# that is an ``mx.array`` (a B=1 ``BatchKVCache``) has no host mask here, so
+# such a cache fails closed (``attention_b1s1_cache_contract_unavailable``);
+# Flash-Next reads its ``_idx`` instead (docs/technologies/row_exact.md).
+ROW_EXACT_SPEC = RowExactSpec(
+    mask_law="ordinary_b1_explicit",
+    array_offset="refuse",
+    host_offset="integral",
+)
 GPU_EVIDENCE = (
     "focused_q8_qwen36_moe_pass;_full_route_metal_bitwise_widths_1_2_4_8_pending"
 )
@@ -119,10 +134,17 @@ SOURCE_PATHS = (
     "src/mlx2/runtime/models/gdn_kernel_contract.py",
     "src/mlx2/runtime/models/gdn_state.py",
     "src/mlx2/runtime/models/qwen3_5.py",
+    "src/mlx2/runtime/technologies/linear_recurrence.py",
+    "src/mlx2/runtime/technologies/dispatch.py",
+    "src/mlx2/runtime/models/differentiable.py",
     "src/mlx2/runtime/models/qwen3_next.py",
+    "src/mlx2/runtime/technologies/moe_router.py",
+    
     "src/mlx2/runtime/models/cache.py",
     "src/mlx2/runtime/models/qwen4_attn_rows.py",
     "src/mlx2/runtime/models/qwen4_attn_window.py",
+    "src/mlx2/runtime/technologies/window_attention/__init__.py", "src/mlx2/runtime/technologies/window_attention/vector_sources.py",
+    "src/mlx2/runtime/technologies/window_attention/vector_launch.py", 
     "src/mlx2/runtime/models/row_exact_components.py",
     "src/mlx2/runtime/row_exact/ops.py",
     "src/mlx2/runtime/row_exact/canary.py",
@@ -167,10 +189,7 @@ def _ordinary_b1_mask(cache):
     gives none, and MLX's SDPA need not produce the same bits for the two.
     ``None`` when the physical offset is not a host integer.
     """
-    offset = getattr(cache, "offset", None)
-    if not isinstance(offset, Integral):
-        return None
-    return create_causal_mask(1, offset=int(offset), left_padding=mx.array([0]))
+    return ordinary_b1_mask(cache, ROW_EXACT_SPEC)
 
 
 def _fused_runtime_supported() -> bool:
@@ -361,23 +380,21 @@ class RowExactQwen3NextAttentionMixin:
                     )
                     continue
                 window.note("attention_window_fallback", reason)
-            outputs = []
-            for position in range(valid):
-                row_mask = _ordinary_b1_mask(row_cache)
-                if row_mask is None:
-                    window.fail("attention_offset_not_host")
-                    return None
-                outputs.append(
-                    self._attend(
-                        q_all[lane : lane + 1, position : position + 1],
-                        k_all[lane : lane + 1, position : position + 1],
-                        v_all[lane : lane + 1, position : position + 1],
-                        1,
-                        1,
-                        row_mask,
-                        row_cache,
-                    )
-                )
+            outputs = serial_attention_rows(
+                self._attend,
+                q_all,
+                k_all,
+                v_all,
+                row_cache,
+                lambda _row, row_cache=row_cache: _ordinary_b1_mask(row_cache),
+                start=0,
+                length=valid,
+                lane=lane,
+                refuse_missing_mask=ROW_EXACT_SPEC.refuses_missing_mask,
+            )
+            if outputs is None:
+                window.fail("attention_offset_not_host")
+                return None
             if outputs:
                 output = mx.concatenate(outputs, axis=1)
             else:
@@ -1081,12 +1098,7 @@ class QwenHybridRowExactRoute:
             counts["physical_width_hist"][key] = (
                 counts["physical_width_hist"].get(key, 0) + 1
             )
-            for stage, routes in record.stages.items():
-                target = counts["stages"].setdefault(stage, {})
-                for route, n in routes.items():
-                    target[route] = target.get(route, 0) + n
-            for reason, n in record.failures.items():
-                counts["failures"][reason] = counts["failures"].get(reason, 0) + n
+            merge_window_routes(counts, record)
             launch = counts["launches"]
         return ProgressiveTargetRows(
             logits=logits,

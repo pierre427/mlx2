@@ -13,11 +13,14 @@ import mlx.core as mx
 from mlx import nn
 
 from ..segmented_plain_kv import SegmentedBatchKVCache
+from ..technologies import mla as _mla
 from . import bailing_hybrid as ling
 from . import moe_nax_gather
 from .base import scaled_dot_product_attention
 from .cache import BatchKVCache, KVCache
-from .gated_delta import gated_delta_kernel, gated_delta_ops
+from ..technologies import linear_recurrence as _lr
+from ..technologies.linear_recurrence import kda_gates  # noqa: F401  (kimi_tree imports it here)
+from ..technologies.moe_router import cached_spec, route as _route_reference
 
 
 @dataclass
@@ -67,11 +70,23 @@ class SegmentedCausal:
     array: mx.array
 
 
+# Kimi Linear's KDA laws: FLA's unbounded softplus log-decay gate, fp32 l2
+# q/k (epsilon on the SUM, no bf16 round before the scan), separate q/k/v
+# short convolutions, a vector gate and the finite log decay for chunk_wy.
+KIMI_KDA_LAWS = dict(
+    gate_kind="vector", decay_law="log_softplus", beta_law="sigmoid_float32",
+    qk_norm="l2_rsqrt", qk_norm_dtype="float32", conv_layout="separate_qkv",
+    lower_bound=None, core_scan=False, chunk_log_decay="finite",
+)
+_KIMI_QK = _lr.LinearRecurrenceSpec(num_k_heads=1, num_v_heads=1, **KIMI_KDA_LAWS)
+# Which registered recurrence path ran -> the module's call counter.
+_RECURRENCE_COUNTERS = {"chunk_wy": "chunk_wy", "chunk32": "chunk32",
+                        "step_kernel": "vector_kernel", "reference": "reference"}
+
+
 def l2_qk(q, k):
     # FLA normalizes in fp32, epsilon on SUM, with no bf16 round before scan.
-    q, k = q.astype(mx.float32), k.astype(mx.float32)
-    return (q * mx.rsqrt(mx.sum(q * q, -1, keepdims=True) + 1e-6) * q.shape[-1]**-0.5,
-            k * mx.rsqrt(mx.sum(k * k, -1, keepdims=True) + 1e-6))
+    return _lr.normalize_qk(_KIMI_QK, q, k)
 
 
 class RMSNorm(nn.RMSNorm):
@@ -126,16 +141,6 @@ def dense_weight(linear, dtype=None):
     return cache[key[1]]
 
 
-@mx.compile
-def kda_gates(a, beta, a_log, dt_bias):
-    shifted = a.astype(mx.float32) + dt_bias.astype(mx.float32)
-    # Stable softplus; checkpoint FLA gate returns log-decay in fp32.
-    softplus = mx.maximum(shifted, 0) + mx.log1p(mx.exp(-mx.abs(shifted)))
-    # Log decay stays finite where exp() of it underflows to zero.
-    return (-mx.exp(a_log.astype(mx.float32)) * softplus,
-            mx.sigmoid(beta.astype(mx.float32)))
-
-
 class KimiDeltaAttention(ling.KimiDeltaAttention):
     def __init__(self, args):
         linear = args.linear_attn_config
@@ -148,6 +153,7 @@ class KimiDeltaAttention(ling.KimiDeltaAttention):
         self.chunk32 = False
         self.chunk_wy = False
         self.norm_rounding = "fla_fp32"
+        self.recurrence_spec = _lr.LinearRecurrenceSpec.from_config(args, **KIMI_KDA_LAWS)
 
     def prepare_projections(self):
         # SGLang's qkv/beta/f_a/g_a GEMM and batched f_b/g_b mechanism.
@@ -200,9 +206,9 @@ class KimiDeltaAttention(ling.KimiDeltaAttention):
             v, states[2] = self.v_conv1d(v, states[2], mask, lengths)
         q, k, v = [z.reshape(b, t, h, d) for z in (q, k, v)]
         q, k = l2_qk(q, k)
-        log_decay, beta = kda_gates(a.reshape(b, t, h, d), beta,
-                                    self.A_log.reshape(h, 1), self.dt_bias.reshape(h, d))
-        decay = mx.exp(log_decay)
+        gates = _lr.gates(self.recurrence_spec, a.reshape(b, t, h, d), beta,
+                          self.A_log.reshape(h, 1), self.dt_bias.reshape(h, d))
+        decay, beta, log_decay = gates.decay, gates.beta, gates.log_decay
         state = states[3]
         if state is None:
             state = mx.zeros((b, h, d, d), dtype=mx.float32)
@@ -212,20 +218,11 @@ class KimiDeltaAttention(ling.KimiDeltaAttention):
             self._record_rollback(cache, t, spans, snapshot, raw, mask,
                                   (q, k, v, decay, beta), state, b)
         chunked = t >= 17 and mask is None and not getattr(cache, "speculating", False)
-        if self.chunk_wy and chunked:
-            from .kda_chunk_wy import chunk_wy
-            out, state = chunk_wy(q, k, v, log_decay, beta, state)
-            self.calls["chunk_wy"] += 1
-        elif self.chunk32 and chunked:
-            from .gdn_chunk32 import chunk32
-            out, state = chunk32(q, k, v, decay, beta, state)
-            self.calls["chunk32"] += 1
-        elif not self.reference and mx.default_device() == mx.gpu:
-            out, state = gated_delta_kernel(q, k, v, decay, beta, state, mask)
-            self.calls["vector_kernel"] += 1
-        else:
-            out, state = gated_delta_ops(q, k, v, decay, beta, state, mask)
-            self.calls["reference"] += 1
+        chunk = ("wy" if self.chunk_wy else "chunk32" if self.chunk32 else None) if chunked else None
+        out, state, receipt = _lr.recurrence(
+            q, k, v, decay, beta, state, mask, use_kernel=not self.reference,
+            allow_core=False, chunk=chunk, log_decay=log_decay, with_receipt=True)
+        self.calls[_RECURRENCE_COUNTERS[receipt.selected]] += 1
         if cache is not None:
             for i in range(3):
                 cache[i] = states[i]
@@ -264,7 +261,8 @@ class KimiDeltaAttention(ling.KimiDeltaAttention):
         # FLA writes recurrence output in the value dtype before gated norm.
         out = out.astype(dtype)
         gate = gate.reshape(b, t, h, d)
-        if self.fused_norm and mx.default_device() == mx.gpu and out.dtype == mx.bfloat16:
+        if (self.fused_norm and mx.default_device() == mx.gpu and out.dtype == mx.bfloat16
+                and not _lr.kernel_refused("kda_fused")):
             if self.norm_rounding == "qwen_bf16":
                 from .qwen4_fused_gdn_prefill import qwen4_gdn_prefill_norm_gate
                 out = qwen4_gdn_prefill_norm_gate(out,gate,self.o_norm.weight,self.o_norm.eps,
@@ -286,9 +284,8 @@ class KimiDeltaAttention(ling.KimiDeltaAttention):
 
     def _recurrence(self, q, k, v, decay, beta, state, mask):
         """The ordinary one-token-law recurrence (never a chunked candidate)."""
-        if not self.reference and mx.default_device() == mx.gpu:
-            return gated_delta_kernel(q, k, v, decay, beta, state, mask)
-        return gated_delta_ops(q, k, v, decay, beta, state, mask)
+        return _lr.recurrence(q, k, v, decay, beta, state, mask,
+                              use_kernel=not self.reference, allow_core=False)
 
     def _record_rollback(self, cache, t, spans, snapshot, raw, mask, scan, state, b):
         """Stage an exact ``ArraysCache`` rollback for this forward.
@@ -339,7 +336,11 @@ class MultiLatentAttention(nn.Module):
         self.kv_a_layernorm = RMSNorm(c, eps=1e-6)
         self.kv_b_proj = nn.Linear(c, h * (n+v), bias=False)
         self.o_proj = nn.Linear(h * v, args.hidden_size, bias=False)
-        self.scale = (n+r)**-0.5
+        # NoPE: the "rope" channels are a shared, unrotated key slice.
+        self.mla_spec = _mla.MLASpec.from_config(
+            args, mscale_rule="none", absorbed_rule="policy", pe_form="split_fp32",
+            expanded_pe_form="concat_key", sdpa_route="base")
+        self.scale = self.mla_spec.softmax_scale
         self.policy = "expanded"
         # Opt-in training law; the session restores this separately from the
         # ordinary serving policy. See provenance/kimi-mla-training-padded.json.
@@ -588,21 +589,14 @@ class MultiLatentAttention(nn.Module):
             return out.reshape(b, t, h, v).transpose(0, 2, 1, 3)
         else:
             kv = self.kv_b_proj(latent[:, 0]).reshape(b, -1, h, n+v).transpose(0, 2, 1, 3)
-            keys, values = mx.split(kv, [n], -1)
-            shared = mx.broadcast_to(shared, (b, h, shared.shape[2], r))
             if self.policy == "auto" and self._fused_d256(q, mask):
                 # MLX fuses no 192/128 prefill; the NAX D256 kernel is exact
                 # for zero-padded columns and never materializes the scores.
-                def pad(z, d):
-                    return mx.concatenate([z, mx.zeros((*z.shape[:-1], d), z.dtype)], -1)
-                keys = mx.concatenate([keys, shared, mx.zeros((*keys.shape[:-1], 256-n-r), keys.dtype)], -1)
-                out = mx.fast.scaled_dot_product_attention(
-                    pad(q, 256-n-r), keys, pad(values, 256-v), scale=self.scale, mask=mask,
-                    force_fused=True)[..., :v]
+                out = _mla.expanded_concat_attention(q, kv, shared, mask, scale=self.scale, nope=n,
+                                                     pad_to=256)
                 self.calls["expanded_fused_d256"] += 1
             else:
-                keys = mx.concatenate([keys, shared], -1)
-                out = scaled_dot_product_attention(q, keys, values, cache=None, scale=self.scale, mask=mask)
+                out = _mla.expanded_concat_attention(q, kv, shared, mask, scale=self.scale, nope=n)
             self.calls["expanded_sdpa"] += 1
         return out
 
@@ -688,11 +682,6 @@ class MultiLatentAttention(nn.Module):
         # built from positions for the block each pass reads, never whole:
         # a [rows, context] bool mask is 8 GiB at 8192 x 1M. Values equal
         # the explicit mask's slices, so results are bit-identical.
-        causal = isinstance(mask, str)
-        offset = latent.shape[2] - q.shape[2]
-
-        def visible(r0, r1, k0, k1):
-            return mx.arange(offset+r0, offset+r1)[:, None] >= mx.arange(k0, k1)[None, :]
         # GLM/DS phase split: absorb K projection, attend on one latent per
         # token, then unabsorb V. Bounded online softmax avoids O(context*rows)
         # score storage and full-prefix expanded K/V, including at 1M.
@@ -710,54 +699,23 @@ class MultiLatentAttention(nn.Module):
                 result = attend(qn,qs,latent,shared).astype(q.dtype)
                 return result @ w[:,n:].swapaxes(-1,-2)
             self.calls["fused_mla_declined"] += 1
-        if policy == "latent_single" and q.size // q.shape[-1] * latent.shape[2] * 4 <= self.single_score_bytes:
+        if policy == "latent_single" and _mla.latent_single_fits(q, latent, self.single_score_bytes):
             # One pass over the latent cache: the same FP32 score/softmax law
             # as one key tile, without O(context/key_tile) launches per row.
-            score = ((qn @ latent.swapaxes(-1, -2)).astype(mx.float32)
-                     + (qs @ shared.swapaxes(-1, -2)).astype(mx.float32)) * self.scale
-            if causal:
-                # [rows, width] bool: at most single_score_bytes / (4*B*H),
-                # a quarter of one head's share of the bounded score block.
-                score = mx.where(visible(0, q.shape[2], 0, latent.shape[2]), score, -float("inf"))
-            elif mask is not None:
-                score = mx.where(mask, score, -float("inf"))
             # A fully masked (padding) row yields zeros, as in the tiled law.
-            top = score.max(-1, keepdims=True)
-            prob = mx.exp(score - mx.where(mx.isfinite(top), top, 0))
-            total = mx.maximum(prob.sum(-1, keepdims=True), 1e-30)
             self.calls["latent_single"] += 1
-            return ((prob @ latent.astype(mx.float32)) / total).astype(q.dtype) @ w[:, n:].swapaxes(-1, -2)
+            return _mla.latent_softmax_single(
+                qn, qs, latent, shared, mask, scale=self.scale, out_dtype=q.dtype,
+            ) @ w[:, n:].swapaxes(-1, -2)
         if policy == "latent_single":
             # Over the score bound: same law in key tiles, with its own receipt.
             self.calls["latent_single_tiled"] += 1
         else:
             # The tiled loop proper: latent_tiled, or latent_fused declined.
             self.calls["latent_tiled"] += 1
-        pieces = []
-        for start in range(0, q.shape[2], 64):
-            end = min(start+64, q.shape[2])
-            qn_tile, qs_tile = qn[:, :, start:end], qs[:, :, start:end]
-            maximum = mx.full((*qn_tile.shape[:-1], 1), -float("inf"), dtype=mx.float32)
-            total = mx.zeros_like(maximum)
-            accum = mx.zeros((*qn_tile.shape[:-1], a.kv_lora_rank), dtype=mx.float32)
-            for k0 in range(0, latent.shape[2], self.key_tile):
-                k1 = min(k0+self.key_tile, latent.shape[2])
-                score = ((qn_tile @ latent[:, :, k0:k1].swapaxes(-1, -2)).astype(mx.float32)
-                         + (qs_tile @ shared[:, :, k0:k1].swapaxes(-1, -2)).astype(mx.float32)) * self.scale
-                if causal:
-                    score = mx.where(visible(start, end, k0, k1), score, -float("inf"))
-                elif mask is not None:
-                    score = mx.where(mask[..., start:end, k0:k1], score, -float("inf"))
-                new_max = mx.maximum(maximum, score.max(-1, keepdims=True))
-                safe_max = mx.where(mx.isfinite(new_max), new_max, 0)
-                alpha = mx.exp(maximum-safe_max)
-                prob = mx.exp(score-safe_max)
-                accum = accum * alpha + prob @ latent[:, :, k0:k1].astype(mx.float32)
-                total = total * alpha + prob.sum(-1, keepdims=True)
-                maximum = new_max
-            result = (accum / mx.maximum(total, 1e-30)).astype(q.dtype) @ w[:, n:].swapaxes(-1, -2)
-            pieces.append(result)
-        return mx.concatenate(pieces, axis=2)
+        return _mla.latent_softmax_tiled(
+            qn, qs, latent, shared, mask, scale=self.scale, out_dtype=q.dtype,
+            key_tile=self.key_tile, finish=lambda result: result @ w[:, n:].swapaxes(-1, -2))
 
 
 class Gate(ling.Gate):
@@ -778,22 +736,23 @@ class Gate(ling.Gate):
         self.calls["router_tokens"] += x.size // x.shape[-1]
         # Source F.linear widens operands BEFORE GEMM, not just logits.
         logits = x.astype(mx.float32) @ dense_weight(self.gate_proj, mx.float32).T
-        scores = mx.sigmoid(logits)
-        choice = scores + self.expert_bias
         if self.n_group != 1:
             raise ValueError("staged Kimi router supports the checkpoint's single expert group")
-        ids = mx.argpartition(-choice, kth=self.top_k-1, axis=-1)[..., :self.top_k]
+        # modeling_kimi.py aliases scores.view() then += correction bias;
+        # its gather therefore sees corrected scores. SGLang/vLLM use the
+        # conventional uncorrected combine scores. Keep the discrepancy named
+        # (RouterSpec.combine_scores).
+        spec = cached_spec(
+            top_k=self.top_k, score_func="sigmoid", use_bias=True,
+            combine_scores="biased" if self.combine == "checkpoint" else "unbiased",
+            topk_method="argpartition_neg", norm_topk_prob=bool(self.norm_topk_prob),
+            norm_eps=1e-20, routed_scaling_factor=float(self.routed_scaling_factor),
+        )
+        ids, weights = _route_reference(logits, spec, self.expert_bias)
         if self.training_indices:
             # Expert selection is discrete; combine scores remain differentiable.
             ids = mx.stop_gradient(ids)
-        # modeling_kimi.py aliases scores.view() then += correction bias;
-        # its gather therefore sees corrected scores. SGLang/vLLM use the
-        # conventional uncorrected combine scores. Keep the discrepancy named.
-        source = choice if self.combine == "checkpoint" else scores
-        weights = mx.take_along_axis(source, ids, -1)
-        if self.norm_topk_prob:
-            weights = weights / (weights.sum(-1, keepdims=True) + 1e-20)
-        return ids, weights * self.routed_scaling_factor
+        return ids, weights
 
 
 class SparseMoeBlock(ling.SparseMoeBlock):

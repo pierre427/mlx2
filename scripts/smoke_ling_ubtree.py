@@ -125,7 +125,10 @@ def main() -> None:
                 "src/mlx2/runtime/drafters/ubtree.py",
                 "src/mlx2/runtime/drafters/ubtree_tree.py",
                 "src/mlx2/runtime/hybrid_tree_executor.py",
+                "src/mlx2/runtime/technologies/tree_verify.py",
                 "src/mlx2/runtime/models/bailing_hybrid.py",
+                "src/mlx2/runtime/technologies/mla.py",
+                "src/mlx2/runtime/technologies/dispatch.py",
                 "scripts/smoke_ling_ubtree.py",
             )
         },

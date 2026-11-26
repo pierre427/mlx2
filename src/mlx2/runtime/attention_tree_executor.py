@@ -27,43 +27,36 @@ parent-indexed state kernel (the Qwen hybrids have TensorFold's).
 
 from __future__ import annotations
 
-import hashlib
 from pathlib import Path
 
 import mlx.core as mx
 
 from .models.cache import KVCache, RotatingKVCache
 from .target_tree_executor import TargetTreeDispatchMetrics
+from .technologies.tree_verify import (
+    TECHNOLOGY_SOURCES,
+    SourceBoundRevision,
+    TreeTopology,
+    legacy_topology,
+    revision_token,
+)
 
 PROTOCOL = "attention_tree_v1"
 TREE_LAW_ID = "attention-tree-module-masked-sdpa-v1"
 _ABSENT = object()
-MAX_TILE_ROWS = 32
+TILE_TOPOLOGY = legacy_topology("attention_tile")
+MAX_TILE_ROWS = TILE_TOPOLOGY.max_rows
+# Mask/position helpers accept any negative parent as a root; the tile
+# entry point (``tile_forward``) is what requires the single anchor root.
+_DEPTH_TOPOLOGY = legacy_topology("attention_depths")
 
 
 def _depths(parents):
-    depths = []
-    for row, parent in enumerate(parents):
-        parent = int(parent)
-        if parent < 0:
-            depths.append(0)
-        elif parent >= row:
-            raise ValueError("tree parents must precede their children")
-        else:
-            depths.append(depths[parent] + 1)
-    return depths
+    return list(TreeTopology(parents, _DEPTH_TOPOLOGY).depths)
 
 
 def _ancestors(parents):
-    width = len(parents)
-    rows = [[False] * width for _ in range(width)]
-    for row, parent in enumerate(parents):
-        rows[row][row] = True
-        node = int(parent)
-        while node >= 0:
-            rows[row][node] = True
-            node = int(parents[node])
-    return rows
+    return TreeTopology(parents, _DEPTH_TOPOLOGY).ancestor_rows()
 
 
 def _prefix_columns(cache):
@@ -276,17 +269,18 @@ class AttentionTreeTransaction:
         if self.closed:
             raise RuntimeError("attention tree transaction is closed")
         path = tuple(path)
+        if self.parents is not None:
+            topology = TreeTopology(self.parents, _DEPTH_TOPOLOGY)
+            if len(topology) == self.width and path and path[0] == 0 and topology.is_root_path(path):
+                return path
+            raise ValueError(TILE_TOPOLOGY.path_error)
         if (
             not path
             or any(type(row) is not int or not 0 <= row < self.width for row in path)
             or path[0] != 0
             or any(left >= right for left, right in zip(path, path[1:]))
-            or (self.parents is not None and any(
-                self.parents[row] != parent
-                for parent, row in zip((-1, *path[:-1]), path)
-            ))
         ):
-            raise ValueError("attention tree publication needs one root-connected path")
+            raise ValueError(TILE_TOPOLOGY.path_error)
         return path
 
     def commit_paths(self, paths):
@@ -354,10 +348,9 @@ class AttentionTreeCohortTransaction:
 def tile_forward(model, tokens, parents, cache, capture_layers):
     """Verify one lane's tile: ``(logits [1, W, V], features [1, W, F], txn)``."""
 
-    if not 1 <= len(tokens) <= MAX_TILE_ROWS or len(tokens) != len(parents):
-        raise ValueError("attention tree tile rows must match parents and fit 32 rows")
-    if int(parents[0]) != -1 or any(int(p) < 0 for p in parents[1:]):
-        raise ValueError("attention tree tile must be rooted at its anchor row")
+    if len(tokens) != len(parents):
+        raise ValueError(TILE_TOPOLOGY.rows_error)
+    TreeTopology(parents, TILE_TOPOLOGY)
     validate_caches(cache)
     offsets = {int(item.offset) for item in cache}
     if len(offsets) != 1:
@@ -375,25 +368,23 @@ def tile_forward(model, tokens, parents, cache, capture_layers):
     return logits, features, snapshot
 
 
-class AttentionTreeExecutor:
+class AttentionTreeExecutor(SourceBoundRevision):
     """Target-tree provider for attention-only models with standard caches."""
 
     protocol = PROTOCOL
     maximum_cohort_width = 4
+    _identity_style = "module"
+    _source_module = "mlx2.runtime.attention_tree_executor"
+    _revision_error = "attention tree executor source changed"
 
     def __init__(self):
-        source = Path(__file__).read_bytes()
-        self.source_revision_token = hashlib.sha256(source).hexdigest()
-        self.source_identity = (("module", "mlx2.runtime.attention_tree_executor"),
-                                ("sha256", self.source_revision_token))
+        self._bind_sources((Path(__file__), *TECHNOLOGY_SOURCES))
+        self.source_revision_token = revision_token(self.source_identity)
         self.dispatches = 0
 
     @classmethod
     def create(cls):
         return cls()
-
-    def validate_revision(self):
-        return None
 
     def validate_cohort(self, width, configured_limit):
         if type(width) is not int or not 1 <= width <= self.maximum_cohort_width or width > configured_limit:

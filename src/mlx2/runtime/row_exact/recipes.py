@@ -13,7 +13,10 @@ how a ``[1, R, H]`` strip runs with each row's one-token decode arithmetic:
   ``row_exact.ops`` (a mixture-of-experts block, say).
 
 ``run_layerwise`` walks the layers with those recipes, hands each block its
-cache, collects taps, and notes every route on the open window.
+cache, collects taps, and notes every route on the open window.  An adapter
+may also declare its own ``Recipe(name, run)`` for a block whose exact strip
+form is model math (Maxwell's mHC layer, Qwen3.8's whole-layer GDN and
+attention blocks); the loop, taps and route notes stay here.
 """
 
 from __future__ import annotations
@@ -87,22 +90,33 @@ def residual_with_cache(
 def run_layerwise(
     layers: Sequence[Any],
     recipe_for: Callable[[Any], Recipe],
-    hidden: mx.array,
+    hidden: Any,
     caches: Sequence[Optional[Any]],
     capture_layers: Sequence[int] = (),
-) -> tuple[mx.array, list]:
+    *,
+    route_note: str = "before",
+) -> tuple[Any, list]:
     """Run every layer on the strip with its recipe; return hidden and taps.
 
-    ``caches[i]`` is layer ``i``'s cache (``None`` for cacheless blocks).
+    ``caches[i]`` is layer ``i``'s cache (``None`` for cacheless blocks, a
+    tuple for a block with several planes).  ``hidden`` is whatever the
+    recipes pass between blocks: a ``[1, R, H]`` strip, or a list of one-row
+    streams.  ``route_note`` (``RowExactSpec.route_note``) says whether each
+    block's recipe is noted on the open window ``"before"`` or ``"after"``
+    the block runs, or not at all (``"none"``).
     """
+    if route_note not in ("before", "after", "none"):
+        raise ValueError(f"unknown route_note {route_note!r}")
     taps = []
     capture = set(capture_layers)
     window = REV.current()
     for index, (layer, cache) in enumerate(zip(layers, caches, strict=True)):
         recipe = recipe_for(layer)
-        if window is not None:
+        if window is not None and route_note == "before":
             window.note("blocks", recipe.name)
         hidden = recipe.run(layer, hidden, cache)
+        if window is not None and route_note == "after":
+            window.note("blocks", recipe.name)
         if index in capture:
             taps.append(hidden)
     return hidden, taps

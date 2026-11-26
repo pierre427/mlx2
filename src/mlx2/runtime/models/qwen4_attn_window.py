@@ -52,6 +52,8 @@ import mlx.core as mx
 
 from .import_env import snapshot as _import_env_snapshot
 from . import qwen4_attn_rows as AR
+from ..technologies.window_attention import vector_launch as _VL
+from ..technologies.window_attention import vector_sources as _VS
 
 _import_env_snapshot(__name__)
 
@@ -93,64 +95,18 @@ def set_enabled(value: bool) -> bool:
 # --------------------------------------------------------------------------
 
 
-def _replace(source: str, old: str, new: str) -> str:
-    if old not in source:  # pragma: no cover - guards against L3 drift
-        raise RuntimeError(f"qwen4_attn_window: L3 source changed near {old!r}")
-    return source.replace(old, new)
+# The window-attention technology generates them (``_VS.QWEN4_WINDOW``: row
+# ``r`` reads ``n_first + r`` keys, two-pass rows on the grid, the rows'
+# one-token masks concatenated flat); byte-identical to the patched copy of
+# ``qwen4_attn_rows``' text this module built before.
 
 
 def _one_pass_source(masked: bool) -> str:
-    source = _replace(
-        AR._ONE_PASS_CHAINS,
-        "const int N = int(keys_shape[2]);",
-        "const int N = n_first[0] + row;",
-    )
-    if masked:
-        # Row ``row`` of the group: its mask starts after the masks of the
-        # rows before it, whose lengths are n_first, n_first + 1, ...
-        setup = (
-            "auto mp = masks + mask_base[0] + row * n_first[0]"
-            " + (row * (row - 1)) / 2 + s;\n"
-            "    const int m_step = BN;"
-        )
-        use_key, advance = "mp[0]", "mp += m_step;"
-    else:
-        setup, use_key, advance = "", "true", ""
-    source = _replace(source, "@MASK_SETUP(s, BN)@", setup)
-    return source.replace("@USE_KEY@", use_key).replace("@MASK_ADVANCE@", advance)
+    return _VS.kernel_kwargs(_VS.QWEN4_WINDOW, "one_chains", masked=masked)["source"]
 
 
 def _two_pass_source(masked: bool) -> str:
-    source = AR._TWO_PASS_CHAINS
-    source = _replace(
-        source,
-        "const int block = threadgroup_position_in_grid.z;",
-        "const int block = int(threadgroup_position_in_grid.z) % BLOCKS;",
-    )
-    source = _replace(
-        source,
-        "const int row = thread_position_in_threadgroup.z;",
-        "const int row = int(threadgroup_position_in_grid.z) / BLOCKS;",
-    )
-    source = _replace(
-        source,
-        "const int rows = threads_per_threadgroup.z;",
-        "const int rows = int(threadgroups_per_grid.z) / BLOCKS;",
-    )
-    source = _replace(
-        source, "const int N = int(keys_shape[2]);", "const int N = n_first[0] + row;"
-    )
-    if masked:
-        setup = (
-            "auto mp = masks + mask_base[0] + row * n_first[0]"
-            " + (row * (row - 1)) / 2 + block;\n"
-            "    const int m_step = BLOCKS;"
-        )
-        use_key, advance = "mp[0]", "mp += m_step;"
-    else:
-        setup, use_key, advance = "", "true", ""
-    source = _replace(source, "@MASK_SETUP(block, BLOCKS)@", setup)
-    return source.replace("@USE_KEY@", use_key).replace("@MASK_ADVANCE@", advance)
+    return _VS.kernel_kwargs(_VS.QWEN4_WINDOW, "two_chains", masked=masked)["source"]
 
 
 _KERNELS: dict = {}
@@ -161,25 +117,8 @@ def _kernel(name: str):
     if kernel is not None:
         return kernel
     masked = name.endswith("_mask")
-    extra = ["masks", "mask_base"] if masked else []
-    if name.startswith("one"):
-        kernel = mx.fast.metal_kernel(
-            name="mlx2_qwen4_attn_window_sdpa1_chains" + ("_mask" if masked else ""),
-            input_names=["queries", "keys", "values", "scale", "n_first"] + extra,
-            output_names=["maxs", "sums", "outs"],
-            header=AR._KEY_STEP,
-            source=_one_pass_source(masked),
-            ensure_row_contiguous=False,
-        )
-    else:
-        kernel = mx.fast.metal_kernel(
-            name="mlx2_qwen4_attn_window_sdpa2_chains" + ("_mask" if masked else ""),
-            input_names=["queries", "keys", "values", "scale", "n_first"] + extra,
-            output_names=["partials", "sums", "maxs"],
-            header=AR._KEY_STEP,
-            source=_two_pass_source(masked),
-            ensure_row_contiguous=False,
-        )
+    stage = "one_chains" if name.startswith("one") else "two_chains"
+    kernel = mx.fast.metal_kernel(**_VS.kernel_kwargs(_VS.QWEN4_WINDOW, stage, masked=masked))
     _KERNELS[name] = kernel
     return kernel
 
@@ -210,13 +149,7 @@ def row_plans(n_first: int, rows: int, heads: int, kv_heads: int, head_dim: int)
 def plan_runs(plans: Sequence) -> List[tuple]:
     """``[(start, stop, plan)]``: maximal runs of consecutive rows sharing a
     plan."""
-    runs = []
-    start = 0
-    for j in range(1, len(plans) + 1):
-        if j == len(plans) or plans[j] != plans[start]:
-            runs.append((start, j, plans[start]))
-            start = j
-    return runs
+    return _VL.plan_runs(plans)
 
 
 def window_supported(queries, keys, values, n_first: int) -> Optional[str]:
@@ -267,71 +200,23 @@ def window_sdpa_gate(
     concatenated flat (bool, ``n_first + j`` entries for row ``j``) or None
     (every mask all-true)."""
     _, heads, rows, head_dim = queries.shape
-    kv_heads = keys.shape[1]
-    gqa = heads // kv_heads
-    dtype = queries.dtype
-    scale_array = AR._scalar(float(scale), mx.float32)
-    gate = gate.reshape(rows, heads * head_dim)
-    plans = row_plans(n_first, rows, heads, kv_heads, head_dim)
+    plans = row_plans(n_first, rows, heads, keys.shape[1], head_dim)
     suffix = "_mask" if masks is not None else ""
-    outputs = []
-    for start, stop, plan in plan_runs(plans):
-        count = stop - start
-        q = queries[:, :, start:stop]
-        g = gate[start:stop]
-        first = n_first + start
-        extra = []
-        if masks is not None:
-            base = start * n_first + (start * (start - 1)) // 2
-            extra = [masks, _int(base)]
-        passes, blocks = plan
-        if passes == 1:
-            hpt, sg = AR._ONE_PASS_HPT, AR._ONE_PASS_SG
-            chains = 32 * (gqa // hpt)
-            maxs, sums, outs = _kernel("one" + suffix)(
-                inputs=[q, keys, values, scale_array, _int(first)] + extra,
-                template=[("T", dtype), ("D", head_dim), ("GQA", gqa), ("HPT", hpt), ("SG", sg)],
-                grid=(32 * chains, kv_heads, count),
-                threadgroup=(32 * sg, 1, 1),
-                output_shapes=[
-                    (count * heads * 32,),
-                    (count * heads * 32,),
-                    (count * heads * head_dim * 32,),
-                ],
-                output_dtypes=[mx.float32] * 3,
-            )
-            out = AR._kernel("one_combine_gate")(
-                inputs=[maxs, sums, outs, g],
-                template=[("T", dtype), ("D", head_dim)],
-                grid=(heads * 1024, count, 1),
-                threadgroup=(1024, 1, 1),
-                output_shapes=[(count, heads * head_dim)],
-                output_dtypes=[dtype],
-            )[0]
-        else:
-            partials, sums, maxs = _kernel("two" + suffix)(
-                inputs=[q, keys, values, scale_array, _int(first)] + extra,
-                template=[("T", dtype), ("D", head_dim), ("GQA", gqa), ("BLOCKS", blocks)],
-                grid=(32 * kv_heads, gqa, blocks * count),
-                threadgroup=(32, gqa, 1),
-                output_shapes=[
-                    (heads * count * blocks * head_dim,),
-                    (heads * count * blocks,),
-                    (heads * count * blocks,),
-                ],
-                output_dtypes=[dtype, mx.float32, mx.float32],
-            )
-            out = AR._kernel("two_combine_gate")(
-                inputs=[partials, sums, maxs, g],
-                template=[("T", dtype), ("D", head_dim), ("BLOCKS", blocks)],
-                grid=(heads * 1024, count, 1),
-                threadgroup=(1024, 1, 1),
-                output_shapes=[(count, heads * head_dim)],
-                output_dtypes=[dtype],
-            )[0]
-        outputs.append(out)
-    out = outputs[0] if len(outputs) == 1 else mx.concatenate(outputs, axis=0)
-    return out.reshape(1, rows, heads * head_dim)
+    return _VL.run_window(
+        lambda passes: _kernel(("one" if passes == 1 else "two") + suffix),
+        lambda passes: AR._kernel(("one" if passes == 1 else "two") + "_combine_gate"),
+        queries,
+        keys,
+        values,
+        AR._scalar(float(scale), mx.float32),
+        runs=plan_runs(plans),
+        n_first=n_first,
+        int_array=_int,
+        hpt=AR._ONE_PASS_HPT,
+        sg=AR._ONE_PASS_SG,
+        masks=masks,
+        gate=gate,
+    )
 
 
 # --------------------------------------------------------------------------

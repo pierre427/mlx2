@@ -8,6 +8,7 @@ from typing import Optional
 import mlx.core as mx
 from mlx.utils import tree_map
 from .differentiable import routed as _routed
+from ..technologies import window_attention as _window_attention
 
 _HADAMARD_BASES = (1, 12, 20, 28)
 
@@ -65,18 +66,7 @@ def create_causal_mask(
     right_padding: Optional[mx.array] = None,
     left_padding: Optional[mx.array] = None,
 ):
-    rinds = mx.arange(offset + N)
-    linds = mx.arange(offset, offset + N) if offset else rinds
-    linds = linds[:, None]
-    rinds = rinds[None]
-    mask = linds >= rinds
-    if window_size is not None:
-        mask = mask & (linds < rinds + window_size)
-    if right_padding is not None:
-        mask = mask & (rinds < mx.expand_dims(offset + N - right_padding, (1, 2, 3)))
-    if left_padding is not None:
-        mask = mask & (mx.expand_dims(left_padding, (1, 2, 3)) <= rinds)
-    return mask
+    return _window_attention.causal_window_mask(N, offset, window_size, right_padding, left_padding)
 
 
 def create_attention_mask(
@@ -378,19 +368,24 @@ def scaled_dot_product_attention(
     else:
         if _routed("sdpa"):  # gradient trace: the Metal attention kernels have no VJP
             return fast_sdpa(queries, keys, values, scale=scale, mask=mask, sinks=sinks)
-        if 2 <= queries.shape[2] <= 16:
-            from .fp_verify_tensor import attention as fp_verify, use_kernel as use_fp_verify
-            if use_fp_verify(queries, keys, values, mask, sinks):
-                return fp_verify(queries, keys, values, scale=scale, mask=mask, sinks=sinks)
-        if queries.shape[2] == 1 and queries.shape[-1] == 512 and sinks is None:
-            from . import sdpa_vector_d512 as d512
-
-            if d512.use_kernel(queries, keys, values, mask=mask):
-                return d512.attention(queries, keys, values, scale=scale)
-        if queries.shape[2] == 1 and sinks is None:
-            from .qsdpa_decode_metal import gqa_decode_attention_fp, use_fp_decode_kernel
-
-            row_mask = None if isinstance(mask, str) else mask
-            if use_fp_decode_kernel(queries, keys, values, mask=row_mask):
-                return gqa_decode_attention_fp(queries, keys, values, scale=scale, mask=row_mask)
+        # Opt-in float kernels (fp_verify_tensor, sdpa_vector_d512 TK 2, the
+        # fp decode kernel), admitted in that order by the window-attention
+        # registry.  The shape checks and environment reads in front are the
+        # ones the old inline gates made, so with no kernel selected stock SDPA
+        # runs at the old cost and without a registry lookup.
+        rows = queries.shape[2]
+        if (
+            2 <= rows <= 16 and os.environ.get("MLX2_FP_VERIFY_KERNEL") == "1"
+        ) or (
+            rows == 1
+            and sinks is None
+            and (
+                (queries.shape[-1] == 512 and os.environ.get("MLX2_SDPA_D512_TK2", "0") == "1")
+                or os.environ.get("MLX2_FP_DECODE_KERNEL", "0") == "1"
+            )
+        ):
+            run, _receipt = _window_attention.DENSE.select(
+                None, queries=queries, keys=keys, values=values, mask=mask, sinks=sinks
+            )
+            return run(queries, keys, values, scale=scale, mask=mask, sinks=sinks)
         return fast_sdpa(queries, keys, values, scale=scale, mask=mask, sinks=sinks)

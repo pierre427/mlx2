@@ -158,17 +158,9 @@ def calibrated_best_first_tree(
 def tree_paths(parents):
     """Return each parent-first node's root-to-node row path."""
 
-    paths = []
-    for row, parent in enumerate(parents):
-        parent = int(parent)
-        if parent < 0:
-            path = [row]
-        elif parent >= row:
-            raise ValueError("tree parents must precede their children")
-        else:
-            path = paths[parent] + [row]
-        paths.append(path)
-    return paths
+    from ..technologies.tree_verify import TreeTopology, legacy_topology
+
+    return TreeTopology(parents, legacy_topology("dflash_tree_paths")).path_lists()
 
 
 __all__ = ["best_first_tree", "calibrated_best_first_tree", "tree_paths"]

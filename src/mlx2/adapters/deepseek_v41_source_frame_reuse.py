@@ -15,7 +15,11 @@ def implementation_identity():
            'adapters/deepseek_v41_source_weights.py',
            'adapters/deepseek_v41_source_lfu.py',
            'runtime/models/deepseek_v41.py',
+           'runtime/technologies/sparse_selection.py', 'runtime/technologies/window_attention/__init__.py',
+           'runtime/technologies/window_attention/vector_sources.py', 'runtime/technologies/window_attention/vector_launch.py',
+           'runtime/technologies/dispatch.py',
            'runtime/models/deepseek_v41_fused.py',
-           'runtime/models/deepseek_v41_frame_geometry.py')
+           'runtime/models/deepseek_v41_frame_geometry.py',
+           'runtime/technologies/hyper_connections.py')
     records='\n'.join(p+':'+hashlib.sha256((root/p).read_bytes()).hexdigest()for p in paths)
     return hashlib.sha256((POLICY+'\n'+records).encode()).hexdigest()

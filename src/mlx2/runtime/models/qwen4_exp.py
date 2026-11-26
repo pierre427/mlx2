@@ -31,6 +31,7 @@ _import_env_snapshot(__name__)
 from .. import round_levers as _lv
 from . import invariant_prefill as _invariant
 from . import moe_nax_gather as _moe_nax
+from ..technologies import embedding_tables as _embedding_tables
 from .base import (
     BaseModelArgs,
     create_attention_mask,
@@ -47,6 +48,7 @@ from .cache import (
     dynamic_roll,
 )
 from .gated_delta import gated_delta_update
+from ..technologies import linear_recurrence as _lr
 from . import gdn_state as _gdn_state
 
 
@@ -84,6 +86,7 @@ from .qwen4_fused_gdn_verify import (
 )
 from .qwen4_fused_group_norm import fused_group_norm_enabled, try_fused_group_norm
 from . import qwen_hc_prefill as _hc_prefill
+from ..technologies import sparse_selection as _sparse
 from . import qwen4_hc_decode as _hc_decode
 from .qwen4_gate_inject import (
     eager_qwen4_gate_inject,
@@ -157,6 +160,7 @@ from ..row_exact_verify import active as _row_exact_window_active
 from ..prefill_checkpoint_rows import select_checkpoint_rows
 from ..prefill_tail_skip import STATS as _TAIL_STATS
 from ..prefill_tail_skip import claim_adapter_tail, tail_skip_mode
+from ..technologies.drafter_blocks import STREAM_SUM_PRE_FC_FUSION, fuse_mtp_module
 
 _QSA_SEGMENT_CAPTURE_LOCK = threading.Lock()
 _QSA_SEGMENT_CAPTURE_COUNT = 0
@@ -593,6 +597,26 @@ _QSA_NAX_DECODE_STATS_LOCK = threading.Lock()
 _QSA_NAX_DECODE_STATS = Counter()
 _QSA_STAGE1_KERNEL = _env_auto_flag("MLX_QWEN4_QSA_STAGE1_KERNEL")
 _QSA_STAGE1_MIN_QUERY = int(os.environ.get("MLX_QWEN4_QSA_STAGE1_MIN_QUERY", "64"))
+
+# Qwen4 QSA block-selection laws (historical values, sparse_selection spec):
+# uniform head sum of relu(q.pooled) in fp32 divided by sqrt(d), complete
+# mean-pooled blocks, ``argpartition_high`` top-k (unordered; exact ties
+# unspecified, ``stable_chronological`` is the proposed fix).
+QSA_SELECTION_LAWS = dict(
+    pooling="mean", score_layout="blhd_einsum", score_weighting="uniform",
+    score_scale_site="divide", score_cast="float32", tie_break="argpartition_high",
+    visibility="pool_complete",
+)
+_QSA_SELECTION_SPECS: dict = {}
+
+
+def _qsa_selection_spec(head_dim: int):
+    spec = _QSA_SELECTION_SPECS.get(head_dim)
+    if spec is None:
+        spec = _QSA_SELECTION_SPECS[head_dim] = _sparse.SelectionSpec(
+            head_dim=head_dim, **QSA_SELECTION_LAWS
+        )
+    return spec
 _QSA_STAGE1_MIN_PHYSICAL_KV = int(
     os.environ.get("MLX_QWEN4_QSA_STAGE1_MIN_PHYSICAL_KV", "65024")
 )
@@ -1130,31 +1154,19 @@ _SPLITMIX_GAMMA = 11400714819323198485
 _SPLITMIX_M1 = 13787848793156543929
 _SPLITMIX_M2 = 10723151780598845931
 _PRIME_1 = 10007
-
-
-def _splitmix64(value: int) -> int:
-    value = value + _SPLITMIX_GAMMA & _MASK64
-    value = (value ^ value >> 30) * _SPLITMIX_M1 & _MASK64
-    value = (value ^ value >> 27) * _SPLITMIX_M2 & _MASK64
-    return (value ^ value >> 31) & _MASK64
+_splitmix64 = _embedding_tables.splitmix64
 
 
 def _build_layer_multipliers(
     unigram_vocab_size: int, ngram_size: int, ple_layer_index: int, seed: int
 ) -> list[int]:
-    max_long = (1 << 63) - 1
-    multiplier_max = max_long // max(unigram_vocab_size, 1)
-    half_bound = max(1, multiplier_max // 2)
-    base_seed = seed + _PRIME_1 * ple_layer_index
-    return [
-        2
-        * (
-            _splitmix64(base_seed + _SPLITMIX_GAMMA * (index + 1) & _MASK64)
-            % half_bound
-        )
-        + 1
-        for index in range(ngram_size)
-    ]
+    spec = _embedding_tables.EngramSpec(
+        max_ngram=ngram_size, heads_per_ngram=1, multiplier_law="splitmix64",
+        history_law="eos_segment", seed=seed, layer_seed_stride=_PRIME_1,
+    )
+    return _embedding_tables.seeded_multipliers(
+        spec, layer=ple_layer_index, compressed_vocab=unigram_vocab_size
+    )
 
 
 def _is_prime(value: int) -> bool:
@@ -1344,6 +1356,43 @@ class RMSNormGated(nn.Module):
 
 
 class GatedDeltaNet(Qwen35GatedDeltaNet):
+    # Qwen4-Exp's direct L2 materialization boundaries (eps on the sum, in
+    # the activation dtype), beta in the projection dtype, and its reference
+    # widening the dynamic decay inputs before addition/softplus (fp32 state).
+    # Model-owned laws, not a change to the shared Qwen3.5 law.
+    _RECURRENCE_LAWS = dict(
+        qk_norm="l2_rsqrt", beta_law="gate_sigmoid_input",
+        decay_law="softplus_float32_inputs",
+    )
+    recurrence_spec = _lr.replace(_lr.QWEN35_GDN, **_RECURRENCE_LAWS)
+
+    def _gated_delta_update(
+        self, q, k, v, a, b, state, mask, use_kernel, *, prefill=False, allow_core=True
+    ):
+        # Same wiring as the Qwen3.5 base; the law flags come from this
+        # class's spec (beta_input_dtype, decay_input_float32), so callers
+        # that bind the method to a bare namespace keep Flash-Next's laws.
+        return gated_delta_update(
+            q,
+            k,
+            v,
+            a,
+            b,
+            self.A_log,
+            self.dt_bias,
+            state,
+            mask,
+            use_kernel=use_kernel,
+            **_lr.gdn_update_flags(GatedDeltaNet.recurrence_spec),
+            prefill_chunk_size=getattr(self, "_prefill_scan_chunk", 0)
+            if prefill
+            else 0,
+            prefill_stats=getattr(self, "_prefill_scan_stats", None),
+            prefill_segment_rows=getattr(self, "_prefill_scan_segment", 256),
+            state_dtype=getattr(self, "_gdn_state_dtype", None),
+            allow_core=allow_core,
+        )
+
     def __init__(self, args: TextModelArgs):
         super().__init__(args)
         self.norm = RMSNormGated(
@@ -1405,40 +1454,6 @@ class GatedDeltaNet(Qwen35GatedDeltaNet):
         self.fused_gdn_prefill_norm_eager = 0
         self.fused_gdn_prefill_last_fallback = None
         object.__setattr__(self, "fused_gdn_prefill_fallback_reasons", {})
-
-    def _normalize_qk(self, q, k):
-        """Preserve Qwen4-Exp's direct L2 materialization boundaries."""
-        q = q * mx.rsqrt(mx.sum(mx.square(q), axis=-1, keepdims=True) + 1e-06)
-        k = k * mx.rsqrt(mx.sum(mx.square(k), axis=-1, keepdims=True) + 1e-06)
-        return (q * k.shape[-1] ** (-0.5), k)
-
-    def _gated_delta_update(
-        self, q, k, v, a, b, state, mask, use_kernel, *, prefill=False, allow_core=True
-    ):
-        return gated_delta_update(
-            q,
-            k,
-            v,
-            a,
-            b,
-            self.A_log,
-            self.dt_bias,
-            state,
-            mask,
-            use_kernel=use_kernel,
-            beta_input_dtype=True,
-            prefill_chunk_size=getattr(self, "_prefill_scan_chunk", 0)
-            if prefill
-            else 0,
-            prefill_stats=getattr(self, "_prefill_scan_stats", None),
-            prefill_segment_rows=getattr(self, "_prefill_scan_segment", 256),
-            state_dtype=getattr(self, "_gdn_state_dtype", None),
-            # Qwen4-Exp declares an fp32 GDN state and its reference widens
-            # the dynamic decay inputs before addition/softplus.  Keep this
-            # model-owned instead of changing the shared Qwen3.5 law.
-            decay_input_float32=True,
-            allow_core=allow_core,
-        )
 
     def set_fused_gdn_decode_mode(self, mode: str):
         """Select the decode implementation without touching resident arrays."""
@@ -2099,6 +2114,10 @@ class GatedDeltaNet(Qwen35GatedDeltaNet):
         return self.out_proj(flat)
 
     def _try_fused_decode(self, qkv, z, b, a, mask, cache):
+        if _lr.kernel_refused("fused_gdn"):
+            # A gradient trace: the fused kernels have no VJP; run the ordinary
+            # recurrence (not a serving fallback, so no counter).
+            return None
         if cache is not None:
             # The fused kernels follow the carried state's class; refuse a
             # state of the class this layer did not select (gdn_state).
@@ -3042,20 +3061,10 @@ class NGramEmbedding(nn.Module):
         (multipliers, sizes, offsets) = (
             self._hash_constants_numpy() if host_constants is None else host_constants
         )
-        blocks = []
-        for ngram in range(2, self.ngram_size + 1):
-            with np.errstate(over="ignore"):
-                mixed = shifted[0] * multipliers[0]
-                for position in range(1, ngram):
-                    mixed = np.bitwise_xor(
-                        mixed, shifted[position] * multipliers[position]
-                    )
-            start = (ngram - 2) * self.heads_per_ngram
-            end = start + self.heads_per_ngram
-            blocks.append(
-                np.remainder(mixed[..., None], sizes[start:end]) + offsets[start:end]
-            )
-        return np.concatenate(blocks, axis=-1)[:, -seq_len:]
+        hashed = _embedding_tables.ngram_hash(
+            np.stack(shifted, axis=-1), multipliers, sizes, self.heads_per_ngram, offsets
+        )
+        return hashed[:, -seq_len:]
 
     def _ngram_ids_metal(
         self,
@@ -6454,10 +6463,9 @@ class QSAIndexer(nn.Module):
             cache.set_suffix_pooled_keys(cached_suffix)
 
             def score(keys):
-                values = mx.einsum(
-                    "blhd,bnd->blnh", q.astype(mx.float32), keys.astype(mx.float32)
+                return _sparse.score(
+                    _qsa_selection_spec(self.head_dim), q, keys
                 )
-                return mx.sum(mx.maximum(values, 0), axis=-1) / math.sqrt(self.head_dim)
 
             score_parts = [score(base.pooled_keys)]
             if cached_suffix is not None and cached_suffix.shape[1]:
@@ -6469,7 +6477,7 @@ class QSAIndexer(nn.Module):
             )
             scores = mx.where(valid_blocks, scores, -mx.inf)
             k = min(self.block_topk, n_blocks)
-            selected = mx.argpartition(scores, kth=n_blocks - k, axis=-1)[..., -k:]
+            selected = _sparse.topk(_qsa_selection_spec(self.head_dim), scores, k)
             if getattr(cache, "_mtp_share_topk", False):
                 cache._mtp_shared_topk = mx.contiguous(selected[:, -1])
                 cache._mtp_shared_topk_n_blocks = n_blocks
@@ -6587,10 +6595,7 @@ class QSAIndexer(nn.Module):
             )
 
         def score(keys):
-            values = mx.einsum(
-                "blhd,bnd->blnh", q.astype(mx.float32), keys.astype(mx.float32)
-            )
-            return mx.sum(mx.maximum(values, 0), axis=-1) / math.sqrt(self.head_dim)
+            return _sparse.score(_qsa_selection_spec(self.head_dim), q, keys)
 
         base_keys = mx.broadcast_to(
             base.pooled_keys,
@@ -6606,7 +6611,7 @@ class QSAIndexer(nn.Module):
         )
         scores = mx.where(valid_blocks, scores, -mx.inf)
         k = min(self.block_topk, n_blocks)
-        selected = mx.argpartition(scores, kth=n_blocks - k, axis=-1)[..., -k:]
+        selected = _sparse.topk(_qsa_selection_spec(self.head_dim), scores, k)
         token_logical = mx.arange(total)[None, :]
         return [
             QSASelection(
@@ -6795,16 +6800,11 @@ class QSAIndexer(nn.Module):
                     else:
                         _qsa_scores.bump("fallback_" + refusal)
                 if scores is None:
-                    scores = mx.einsum(
-                        "blhd,bnd->blnh",
-                        q.astype(mx.float32),
-                        pooled.astype(mx.float32),
-                    )
-                    scores = mx.sum(mx.maximum(scores, 0), axis=-1) / math.sqrt(
-                        self.head_dim
+                    scores = _sparse.score(
+                        _qsa_selection_spec(self.head_dim), q, pooled
                     )
                     scores = mx.where(valid_blocks, scores, -mx.inf)
-                selected = mx.argpartition(scores, kth=n_blocks - k, axis=-1)[..., -k:]
+                selected = _sparse.topk(_qsa_selection_spec(self.head_dim), scores, k)
             if length >= _QSA_STAGE1_MIN_QUERY:
                 _record_qsa_stage1(
                     engaged=stage1_engaged,
@@ -8070,14 +8070,7 @@ class Qwen4ExpMTP(nn.Module):
         self.hyper_connection_mixer = GatedResidual(mtp_args, use_combine=False)
 
     def fuse(self, embeddings: mx.array, hidden: mx.array) -> mx.array:
-        embeddings = self.fc_embedding(self.pre_fc_norm_embedding(embeddings))
-        hidden = self.pre_fc_norm_hidden(hidden).reshape(
-            *hidden.shape[:-1], self.hc_count, self.hidden_size
-        )
-        hidden = self.fc_hidden(hidden)
-        return (embeddings[..., None, :] + hidden).reshape(
-            *hidden.shape[:-2], self.hc_count * self.hidden_size
-        )
+        return fuse_mtp_module(STREAM_SUM_PRE_FC_FUSION, self, embeddings, hidden)
 
 
 @dataclass

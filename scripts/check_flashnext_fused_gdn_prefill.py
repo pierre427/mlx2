@@ -35,7 +35,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCES = ("qwen4_exp.py", "qwen4_fused_gdn_prefill.py", "qwen4_fused_gdn.py", "qwen3_5.py",
-           "gated_delta.py", "served_exp.py")
+           "gated_delta.py", "served_exp.py", "../technologies/embedding_tables.py",
+           "../technologies/dispatch.py")
 EDGE = -6.84375
 
 

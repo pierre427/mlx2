@@ -44,18 +44,21 @@ graphs, and the head only sees the checkpoint rows the engine will read.
 
 from __future__ import annotations
 
-import math
 import os
 from dataclasses import dataclass, field
+from functools import lru_cache
 
 import mlx.core as mx
 from mlx import nn
 
 from ..prefill_checkpoint_rows import select_checkpoint_rows
+from ..technologies import hyper_connections as _hc
 from .activations import swiglu
 from .base import BaseModelArgs, create_attention_mask, scaled_dot_product_attention
 from .cache import BatchKVCache, KVCache
 from .switch_layers import SwitchGLU
+from ..technologies.drafter_blocks import STREAM_SUM_FUSION, fuse_mtp_module
+from ..technologies.moe_router import cached_spec, route as _route_reference
 
 HC_EPS = 1e-6
 CACHE_LAYOUT = "maxwell-mhc-bsgqa-kv-indexer-planes-v1"
@@ -306,49 +309,47 @@ def rms_norm(x, weight, eps):
     return _compiled(("rms", float(eps)), lambda: lambda a, w: _rms_norm_body(a, w, eps))(x, weight)
 
 
+# Maxwell mHC law (HF modeling_maxwell_moe): L2-scaled mixes after the
+# projection with HC_EPS, one full alpha vector, non-precise softmax, and
+# pre/post/comb rounded to the stream dtype; the head scales by rsqrt(mean).
+_HC_LAW = dict(
+    norm_kind="post_inv_l2", norm_square="mul", head_norm_kind="post_rsqrt_mean",
+    coeff_affine="full_vector", comb_normalizer="softmax", coeff_round="stream",
+    expand_out="residual",
+)
+
+
+@lru_cache(maxsize=32)
+def _hc_spec(n, iters=20):
+    return _hc.HCSpec(hc_mult=n, sinkhorn_iters=iters, eps=HC_EPS, norm_eps=HC_EPS, **_HC_LAW)
+
+
 def _hc_pre_body(x, w, alpha_pre, alpha_post, alpha_res, bias, *, n, iters):
     """mHC mappings + stream collapse.  Returns (aggregated, h_post, h_res)."""
     b, t, nc = x.shape
     c = nc // n
-    xf = x.astype(mx.float32)
-    norm = mx.sqrt(mx.sum(xf * xf, axis=-1, keepdims=True))
-    r = 1.0 / (norm / math.sqrt(nc) + HC_EPS)
-    proj = xf @ w.astype(mx.float32).T
+    spec = _hc_spec(n, iters)
+    mixes = _hc.hc_mixes(spec, x, w)
     alpha = mx.concatenate([
         mx.broadcast_to(alpha_pre, (n,)), mx.broadcast_to(alpha_post, (n,)),
         mx.broadcast_to(alpha_res, (n * n,)),
     ]).astype(mx.float32)
-    h = r * proj * alpha + bias.astype(mx.float32)
-    h_pre = (mx.sigmoid(h[..., :n]) + HC_EPS).astype(x.dtype)
-    h_post = (mx.sigmoid(h[..., n:2 * n]) * 2).astype(x.dtype)
-    m = mx.softmax(h[..., 2 * n:].reshape(b, t, n, n), axis=-1)
-    m = m + HC_EPS
-    m = m / (mx.sum(m, axis=-2, keepdims=True) + HC_EPS)
-    for _ in range(iters - 1):
-        m = m / (mx.sum(m, axis=-1, keepdims=True) + HC_EPS)
-        m = m / (mx.sum(m, axis=-2, keepdims=True) + HC_EPS)
-    s = x.reshape(b, t, n, c).astype(mx.float32)
-    agg = (s * h_pre.astype(mx.float32)[..., None]).sum(axis=2).astype(x.dtype)
-    return agg, h_post, m.astype(x.dtype)
+    h_pre, h_post, m = _hc.hc_coefficients(spec, mixes, alpha, bias, stream_dtype=x.dtype)
+    agg = _hc.hc_collapse(spec, x.reshape(b, t, n, c), h_pre)
+    return agg, h_post, m
 
 
 def _hc_post_body(out, residual, h_post, h_res, *, n):
     b, t, c = out.shape
-    res = residual.reshape(b, t, n, c).astype(mx.float32)
-    mixed = mx.swapaxes(h_res.astype(mx.float32), -1, -2) @ res
-    expanded = h_post.astype(mx.float32)[..., None] * out.astype(mx.float32)[:, :, None, :]
-    return (expanded + mixed).astype(residual.dtype).reshape(b, t, n * c)
+    value = _hc.hc_expand(_hc_spec(n), out, residual.reshape(b, t, n, c), h_post, h_res)
+    return value.reshape(b, t, n * c)
 
 
 def _hc_head_body(x, fn, base, scale, *, n):
     b, t, nc = x.shape
-    c = nc // n
-    xf = x.astype(mx.float32)
-    rs = mx.rsqrt(mx.mean(xf * xf, axis=-1, keepdims=True) + HC_EPS)
-    mixes = (xf @ fn.astype(mx.float32).T) * rs
-    w = mx.sigmoid(mixes * scale.astype(mx.float32) + base.astype(mx.float32)) + HC_EPS
-    s = x.reshape(b, t, n, c).astype(mx.float32)
-    return (s * w[..., None]).sum(axis=2).astype(x.dtype)
+    spec = _hc_spec(n)
+    mixes = _hc.hc_mixes(spec, x, fn, head=True)
+    return _hc.hc_head(spec, x.reshape(b, t, n, nc // n), mixes, scale, base)
 
 
 # --------------------------------------------------------------------------
@@ -758,11 +759,11 @@ class Router(nn.Module):
 
     def __call__(self, x):
         logits = x.astype(mx.float32) @ self.weight.astype(mx.float32).T
-        scores = mx.sigmoid(logits)
-        biased = scores + self.expert_bias.astype(mx.float32)
-        ids = mx.stop_gradient(mx.argpartition(-biased, kth=self.top_k - 1, axis=-1)[..., : self.top_k])
-        w = mx.take_along_axis(scores, ids, axis=-1)
-        return ids, w / (mx.sum(w, axis=-1, keepdims=True) + 1e-20)
+        spec = cached_spec(
+            top_k=self.top_k, score_func="sigmoid", use_bias=True, bias_cast="to_scores",
+            topk_method="argpartition_neg", norm_topk_prob=True, norm_eps=1e-20,
+        )
+        return _route_reference(logits, spec, self.expert_bias)
 
 
 class SparseMoE(nn.Module):
@@ -938,11 +939,7 @@ class MTP(nn.Module):
         self.norm = FinalNorm(args)
 
     def __call__(self, streams, embeddings, cache):
-        b, s, nc = streams.shape
-        c = nc // self.n
-        e = self.e_proj(self.enorm(embeddings))
-        h = self.h_proj(self.hnorm(streams.reshape(b, s, self.n, c)))
-        x = (e[:, :, None, :] + h).reshape(b, s, nc)
+        x = fuse_mtp_module(STREAM_SUM_FUSION, self, embeddings, streams)
         mask = create_attention_mask(x, cache)
         return self.layer(x, mask, cache)
 

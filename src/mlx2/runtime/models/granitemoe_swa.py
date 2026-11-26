@@ -15,6 +15,7 @@ from .base import BaseModelArgs, create_attention_mask, scaled_dot_product_atten
 from .cache import KVCache, RotatingKVCache
 from .rope_utils import initialize_rope
 from .switch_layers import SwitchGLU
+from ..technologies.moe_router import cached_spec, route as _route_reference
 
 
 @dataclass
@@ -103,13 +104,11 @@ class MoE(nn.Module):
         )
 
     def __call__(self, x: mx.array) -> mx.array:
-        logits = self.router(x).astype(
-            mx.float32
-        )  # route in fp32 (HF/granitemoe parity)
-        idx = mx.argpartition(logits, kth=-self.top_k, axis=-1)[..., -self.top_k :]
-        gates = mx.softmax(
-            mx.take_along_axis(logits, idx, axis=-1), precise=True, axis=-1
+        # route in fp32 (HF/granitemoe parity)
+        spec = cached_spec(
+            top_k=self.top_k, softmax_position="after_topk", score_dtype="float32"
         )
+        idx, gates = _route_reference(self.router(x), spec)
         y = self.experts(x, idx)
         return (y * gates[..., None]).sum(axis=-2).astype(y.dtype)
 

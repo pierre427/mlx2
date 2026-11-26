@@ -20,11 +20,16 @@ native ``mxfp4`` mode without changing a bit.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from functools import lru_cache
 
 import mlx.core as mx
 import numpy as np
 
-from .gated_delta import compute_lower_bound_g, gated_delta_kernel, gated_delta_ops
+from ..technologies import linear_recurrence as _lr
+from ..technologies.linear_recurrence import compute_lower_bound_g  # noqa: F401
+from ..technologies import sparse_selection as _sparse
+from ..technologies import mla as _mla
+from ..technologies.moe_router import cached_spec, route as _route_reference
 
 # Vendor KimiRMSNorm default eps; the K3 reference builds q_a_layernorm and
 # kv_a_layernorm without passing config.rms_norm_eps (vLLM and llama.cpp use
@@ -32,6 +37,14 @@ from .gated_delta import compute_lower_bound_g, gated_delta_kernel, gated_delta_
 MLA_LATENT_NORM_EPS = 1e-6
 # FLA l2norm epsilon inside chunk_kda(use_qk_l2norm_in_kernel=True).
 KDA_L2_EPS = 1e-6
+# K3.1 q/k law only: FLA's fp32 l2 q/k (epsilon on the SUM).  It carries no
+# gate: kda_attention applies the lower-bounded sigmoid gate with the
+# checkpoint's cfg.gate_lower_bound (``_lr.decay("lower_bound_sigmoid", ...)``)
+# and runs the vector recurrence through the shared dispatcher.
+_K31_QK = _lr.LinearRecurrenceSpec(num_k_heads=1, num_v_heads=1, gate_kind="vector",
+                                   beta_law="sigmoid_float32", qk_norm="l2_rsqrt",
+                                   qk_norm_dtype="float32", qk_eps=KDA_L2_EPS,
+                                   conv_layout="separate_qkv", core_scan=False)
 FP4_E2M1 = np.array([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0,
                      -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0], dtype=np.float32)
 MXFP4_GROUP = 32
@@ -281,23 +294,20 @@ def kda_attention(w: dict, x: mx.array, cfg: K31Config, quant: dict = Q8,
     k, tk = _short_conv(linear(w, "self_attn.k_proj", x, quant), w["self_attn.k_conv1d.weight"], c.get("k_tail"))
     v, tv = _short_conv(linear(w, "self_attn.v_proj", x, quant), w["self_attn.v_conv1d.weight"], c.get("v_tail"))
     q, k = q.astype(mx.float32).reshape(1, t, h, d), k.astype(mx.float32).reshape(1, t, h, d)
-    q = q * mx.rsqrt(mx.sum(q * q, -1, keepdims=True) + KDA_L2_EPS) * d ** -0.5
-    k = k * mx.rsqrt(mx.sum(k * k, -1, keepdims=True) + KDA_L2_EPS)
+    q, k = _lr.normalize_qk(_K31_QK, q, k)
     a = linear(w, "self_attn.f_b_proj", linear(w, "self_attn.f_a_proj", x, quant), quant)
     # FLA's in-kernel gate (chunk_kda use_gate_in_kernel=True) reads A_log[i_h]:
     # the checkpoint's [head_dim]-long A_log is consumed per head, first H entries.
     a_log = w["self_attn.A_log"].reshape(-1)[:h].reshape(h, 1)
-    decay = compute_lower_bound_g(a_log, a.reshape(1, t, h, d),
-                                  w["self_attn.dt_bias"].reshape(h, d).astype(mx.float32),
-                                  cfg.gate_lower_bound)
-    beta = mx.sigmoid(linear(w, "self_attn.b_proj", x, quant).astype(mx.float32)).reshape(1, t, h)
+    decay = _lr.decay("lower_bound_sigmoid", a_log, a.reshape(1, t, h, d),
+                      w["self_attn.dt_bias"].reshape(h, d).astype(mx.float32),
+                      cfg.gate_lower_bound)
+    beta = _lr.beta("sigmoid_float32", linear(w, "self_attn.b_proj", x, quant)).reshape(1, t, h)
     v = v.astype(mx.float32).reshape(1, t, h, d)
     s0 = c.get("state")
-    if mx.default_device() == mx.gpu:
-        out, s1 = gated_delta_kernel(q, k, v, decay, beta,
-                                     s0 if s0 is not None else mx.zeros((1, h, d, d), mx.float32), None)
-    else:
-        out, s1 = gated_delta_ops(q, k, v, decay, beta, s0, None)
+    out, s1 = _lr.recurrence(q, k, v, decay, beta,
+                             s0 if s0 is not None else mx.zeros((1, h, d, d), mx.float32), None,
+                             allow_core=False)
     if cache is not None:
         mx.eval(s1, tq, tk, tv)
         cache.update(state=s1, q_tail=tq, k_tail=tk, v_tail=tv)
@@ -322,6 +332,15 @@ def _row_chunk(heads: int, keys: int, budget: int = 1 << 28) -> int:
     return max(1, min(keys, budget // max(1, heads * keys)))
 
 
+# K3.1 DSA indexer laws (historical values, sparse_selection spec): weights
+# pre-scaled, einsum in the operands' dtype, token-causal keys, ``argsort``
+# top-k (exact ties unspecified; ``stable_chronological`` is the proposed fix).
+DSA_SPEC = _sparse.SelectionSpec(
+    score_layout="lhd_einsum", score_scale_site="weights", score_cast="none",
+    tie_break="argsort", visibility="token_causal",
+)
+
+
 def dsa_keep(index: dict, r0: int, r1: int, topk: int, offset: int = 0) -> mx.array:
     """Lightning-indexer top-k mask for query rows [r0, r1) over keys [0, offset + r1).
 
@@ -333,13 +352,12 @@ def dsa_keep(index: dict, r0: int, r1: int, topk: int, offset: int = 0) -> mx.ar
     """
     n = offset + r1
     iq, ik, iw = index["q"][r0:r1], index["k"][:n], index["w"][r0:r1]
-    logits = mx.maximum(mx.einsum("thd,sd->ths", iq, ik), 0)
-    score = mx.sum(logits * iw[..., None], axis=1)                     # [rows, n]
-    causal = mx.arange(n)[None, :] <= mx.arange(offset + r0, offset + r1)[:, None]
+    score = _sparse.score(DSA_SPEC, iq, ik, iw)                         # [rows, n]
+    causal = _sparse.visible(DSA_SPEC, mx.arange(offset + r0, offset + r1), n)
     score = mx.where(causal, score, -mx.inf)
     # Rows with fewer causal keys than top-k pick up -inf columns, which the
     # causal mask drops again: they keep every causal key.
-    order = mx.argsort(-score, axis=-1)[:, :topk]
+    order = _sparse.topk(DSA_SPEC, score, topk)
     keep = mx.put_along_axis(mx.zeros(score.shape, mx.bool_), order,
                              mx.ones(order.shape, mx.bool_), axis=-1)
     return keep & causal
@@ -381,6 +399,16 @@ def dsa_index(w: dict, x: mx.array, qr: mx.array, cfg: K31Config, quant: dict = 
     }
 
 
+@lru_cache(maxsize=16)
+def mla_spec(cfg: K31Config) -> "_mla.MLASpec":
+    """K3.1 MLA: gated NoPE, expanded only (concat_key, FP32 scores).
+
+    Built once per (frozen, hashable) config, not per attention call."""
+    return _mla.MLASpec.from_config(
+        cfg, position="nope", mscale_rule="none", absorbed_rule="never",
+        pe_form="split_fp32", expanded_pe_form="concat_key")
+
+
 def mla_attention(w: dict, x: mx.array, cfg: K31Config, quant: dict = Q8, row_chunk: int | None = None,
                   *, dsa: bool = True, cache: dict | None = None, offset: int = 0):
     """Gated NoPE MLA (with the K3.1 DSA top-k mask on indexer layers).
@@ -410,23 +438,13 @@ def mla_attention(w: dict, x: mx.array, cfg: K31Config, quant: dict = Q8, row_ch
         cache.update(latent=latent, k_pe=k_pe)
     n = offset + t
     kv = linear(w, "self_attn.kv_b_proj", latent, quant).reshape(n, h, dn + dv)
-    k = mx.concatenate([kv[..., :dn], mx.broadcast_to(k_pe[:, None, :], (n, h, dr))], -1)
-    k, v = k.astype(mx.float32), kv[..., dn:]
-    q = q.astype(mx.float32) * (dn + dr) ** -0.5
     index = dsa_index(w, x, qr, cfg, quant, cache=cache, offset=offset) if dsa else None
     rows = row_chunk or _row_chunk(max(h, cfg.index_heads or 1), n)
-    outs = []
-    for r0 in range(0, t, rows):
-        r1 = min(t, r0 + rows)
-        nk = offset + r1
-        scores = mx.einsum("thd,shd->hts", q[r0:r1], k[:nk])           # [H, rows, nk]
-        mask = mx.arange(nk)[None, :] <= mx.arange(offset + r0, offset + r1)[:, None]
-        if index is not None:
-            mask = mask & dsa_keep(index, r0, r1, cfg.index_topk, offset)
-        probs = mx.softmax(mx.where(mask, scores, -mx.inf), axis=-1).astype(x.dtype)
-        outs.append(mx.einsum("hts,shd->thd", probs, v[:nk]))
-        mx.eval(outs[-1])
-    out = mx.concatenate(outs).reshape(t, h * dv)
+    keep = (None if index is None
+            else lambda r0, r1: dsa_keep(index, r0, r1, cfg.index_topk, offset))
+    out = _mla.expanded_rows_softmax(
+        q, kv, k_pe, nope=dn, scale=mla_spec(cfg).softmax_scale, offset=offset, rows=rows,
+        out_dtype=x.dtype, keep=keep).reshape(t, h * dv)
     if cfg.mla_use_output_gate:
         out = out * mx.sigmoid(linear(w, "self_attn.g_proj", x, quant))
     return linear(w, "self_attn.o_proj", out, quant), index is not None
@@ -459,16 +477,17 @@ def route(w: dict, x: mx.array, cfg: K31Config) -> Routing:
     if not mx.issubdtype(gate.dtype, mx.floating) or "block_sparse_moe.gate.scales" in w:
         raise ValueError("router gate must be a float matrix (it is never quantized)")
     logits = x.astype(mx.float32) @ gate.astype(mx.float32).T
-    scores = mx.sigmoid(logits)
-    choice = scores + w["block_sparse_moe.gate.e_score_correction_bias"].astype(mx.float32)
-    k = cfg.top_k
     # Top-k by choice score, descending (exact ties are ordered arbitrarily).
-    ids = mx.argsort(-choice, axis=-1)[:, :k].astype(mx.int32)
-    chosen = mx.take_along_axis(scores, ids, axis=-1)
-    wts = chosen
-    if k > 1 and cfg.moe_renormalize:
-        wts = chosen / (mx.sum(chosen, -1, keepdims=True) + 1e-20)
-    return Routing(ids, wts * cfg.routed_scaling_factor, chosen)
+    spec = cached_spec(
+        top_k=cfg.top_k, score_func="sigmoid", use_bias=True, bias_cast="to_scores",
+        topk_method="argsort_neg", norm_topk_prob=bool(cfg.moe_renormalize),
+        norm_eps=1e-20, norm_min_top_k=2,
+        routed_scaling_factor=float(cfg.routed_scaling_factor), index_dtype="int32",
+    )
+    ids, wts, chosen = _route_reference(
+        logits, spec, w["block_sparse_moe.gate.e_score_correction_bias"], with_scores=True
+    )
+    return Routing(ids, wts, chosen)
 
 
 def restrict(routing: Routing, present, cfg: K31Config, *, choice: mx.array | None = None):

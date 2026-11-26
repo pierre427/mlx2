@@ -1196,7 +1196,10 @@ def test_adapter_identity_binds_the_kernel_files_unconditionally(monkeypatch):
                      "src/mlx2/runtime/gguf/kblock_metal.py", "src/mlx2/runtime/gguf/kblock_prefill_metal.py",
                      # The default glm53_expert_prefill=segmented_nax_fp16_v2
                      # runs the segmented plan/combine and NAX tile kernels.
-                     "src/mlx2/runtime/gguf/segmented_prefill.py", "src/mlx2/runtime/gguf/nax_metal.py"):
+                     "src/mlx2/runtime/gguf/segmented_prefill.py", "src/mlx2/runtime/gguf/nax_metal.py",
+                     # HC math and the generated HC4 Metal source text.
+                     "src/mlx2/runtime/technologies/hyper_connections.py",
+                     "src/mlx2/runtime/technologies/dispatch.py"):
             assert len(identity[path]) == 64
 
 

@@ -198,3 +198,28 @@ def test_explicit_sampling_spec_without_receipt_is_not_historical_greedy(tmp_pat
     rewrite(paths[1], lambda r: r['spec'].update(sampling_profile={'temperature': .7}, sampling_seed=1))
     with pytest.raises(ValueError, match='lacks bound'):
         compare_module.compare(*paths, samples=100)
+
+
+def _record_technology_code(receipt):
+    for key in compare_module.RECORDED_EVALUATION_CODE:
+        receipt['code_sha256'][key] = 'c' * 64
+
+
+def test_technology_code_binding_only_where_recorded(tmp_path):
+    for name in ('old', 'new', 'mixed'):
+        (tmp_path / name).mkdir()
+    # Two arms recorded before the binding existed still compare.
+    old = fixture(tmp_path / 'old')
+    assert compare_module.compare(*old, samples=100)['binding']['evaluation_code_sha256'].keys() \
+        == set(compare_module.EVALUATION_CODE)
+    # Two arms recorded with it compare, and the binding carries it.
+    new = fixture(tmp_path / 'new')
+    for path in new:
+        rewrite(path, _record_technology_code)
+    bound = compare_module.compare(*new, samples=100)['binding']['evaluation_code_sha256']
+    assert set(compare_module.RECORDED_EVALUATION_CODE) <= set(bound)
+    # An old arm against a new arm refuses.
+    mixed = fixture(tmp_path / 'mixed')
+    rewrite(mixed[1], _record_technology_code)
+    with pytest.raises(ValueError, match='differ'):
+        compare_module.compare(*mixed, samples=100)

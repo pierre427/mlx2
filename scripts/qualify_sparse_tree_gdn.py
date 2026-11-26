@@ -59,6 +59,7 @@ SOURCE_FILES = (
     "scripts/qualify_sparse_tree_gdn.py",
     "src/mlx2/adapters/qwen38_tree_gdn.py",
     "src/mlx2/runtime/models/gated_delta.py",
+    "src/mlx2/runtime/technologies/linear_recurrence.py",
     "provenance/qwen38-tree-gdn-sparse-restart.json",
     "provenance/sparse-tree-gdn-native-qualifier.json",
     "scripts/paired_direct_ab.py",  # mlx_identity (build identity helper)
@@ -66,6 +67,8 @@ SOURCE_FILES = (
 # Imported modules must be these files of THIS checkout (no sister-checkout imports).
 MODULE_PATHS = {"candidate": "src/mlx2/adapters/qwen38_tree_gdn.py",
                 "reference": "src/mlx2/runtime/models/gated_delta.py",
+                # gated_delta re-exports the readout cast / ops fallback from here.
+                "reference_laws": "src/mlx2/runtime/technologies/linear_recurrence.py",
                 "identity_helper": "scripts/paired_direct_ab.py"}
 SHA256 = re.compile(r"[0-9a-f]{64}")
 UPSTREAM = {
@@ -468,6 +471,8 @@ class NativeBackend:
                 "environment": {k: os.environ.get(k) for k in ("MLX_GDN_PACKED", "MLX_GDN_CORE",
                                                                "MLX_ENABLE_TF32", "MLX2_INTAKE_SOURCE_ROOT")},
                 "modules": {"candidate": self.T.__file__, "reference": self.G.__file__,
+                            "reference_laws": sys.modules[
+                                "mlx2.runtime.technologies.linear_recurrence"].__file__,
                             "identity_helper": sys.modules["scripts.paired_direct_ab"].__file__}}
 
     def arrays(self, case, host):

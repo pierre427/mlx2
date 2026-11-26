@@ -61,6 +61,8 @@ _SOURCE_PATHS = (
     "src/mlx2/runtime/ast_execution_capability.py",
     "src/mlx2/runtime/cache_operations.py",
     "src/mlx2/runtime/models/cache.py",
+    "src/mlx2/runtime/technologies/window_attention/__init__.py", "src/mlx2/runtime/technologies/window_attention/vector_sources.py",
+    "src/mlx2/runtime/technologies/window_attention/vector_launch.py", "src/mlx2/runtime/technologies/dispatch.py",
 )
 
 

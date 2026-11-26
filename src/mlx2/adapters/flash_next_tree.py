@@ -16,6 +16,7 @@ import mlx.nn as nn
 
 from ..runtime.cow_cache import snapshot_prompt_cache_descriptors
 from ..runtime.models.qwen4_tree_gdn import ancestry
+from ..runtime.technologies.tree_verify import TECHNOLOGY_SOURCE_PATHS, file_sha256, source_stat
 
 
 PROTOCOL = "mlx2.flash-next-tensorfold-tree.v1"
@@ -264,13 +265,13 @@ def _source_binding(root, paths):
     still produces a fresh identity.
     """
     key = (str(root), tuple(
-        (path, stat.st_mtime_ns, stat.st_size)
-        for path, stat in ((path, (root / path).stat()) for path in paths)
+        (path, stat and stat[3], stat and stat[2])
+        for path, stat in ((path, source_stat(root / path)) for path in paths)
     ))
     cached = _SOURCE_BINDINGS.get(key)
     if cached is None:
         identity = tuple(
-            (path, hashlib.sha256((root / path).read_bytes()).hexdigest())
+            (path, file_sha256(root / path))
             for path in paths
         )
         revision = subprocess.check_output(
@@ -288,17 +289,23 @@ class FlashNextTargetTreeExecutor:
         self.model = model
         self.cpu_reference = cpu_reference
         root = Path(__file__).resolve().parents[3]
-        paths = (
+        paths = tuple(dict.fromkeys((
             "src/mlx2/adapters/flash_next_tree.py", "src/mlx2/runtime/models/qwen4_tree_gdn.py",
             "src/mlx2/runtime/models/qwen4_fused_gdn.py", "src/mlx2/runtime/models/qwen4_exp.py",
+            "src/mlx2/runtime/technologies/linear_recurrence.py", "src/mlx2/runtime/technologies/dispatch.py",
+            "src/mlx2/runtime/models/differentiable.py",
+            "src/mlx2/runtime/technologies/sparse_selection.py",
+            "src/mlx2/runtime/technologies/embedding_tables.py",
             "src/mlx2/runtime/models/flash_tensorfold_qmv.py", "src/mlx2/runtime/models/qwen4_hc_decode.py",
             "src/mlx2/runtime/models/qwen4_moe_window.py", "src/mlx2/runtime/models/qwen3_next.py",
+            "src/mlx2/runtime/technologies/moe_router.py", "src/mlx2/runtime/technologies/dispatch.py",
             "src/mlx2/runtime/cow_cache.py",
             "src/mlx2/runtime/external_speculative.py", "src/mlx2/runtime/proposal_providers.py",
             "src/mlx2/runtime/drafters/native_mtp.py", "src/mlx2/runtime/ast_tree_verify.py",
             "src/mlx2/runtime/ast_tree_tiles.py", "src/mlx2/adapters/flash_next.py",
             "src/mlx2/adapters/external_draft_policy.py", "src/mlx2/adapters/ast_execution_profile.py",
-        )
+            *TECHNOLOGY_SOURCE_PATHS,
+        )))
         self.source_identity, self.source_revision = _source_binding(root, paths)
         self.source_revision_token = hashlib.sha256(json.dumps(
             [PROTOCOL, self.source_revision, self.source_identity], separators=(",", ":")

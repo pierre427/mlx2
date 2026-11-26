@@ -14,60 +14,42 @@ from __future__ import annotations
 import mlx.core as mx
 from mlx import nn
 
+from .technologies import nvfp4_linear as _tech
+from .technologies.nvfp4_linear import NVFP4Linear, NVFP4Spec
+
 GROUP_SIZE = 16
 BITS = 4
 
+#: Raon-1-mini dense and the LiLiCorr native Nemotron drafter:
+#: bf16(fp32(bf16(qmm)) * s) + bias, three eager primitives.
+GLOBAL_SCALED_SPEC = NVFP4Spec(
+    global_scale_law="scale_rounded_product", epilogue="eager",
+    global_scale_name="global_scale", bias_dtype="float32",
+)
+#: MLX-VLM ``weight_scale_2`` exports (Nemotron 3.5 Super, Inkling 2):
+#: same law, compiled epilogue switchable by ``MLX2_SCALED_EPILOGUE``.
+WEIGHT_SCALE2_SPEC = NVFP4Spec(
+    global_scale_law="scale_rounded_product", epilogue="compiled_env",
+    global_scale_name="weight_scale_2", input_scale="ignored",
+)
 
-class GlobalScaledNVFP4Linear(nn.Module):
+
+class GlobalScaledNVFP4Linear(NVFP4Linear):
+    spec = GLOBAL_SCALED_SPEC
+
     def __init__(self, input_dims: int, output_dims: int, bias: bool = False):
-        super().__init__()
-        if input_dims % GROUP_SIZE:
-            raise ValueError("NVFP4 input width must be a multiple of 16")
-        self.weight = mx.zeros((output_dims, input_dims * BITS // 32), dtype=mx.uint32)
-        self.scales = mx.zeros((output_dims, input_dims // GROUP_SIZE), dtype=mx.uint8)
-        self.global_scale = mx.array(1.0, dtype=mx.float32)
-        if bias:
-            self.bias = mx.zeros((output_dims,))
-        self.freeze()
-
-    def __call__(self, x):
-        y = mx.quantized_matmul(
-            x, self["weight"], scales=self["scales"], biases=None, transpose=True,
-            group_size=GROUP_SIZE, bits=BITS, mode="nvfp4",
-        )
-        y = (y.astype(mx.float32) * self["global_scale"]).astype(y.dtype)
-        if "bias" in self:
-            y = y + self["bias"]
-        return y
+        super().__init__(input_dims, output_dims, bias=bias)
 
 
 def _scale_law(y, scale):
-    return (y.astype(mx.float32) * scale).astype(y.dtype)
-
-
-_COMPILED_SCALE = None
+    return _tech._scale_law(y, scale)
 
 
 def _apply_scale(y, scale):
-    """``y * scale`` in float32, cast back: the scaled-projection epilogue.
-
-    ``compiled`` (default since 2026-11-10, Pierre) runs the same
-    cast-multiply-cast as one compiled element-wise kernel instead of three
-    (one fp32 multiply either way; census1/routed2 in
-    qualification/runs/super-vl-nvfp4-20261110: -386 kernels a decode step,
-    same greedy tokens); ``MLX2_SCALED_EPILOGUE=eager`` keeps three primitives.
-    """
-    global _COMPILED_SCALE
-    import os
-
-    mode = os.environ.get("MLX2_SCALED_EPILOGUE", "compiled")
-    if mode == "eager":
-        return _scale_law(y, scale)
-    if mode != "compiled":
-        raise ValueError("MLX2_SCALED_EPILOGUE must be eager or compiled")
-    if _COMPILED_SCALE is None:
-        _COMPILED_SCALE = mx.compile(_scale_law, shapeless=True)
-    return _COMPILED_SCALE(y, scale)
+    """``y * scale`` in float32, cast back: the scaled-projection epilogue
+    (``technologies.nvfp4_linear.apply_global_scale``, compiled by default,
+    ``MLX2_SCALED_EPILOGUE=eager`` keeps three primitives)."""
+    return _tech.apply_global_scale(y, scale, WEIGHT_SCALE2_SPEC)
 
 
 def _rows_exact(module, x, *, bits, group_size, mode):
@@ -108,7 +90,7 @@ def _rows_exact(module, x, *, bits, group_size, mode):
     return y, "fp_row_exact"
 
 
-class ScaledNVFP4Linear(nn.Module):
+class ScaledNVFP4Linear(NVFP4Linear):
     """NVFP4 dense projection whose FP32 per-tensor scale is ``weight_scale_2``.
 
     The parameter name is the one MLX-VLM exports write (ModelOpt
@@ -118,21 +100,10 @@ class ScaledNVFP4Linear(nn.Module):
     module and take its own call (row_exact ``per_row_unsupported``).
     """
 
-    def __init__(self, input_dims: int, output_dims: int):
-        super().__init__()
-        if input_dims % GROUP_SIZE:
-            raise ValueError("NVFP4 input width must be a multiple of 16")
-        self.weight = mx.zeros((output_dims, input_dims * BITS // 32), dtype=mx.uint32)
-        self.scales = mx.zeros((output_dims, input_dims // GROUP_SIZE), dtype=mx.uint8)
-        self.weight_scale_2 = mx.array(1.0, dtype=mx.float32)
-        self.freeze()
+    spec = WEIGHT_SCALE2_SPEC
 
-    def __call__(self, x):
-        y = mx.quantized_matmul(
-            x, self["weight"], scales=self["scales"], biases=None, transpose=True,
-            group_size=GROUP_SIZE, bits=BITS, mode="nvfp4",
-        )
-        return _apply_scale(y, self["weight_scale_2"])
+    def __init__(self, input_dims: int, output_dims: int):
+        super().__init__(input_dims, output_dims)
 
     def rows_exact(self, x):
         """Verify rows bit-equal to one-row decode (see ``_rows_exact``)."""
@@ -232,7 +203,16 @@ FP8_GROUP = 32
 FP8_UNIT_SCALE = 127  # E8M0 code of 2**0
 
 
-class ScaledFP8Linear(nn.Module):
+#: Vendor per-tensor FP8 on ``mxfp8`` kernels with unit E8M0 block scales.
+VENDOR_FP8_SPEC = NVFP4Spec(
+    mode="mxfp8", bits=8, group_size=FP8_GROUP, scale_dtype="ue8m0",
+    global_scale_law="scale_rounded_product", epilogue="compiled_env",
+    global_scale_name="weight_scale", unit_block_scale=FP8_UNIT_SCALE,
+    input_scale="ignored",
+)
+
+
+class ScaledFP8Linear(NVFP4Linear):
     """Vendor per-tensor FP8 (E4M3) projection on MLX ``mxfp8`` kernels.
 
     ModelOpt FP8 weights are ``e4m3 * weight_scale`` with one FP32 scale per
@@ -243,22 +223,11 @@ class ScaledFP8Linear(nn.Module):
     ``nn.QuantizedLinear`` for the same reason as ``ScaledNVFP4Linear``.
     """
 
-    def __init__(self, input_dims: int, output_dims: int):
-        super().__init__()
-        if input_dims % FP8_GROUP:
-            raise ValueError("FP8 input width must be a multiple of 32")
-        self.weight = mx.zeros((output_dims, input_dims // 4), dtype=mx.uint32)
-        self.scales = mx.full((output_dims, input_dims // FP8_GROUP), FP8_UNIT_SCALE,
-                              dtype=mx.uint8)
-        self.weight_scale = mx.array(1.0, dtype=mx.float32)
-        self.freeze()
+    spec = VENDOR_FP8_SPEC
+    _width_error = "FP8 input width must be a multiple of 32"
 
-    def __call__(self, x):
-        y = mx.quantized_matmul(
-            x, self["weight"], scales=self["scales"], biases=None, transpose=True,
-            group_size=FP8_GROUP, bits=8, mode="mxfp8",
-        )
-        return _apply_scale(y, self["weight_scale"])
+    def __init__(self, input_dims: int, output_dims: int):
+        super().__init__(input_dims, output_dims)
 
     def rows_exact(self, x):
         """Verify rows bit-equal to one-row decode (see ``_rows_exact``)."""
@@ -411,6 +380,9 @@ def install(model, modules) -> list[str]:
 
 __all__ = [
     "BITS",
+    "GLOBAL_SCALED_SPEC",
+    "VENDOR_FP8_SPEC",
+    "WEIGHT_SCALE2_SPEC",
     "GROUP_SIZE",
     "GlobalScaledNVFP4Linear",
     "ScaledFP8Linear",

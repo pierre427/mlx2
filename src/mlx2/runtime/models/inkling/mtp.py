@@ -37,6 +37,7 @@ from mlx import nn
 from ..cache import KVCache, RotatingKVCache
 from .cache import InklingConvolutionCache
 from .language import InklingAttention, InklingDecoderLayer
+from ...technologies.drafter_blocks import HIDDEN_FIRST_FUSION, fuse_mtp_module
 
 MAX_DEPTHS = 8
 SIDECAR_PREFIX = "model.mtp.layers."
@@ -85,11 +86,7 @@ class InklingMTPDepth(nn.Module):
         self.window = block_config.sliding_window_size
 
     def __call__(self, hidden, embedded, cache):
-        x = self.input_proj(
-            mx.concatenate(
-                [self.hidden_norm(hidden), self.embed_norm(embedded)], axis=-1
-            )
-        )
+        x = fuse_mtp_module(HIDDEN_FIRST_FUSION, self, embedded, hidden)
         return self.block(x, cache=cache)
 
 

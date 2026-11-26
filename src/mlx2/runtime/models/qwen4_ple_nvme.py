@@ -27,6 +27,7 @@ from ..io_ownership import (
     storage_owner,
 )
 from .ngram_table_keys import check_ngram_table_tensors
+from ..technologies import embedding_tables as _tables
 
 MANIFEST_FORMAT = "qwen4-ple-rows"
 MANIFEST_VERSION = 1
@@ -138,16 +139,8 @@ def ple_table_diagnostics(table) -> dict:
     return result
 
 
-def bf16_bits_to_f32(bits: np.ndarray) -> np.ndarray:
-    """View uint16 bfloat16 bits as float32 values."""
-    return (bits.astype(np.uint32) << 16).view(np.float32)
-
-
-def f32_to_bf16_bits(values: np.ndarray) -> np.ndarray:
-    """Round float32 to bfloat16 bits with round-to-nearest-even."""
-    bits = np.ascontiguousarray(values, dtype=np.float32).view(np.uint32)
-    rounded = bits + np.uint32(32767) + (bits >> 16 & 1)
-    return (rounded >> 16).astype(np.uint16)
+bf16_bits_to_f32 = _tables.bf16_bits_to_f32
+f32_to_bf16_bits = _tables.f32_to_bf16_bits
 
 
 def dequant_rows_numpy(row_bytes: np.ndarray, dims: int) -> np.ndarray:
@@ -160,33 +153,16 @@ def dequant_rows_numpy(row_bytes: np.ndarray, dims: int) -> np.ndarray:
     Returns:
         uint16 array of shape ``[n, dims]`` holding bfloat16 bits.
     """
-    n = row_bytes.shape[0]
-    weight_bytes = dims // 2
-    group_bytes = dims // 32 * 2
-    words = np.ascontiguousarray(row_bytes[:, :weight_bytes]).view(np.uint32)
-    scales = np.ascontiguousarray(
-        row_bytes[:, weight_bytes : weight_bytes + group_bytes]
-    ).view(np.uint16)
-    biases = np.ascontiguousarray(
-        row_bytes[:, weight_bytes + group_bytes : weight_bytes + 2 * group_bytes]
-    ).view(np.uint16)
-    shifts = np.uint32(4) * np.arange(8, dtype=np.uint32)
-    q = (words[..., None] >> shifts & np.uint32(15)).astype(np.float32)
-    q = q.reshape(n, dims)
-    s = np.repeat(bf16_bits_to_f32(scales), 32, axis=1)
-    b = np.repeat(bf16_bits_to_f32(biases), 32, axis=1)
-    return f32_to_bf16_bits(q * s + b)
+    spec = _tables.Affine4RowSpec(dim=dims, rounding="bf16_rne", nonfinite="propagate",
+                                  output="bf16_bits")
+    return _tables.decode_packed_affine4(spec, row_bytes)
 
 
 def _read_safetensors_header(path):
     """Return (tensor header dict, data section offset) for a safetensors file."""
-    import struct
-
-    with open(path, "rb") as f:
-        (header_len,) = struct.unpack("<Q", f.read(8))
-        header = json.loads(f.read(header_len))
+    header, data_offset = _tables.read_safetensors_header_file(path)
     header.pop("__metadata__", None)
-    return (header, 8 + header_len)
+    return (header, data_offset)
 
 
 def _source_shard_refs(model_path, manifest):

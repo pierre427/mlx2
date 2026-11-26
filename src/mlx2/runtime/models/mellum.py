@@ -23,6 +23,8 @@ from .base import BaseModelArgs, create_attention_mask, scaled_dot_product_atten
 from .cache import KVCache, RotatingKVCache
 from .rope_utils import initialize_rope
 from .switch_layers import SwitchGLU
+from ..technologies.drafter_blocks import PRE_FC_NORM_FUSION, fuse_mtp_module
+from ..technologies.moe_router import cached_spec, route as _route_reference
 
 
 @dataclass
@@ -179,11 +181,10 @@ class SparseMoE(nn.Module):
         )
 
     def __call__(self, x):
-        scores = mx.softmax(self.gate(x), axis=-1, precise=True)
-        indices = mx.argpartition(scores, kth=-self.top_k, axis=-1)[..., -self.top_k :]
-        scores = mx.take_along_axis(scores, indices, axis=-1)
-        if self.norm_topk_prob:
-            scores = scores / mx.sum(scores, axis=-1, keepdims=True)
+        indices, scores = _route_reference(
+            self.gate(x),
+            cached_spec(top_k=self.top_k, norm_topk_prob=bool(self.norm_topk_prob)),
+        )
         return mx.sum(self.switch_mlp(x, indices) * scores[..., None], axis=-2)
 
 
@@ -261,9 +262,7 @@ class MTPModule(nn.Module):
         self.norm = nn.RMSNorm(hidden, eps=args.rms_norm_eps)
 
     def fuse(self, embeddings, previous_hidden):
-        embeddings = self.pre_fc_norm_embedding(embeddings)
-        previous_hidden = self.pre_fc_norm_hidden(previous_hidden)
-        return self.fc(mx.concatenate([embeddings, previous_hidden], axis=-1))
+        return fuse_mtp_module(PRE_FC_NORM_FUSION, self, embeddings, previous_hidden)
 
 
 class Model(nn.Module):

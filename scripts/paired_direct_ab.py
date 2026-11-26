@@ -121,6 +121,8 @@ PREFILL_SAMPLE_LIMIT = 64
 IDENTITY_FILES = (
     "scripts/paired_direct_ab.py",
     "src/mlx2/runtime/models/base.py",
+    "src/mlx2/runtime/technologies/window_attention/__init__.py", "src/mlx2/runtime/technologies/window_attention/vector_sources.py",
+    "src/mlx2/runtime/technologies/window_attention/vector_launch.py", "src/mlx2/runtime/technologies/dispatch.py",
     "src/mlx2/runtime/models/qsdpa_verify_metal.py",
     "src/mlx2/runtime/generate.py",
     "src/mlx2/runtime/external_speculative.py",

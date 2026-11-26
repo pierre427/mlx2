@@ -18,6 +18,7 @@ from .activations import swiglu
 from .base import BaseModelArgs, create_attention_mask, scaled_dot_product_attention
 from .cache import KVCache, RotatingKVCache
 from .switch_layers import QuantizedSwitchLinear, SwitchGLU
+from ..technologies.moe_router import cached_spec, route as _route_reference
 
 NORTH_BATCH_ROW_EXACT_Q4_VERSION = "north-batch-row-exact-q4-v1"
 
@@ -458,11 +459,11 @@ class Cohere2MoeSparseBlock(nn.Module):
         if row_exact is not None:
             row_exact.note_ordinary_sparse(x)
         dtype = x.dtype
-        scores = mx.sigmoid(self.gate(x).astype(mx.float32))
-        inds = mx.stop_gradient(
-            mx.argpartition(-scores, kth=self.top_k - 1, axis=-1)[..., : self.top_k]
+        spec = cached_spec(
+            top_k=self.top_k, score_func="sigmoid", score_dtype="float32",
+            topk_method="argpartition_neg",
         )
-        weights = mx.take_along_axis(scores, inds, axis=-1).astype(dtype)
+        inds, weights = _route_reference(self.gate(x), spec, out_dtype=dtype)
         return mx.sum(self.switch_mlp(x, inds) * weights[..., None], axis=-2)
 
 

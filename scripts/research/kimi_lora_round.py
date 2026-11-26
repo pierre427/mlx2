@@ -490,6 +490,8 @@ def run(spec_path):
                "resume_training_binding": parent_training_binding}
     for path in (Path(__file__), ROOT / "src/mlx2/adapters/kimi_linear.py",
                  ROOT / "src/mlx2/runtime/models/kimi_linear.py",
+                 ROOT / "src/mlx2/runtime/technologies/mla.py",
+                 ROOT / "src/mlx2/runtime/technologies/dispatch.py",
                  ROOT / "src/mlx2/experimental/kimi_linear_lora/training.py",
                  ROOT / "src/mlx2/experimental/kimi_linear_lora/checkpoint.py",
                  ROOT / "scripts/research/kimi_lora_loss.py",

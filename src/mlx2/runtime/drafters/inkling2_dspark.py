@@ -32,6 +32,7 @@ import mlx.nn as nn
 import numpy as np
 
 from ..models.cache import KVCache, RotatingKVCache
+from ..technologies.drafter_blocks import GatedMLP, GatedMLPSpec, gated_mlp
 
 LAW_VERSION = "inkling2-dspark-dflare-rnn-hidden-v1"
 TARGET_MODEL_TYPES = ("inkling2_text", "inkling2_loop_text")
@@ -329,17 +330,13 @@ class DraftAttention(nn.Module):
         return self.o_proj(out.transpose(0, 2, 1, 3).reshape(*x.shape[:2], -1))
 
 
-class DraftMLP(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        self.gate_proj = nn.Linear(config.hidden_size, config.intermediate_size, bias=False)
-        self.up_proj = nn.Linear(config.hidden_size, config.intermediate_size, bias=False)
-        self.down_proj = nn.Linear(config.intermediate_size, config.hidden_size, bias=False)
+class DraftMLP(GatedMLP):
+    """vLLM's fp32 activation law; math: technologies.drafter_blocks."""
 
-    def __call__(self, x):
-        gate = self.gate_proj(x).astype(mx.float32)
-        up = self.up_proj(x).astype(mx.float32)
-        return self.down_proj((nn.silu(gate) * up).astype(x.dtype))
+    def __init__(self, config):
+        super().__init__(
+            config.hidden_size, config.intermediate_size, GatedMLPSpec(gate_law="silu_mul_fp32")
+        )
 
 
 class DraftLayer(nn.Module):
@@ -706,9 +703,14 @@ class Inkling2DSparkDraftModel(nn.Module):
             ])
             summed = x.astype(mx.float32) + residual.astype(mx.float32)
             normalized = layer.post_attention_layernorm(summed).astype(x.dtype)
-            gate = _rowwise_linear(layer.mlp.gate_proj, normalized).astype(mx.float32)
-            up = _rowwise_linear(layer.mlp.up_proj, normalized).astype(mx.float32)
-            x = _rowwise_linear(layer.mlp.down_proj, (nn.silu(gate) * up).astype(x.dtype))
+            # ``normalized`` already carries ``x.dtype``, the law's output cast.
+            x = gated_mlp(
+                layer.mlp.mlp_spec,
+                lambda t: _rowwise_linear(layer.mlp.gate_proj, t),
+                lambda t: _rowwise_linear(layer.mlp.up_proj, t),
+                lambda t: _rowwise_linear(layer.mlp.down_proj, t),
+                normalized,
+            )
             residual = summed.astype(x.dtype)
         x = self.norm(x.astype(mx.float32) + residual.astype(mx.float32)).astype(
             embed.dtype

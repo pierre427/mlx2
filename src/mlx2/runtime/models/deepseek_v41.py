@@ -10,12 +10,15 @@ import hashlib
 import json
 import os
 from contextlib import nullcontext
-from dataclasses import asdict
+from dataclasses import asdict, replace
+from functools import lru_cache
 
 import mlx.core as mx
 import numpy as np
 
 from ..prefill_checkpoint_rows import select_checkpoint_rows
+from ..technologies import hyper_connections as _hc
+from ..technologies import window_attention as _window_attention
 from .deepseek_v4 import (
     Rotary,
     _sinkhorn_mix_fp32,
@@ -27,6 +30,7 @@ from .deepseek_v4 import (
 )
 from .deepseek_v41_cache import DeepSeekV41LayerCache
 from .deepseek_v41_quant import quantize
+from ..technologies import sparse_selection as _sparse
 from .import_env import snapshot as _import_env_snapshot
 
 NUMERICS_REVISION = "mlx2.v41-packed-bf16-staggered-csa2-engram.v1"
@@ -38,6 +42,14 @@ CED_POLICIES = ("reference", "dependency_exact")
 # Head-score scratch bound for one query-row tile in ``Attention.select``, and
 # the packed indexer-key chunk it decodes at a time.
 INDEX_SCORE_SCRATCH_BYTES = 16 << 20
+# CSA2 indexer laws (historical values, sparse_selection spec): weights carry
+# d^-1/2 * H^-1/2, einsum contraction in the operands' dtype, chronological
+# top-k over complete pools. Candidate-only rows score per-row gathered keys.
+INDEX_SPEC = _sparse.SelectionSpec(
+    score_layout="bhld_einsum", score_scale_site="weights", score_cast="none",
+    tie_break="stable_chronological", visibility="pool_complete", pooling="gated_softmax",
+)
+INDEX_ROWS_SPEC = replace(INDEX_SPEC, score_layout="bhld_rows_einsum")
 PACKED_INDEX_KEY_CHUNK = 4096
 # Opt-in, default off (2026-11-07, after sglang#49068's indexer-K tile reuse):
 # under native packed KV, ``select`` decodes the fp4 indexer keys once per
@@ -161,7 +173,6 @@ def selected_attention(
     output = []
     for first in range(0, length, tile):
         last = min(length, first + tile)
-        query = q[:, :, first:last].astype(mx.float32) * dim**-0.5
         if gathered is not None:
             rows = gathered
         elif packed_pooled is not None:
@@ -176,17 +187,12 @@ def selected_attention(
             rows = (mx.broadcast_to(pooled[:, None], (1, last-first, count, dim))
                     if trusted_broadcast and length > 1 and count == pooled.shape[1] <= 512
                     else _selected_rows(pooled, indices[:, first:last]))
-        ls = query @ mx.swapaxes(local.astype(mx.float32), -1, -2)
-        ls = mx.where(local_mask[..., first:last, :], ls, -mx.inf)
-        ps = mx.einsum("bhld,blkd->bhlk", query, rows)
-        ps = mx.where(valid[:, None, first:last], ps, -mx.inf)
-        norm = mx.logaddexp(
-            mx.logsumexp(ls, -1, keepdims=True), mx.logsumexp(ps, -1, keepdims=True)
-        )
-        norm = mx.logaddexp(norm, sinks[None, :, None, None].astype(mx.float32))
-        result = mx.exp(ls - norm) @ local.astype(mx.float32)
-        result += mx.einsum("bhlk,blkd->bhld", mx.exp(ps - norm), rows)
-        output.append(result.astype(q.dtype))
+        output.append(_sparse.gather_attend(
+            q[:, :, first:last],
+            (_sparse.Source(local, local_mask[..., first:last, :]),
+             _sparse.Source(rows, valid[:, None, first:last], per_row=True, cast="none")),
+            sinks=sinks, scale=dim**-0.5, contraction="einsum",
+        ))
     return mx.concatenate(output, 2)
 
 
@@ -423,8 +429,7 @@ class Attention:
                     ids = mx.sort(mx.argsort(mx.where(prior, positions, count + positions), axis=-1)[..., :capacity], axis=-1)
                 keys = (source.gather_index_keys(ids) if hasattr(source, "gather_index_keys")
                         else source.index_keys[0, ids[0]][None])
-                small = mx.einsum("bhsd,bstd->bsht", query[:, :, first:last], keys)
-                small = mx.sum(mx.maximum(small, 0) * weight[:, first:last, :, None], 2)
+                small = _sparse.score(INDEX_ROWS_SPEC, query[:, :, first:last], keys, weight[:, first:last])
                 small = mx.where(mx.take_along_axis(prior, ids, -1), small, -mx.inf)
                 score = mx.put_along_axis(mx.full((1, last-first, count), -mx.inf), ids, small, -1)
                 m.scheduled_kv_calls["candidate_only_score_rows"] = m.scheduled_kv_calls.get("candidate_only_score_rows", 0) + (last-first)*capacity
@@ -458,17 +463,17 @@ class Attention:
                             decoded_index[key_first] = keys
                     else:
                         m.scheduled_kv_calls["packed_index_reused_chunks"] = m.scheduled_kv_calls.get("packed_index_reused_chunks", 0) + 1
-                    part = mx.einsum("bhsd,btd->bsht", query[:, :, first:last], keys)
-                    parts.append(mx.sum(mx.maximum(part, 0) * weight[:, first:last, :, None], 2))
+                    parts.append(_sparse.score(INDEX_SPEC, query[:, :, first:last], keys, weight[:, first:last]))
                     m.scheduled_kv_calls["packed_index_staging_max_rows"] = max(m.scheduled_kv_calls.get("packed_index_staging_max_rows", 0), key_last-key_first)
                 score = mx.concatenate(parts, -1)
             else:
-                score = mx.einsum("bhsd,btd->bsht", query[:, :, first:last], all_keys)
-                score = mx.sum(mx.maximum(score, 0) * weight[:, first:last, :, None], 2)
+                score = _sparse.score(INDEX_SPEC, query[:, :, first:last], all_keys, weight[:, first:last])
             lens = ((mx.arange(start + first, start + last) + 1) // self.ratio)[
                 None, :, None
             ]
-            score = mx.where(mx.arange(count)[None, None] < lens, score, -mx.inf)
+            score = mx.where(_sparse.visible(replace(INDEX_SPEC, ratio=self.ratio),
+                                             mx.arange(start + first, start + last), count)[None],
+                             score, -mx.inf)
             if self.layer == c.candidate_source_layer_id:
                 shortcut = finite and all_blocks
                 if compact and not shortcut:
@@ -527,9 +532,10 @@ class Attention:
             local = state.update_local(kv)
         geometry = shared.get("_source_prefill_geometry")
         if geometry is None:
-            queries = mx.arange(start, start + length)[:, None]
             keys = mx.arange(start + length - local.shape[2], start + length)
-            mask = ((queries >= keys) & (queries < keys + c.sliding_window))[None, None]
+            mask = _window_attention.window_keep(
+                mx.arange(start, start + length), keys, c.sliding_window
+            )[None, None]
         else:
             from .deepseek_v41_frame_geometry import local_mask
             mask = local_mask(geometry, mx, start, length, local.shape[2], c.sliding_window)
@@ -618,6 +624,19 @@ class Attention:
         return self.linear(out.reshape(1, length, -1), "attn_output_b")
 
 
+def _hc_spec(c):
+    """V4.1 HC law: V4's Sinkhorn, RMS scaling applied after the projection."""
+    return _hc_spec_of(c.hc_mult, c.hc_sinkhorn_iters, c.hc_eps, c.rms_norm_eps)
+
+
+@lru_cache(maxsize=64)
+def _hc_spec_of(count, iterations, eps, norm_eps):
+    return _hc.HCSpec(
+        hc_mult=count, sinkhorn_iters=iterations, eps=eps,
+        norm_kind="post_rsqrt_mean", norm_eps=norm_eps,
+    )
+
+
 class Block:
     def __init__(self, model, layer):
         self.model, self.c, self.w, self.layer = model, model.args, model.weights, layer
@@ -635,15 +654,14 @@ class Block:
         self.attn_norm = self.w.array(self.prefix + "attn_norm.weight")
         self.ffn_norm = self.w.array(self.prefix + "ffn_norm.weight")
         self.correction = self.w.array(self.prefix + "exp_probs_b.bias")
+        self.hc_spec = _hc_spec(self.c)
 
     def mixes(self, h, kind):
         c = self.c
         fn, scale, base = self.hc[kind]
-        flat = h.reshape(*h.shape[:2], -1).astype(mx.float32)
         # V4.1 normalizes after projection; V4's pre-normalized GEMM differs.
-        mixes = (flat @ fn.T) * mx.rsqrt(
-            mx.mean(mx.square(flat), -1, keepdims=True) + c.rms_norm_eps
-        )
+        spec = self.__dict__.get("hc_spec") or _hc_spec(c)
+        mixes = _hc.hc_mixes(spec, h.reshape(*h.shape[:2], -1), fn)
         if getattr(self.model, "hc_coeff_policy", "reference") == "source_fused_fp32":
             rows = mixes.size // mixes.shape[-1]
             if c.hc_mult == 4 and 1 <= rows <= 1000:
@@ -1070,7 +1088,10 @@ class DeepSeekV41Model:
         return self.round(function(x, kind))
 
     def collapse(self, h, pre):
-        return self.round(mx.sum(h.astype(mx.float32) * pre[..., None], -2))
+        spec = self.__dict__.get("_hc_collapse_spec")
+        if spec is None:
+            spec = self.__dict__["_hc_collapse_spec"] = _hc_spec(self.args)
+        return self.round(_hc.hc_collapse(spec, h, pre, out_dtype=mx.float32))
 
     def engram(self, h, layer, hashes, *, rows=None):
         c, p = self.args, f"blk.{layer}."

@@ -52,6 +52,7 @@ import mlx.nn as nn
 import numpy as np
 
 from ..cache_operations import CacheOperationsContract, CachePlaneDeclaration
+from ..technologies import window_attention as _window_attention
 from .base import BaseModelArgs
 from .cache import _BaseCache
 from .hy_v4_flash_fp8kv import FORMATS as LATENT_KV_FORMATS
@@ -67,10 +68,19 @@ from .hy_v4_flash_sparse_prefill import unsupported_reason as sparse_unsupported
 from .hy_v4_flash_vision import (chunk_positions, find_spans, mrope_planes, slot_positions,
                                  span_end)
 from . import hy_v4_flash_fusions as _fusions
+from ..technologies import sparse_selection as _sparse
 from . import hy_v4_flash_resident as _resident
 from . import moe_nax_gather as _moe_nax
 from . import switch_read_once as _read_once
 from .switch_layers import SwitchGLU
+from ..technologies.drafter_blocks import NEXTN_FUSION, GatedMLPSpec, fuse_mtp_module, gated_mlp
+
+_DFLY_CORRECTION_MLP = GatedMLPSpec()
+from ..technologies import mla as _mla
+from ..technologies.mla import MultiLinear
+from ..technologies.embedding_tables import (EngramSpec, ngram_hash, pad_before_start_windows,
+                                             seeded_multipliers)
+from ..technologies.moe_router import cached_spec, route as _route_reference
 
 INDEXED = "indexed_attention"
 SLIDING = "sliding_attention"
@@ -96,6 +106,15 @@ SCORE_BUDGET = 1 << 27
 # (decode, verify, short prefill) never evaluate early.  The cache budget
 # (``adapters/hy_v4_flash_memory``) charges unbounded blocks when it is off.
 BOUNDED_SCORE_BLOCKS = True
+# HY-V4 group indexer laws (historical values, sparse_selection spec): weights
+# pre-scaled, q in fp32 against the stored key dtype, groups strictly before
+# the query's own group, ``argpartition_low`` over ``group_topk - 1`` (exact
+# ties unspecified; ``stable_chronological`` is the proposed fix), own group
+# always appended.
+INDEX_SELECTION_LAWS = dict(
+    pooling="group", score_layout="bhld_matmul", score_scale_site="weights", score_cast="none",
+    tie_break="argpartition_low", visibility="before_own_group", include_own_group=True,
+)
 # A media prefill arrives as one chunk of the whole prompt; its layers run in
 # slices of this many tokens so the per-chunk masks stay bounded.
 MEDIA_PREFILL_STEP = 2048
@@ -373,15 +392,14 @@ class Router(nn.Module):
         # fp32 weight: the reference expression; a BF16-resident weight (opt-in
         # ``resident_bf16``, H5) is widened at use (hy_v4_flash_resident).
         logits = _resident.f32_matmul(x, self.weight, kernel=getattr(self, "resident_gemv", False))
-        scores = mx.sigmoid(logits)
-        choice = scores + self.e_score_correction_bias.astype(mx.float32)
-        k = self.top_k
+        spec = cached_spec(
+            top_k=self.top_k, score_func="sigmoid", use_bias=True, bias_cast="to_scores",
+            topk_method="argpartition_neg", norm_topk_prob=bool(self.norm), norm_eps=1e-20,
+            routed_scaling_factor=float(self.scale), index_dtype="int32",
+        )
+        indices, weights = _route_reference(logits, spec, self.e_score_correction_bias)
         # Discrete ids carry no gradient (value-neutral; the weights stay differentiable).
-        indices = mx.stop_gradient(mx.argpartition(-choice, kth=k - 1, axis=-1)[..., :k].astype(mx.int32))
-        weights = mx.take_along_axis(scores, indices, axis=-1)
-        if self.norm:
-            weights = weights / (weights.sum(axis=-1, keepdims=True) + 1e-20)
-        return indices, weights * self.scale
+        return mx.stop_gradient(indices), weights
 
 
 class Q2ZeroSwitchLinear(nn.Module):
@@ -551,15 +569,8 @@ class MoE(nn.Module):
 
 # -------------------------------------------------------- MLA + indexer --
 
-class MultiLinear(nn.Module):
-    """Per-head linear ``[H, out, in]`` (mined from xing4_0.MultiLinear)."""
-
-    def __init__(self, input_dims: int, output_dims: int, num_heads: int):
-        super().__init__()
-        self.weight = mx.zeros((num_heads, output_dims, input_dims))
-
-    def __call__(self, x, transpose=True):
-        return x @ (self.weight.swapaxes(-1, -2) if transpose else self.weight)
+# MultiLinear (per-head ``[H, out, in]``, zero-initialised, not quantizable)
+# is technologies.mla.MultiLinear.
 
 
 def mla_attend(q, kv, mask, sinks, scale, rank):
@@ -574,25 +585,9 @@ def mla_attend(q, kv, mask, sinks, scale, rank):
     Queries are chunked so a score block stays under ``SCORE_BUDGET``.
     Returns ``[N, H, L, r]``.
     """
-    N, H, L, _ = q.shape
-    T = kv.shape[2]
-    sinks = sinks.astype(q.dtype)
-    rows = L if isinstance(mask, str) else max(1, SCORE_BUDGET // max(1, N * H * T))
-    if rows >= L:
-        return mx.fast.scaled_dot_product_attention(q, kv, kv, scale=scale, mask=mask, sinks=sinks)[..., :rank]
-    outs = []
-    for a in range(0, L, rows):
-        b = min(L, a + rows)
-        m = mask if mask is None else mask[..., a:b, :]
-        outs.append(mx.fast.scaled_dot_product_attention(
-            q[:, :, a:b], kv, kv, scale=scale, mask=m, sinks=sinks)[..., :rank])
-        if BOUNDED_SCORE_BLOCKS:
-            # A lazy graph runs every chunk's score, mask and softmax buffers
-            # side by side (measured on CPU: 12.3 GiB for a 2048-row chunk at
-            # 16K, against 1.66 GiB evaluated per block), so the chunking
-            # bounded nothing.  Same kernels and shapes: bit-identical.
-            mx.eval(outs[-1])
-    return mx.concatenate(outs, axis=2)
+    # Globals are read per call: tests and policies rebind them.
+    return _mla.latent_attention(q, kv, mask, scale=scale, sinks=sinks, value_dims=rank,
+                                 score_budget=SCORE_BUDGET, bounded=BOUNDED_SCORE_BLOCKS)
 
 
 def sliding_band_attend(q, kv, first, start, window, sinks, scale, rank, block):
@@ -624,7 +619,7 @@ def sliding_band_attend(q, kv, first, start, window, sinks, scale, rank, block):
         lo = max(first, start - window + 1)
         kpos = mx.arange(lo, start + L)
         qpos = mx.arange(start, start + L)
-        allowed = (kpos[None, :] <= qpos[:, None]) & (kpos[None, :] > qpos[:, None] - window)
+        allowed = _window_attention.window_keep(qpos, kpos, window)
         return mla_attend(q, kv[:, :, lo - first:], allowed[None, None], sinks, scale, rank)
     outs, pending, live = [], [], 0
     for a in range(0, L, block):
@@ -637,7 +632,7 @@ def sliding_band_attend(q, kv, first, start, window, sinks, scale, rank, block):
             pending, live = [], 0
         qpos = mx.arange(start + a, start + b)
         kpos = mx.arange(k0, k1)
-        allowed = (kpos[None, :] <= qpos[:, None]) & (kpos[None, :] > qpos[:, None] - window)
+        allowed = _window_attention.window_keep(qpos, kpos, window)
         out = mla_attend(q[:, :, a:b], kv[:, :, k0 - first:k1 - first], allowed[None, None],
                          sinks, scale, rank)
         outs.append(out)
@@ -772,6 +767,8 @@ class CompressedIndexer(nn.Module):
             self.num_heads ** -0.5 * self.head_dim ** -0.5)
         own_all = (mx.arange(start, start + L) // self.ratio).astype(mx.int32)  # [L]
         k = min(self.group_topk - 1, G)
+        spec = _sparse.SelectionSpec(n_heads=self.num_heads, head_dim=self.head_dim,
+                                     topk=self.group_topk, ratio=self.ratio, **INDEX_SELECTION_LAWS)
         # Opt-in ``indexer_fused_scores``: the logits come straight from one
         # Metal kernel (no [B, heads, rows, G] block), so a chunk may hold
         # ``heads`` times more rows under the same budget.
@@ -800,16 +797,10 @@ class CompressedIndexer(nn.Module):
                 if BOUNDED_SCORE_BLOCKS and rows < L:
                     mx.eval(picks[-1])
                 continue
-            scores = nn.relu(q[:, :, a:b] @ group_keys[:, None].swapaxes(-1, -2))
-            logits = (w[:, a:b].swapaxes(1, 2)[..., None] * scores).sum(axis=1)  # [B, l, G]
-            valid = mx.arange(G)[None, None, :] < own[None, :, None]
+            logits = _sparse.score(spec, q[:, :, a:b], group_keys, w[:, a:b])  # [B, l, G]
+            valid = _sparse.visible(spec, mx.arange(start + a, start + b), G)[None]
             logits = mx.where(valid, logits, -mx.inf)
-            if k > 0:
-                picked = mx.argpartition(-logits, kth=k - 1, axis=-1)[..., :k].astype(mx.int32)
-                picked = mx.where(mx.take_along_axis(valid, picked, axis=-1), picked, -1)
-                picks.append(mx.concatenate([picked, own_col], axis=-1))
-            else:
-                picks.append(own_col)
+            picks.append(_sparse.select_groups(spec, logits, own))
             if BOUNDED_SCORE_BLOCKS and rows < L:
                 mx.eval(picks[-1])  # one score block live at a time (see mla_attend)
         groups = picks[0] if len(picks) == 1 else mx.concatenate(picks, axis=1)
@@ -833,7 +824,12 @@ class Attention(nn.Module):
         self.qk_rope = args.swa_qk_rope_head_dim if sliding else args.qk_rope_head_dim
         self.v_dim = args.swa_v_head_dim if sliding else args.v_head_dim
         self.kv_lora_rank = args.kv_lora_rank
-        self.scale = (self.qk_nope + self.qk_rope) ** -0.5
+        # Per-kind geometry (sliding layers carry their own swa_* dims).
+        self.mla_spec = _mla.MLASpec(
+            n_heads=self.num_heads, kv_lora_rank=self.kv_lora_rank, q_lora_rank=args.q_lora_rank,
+            qk_nope_head_dim=self.qk_nope, qk_rope_head_dim=self.qk_rope, v_head_dim=self.v_dim,
+            sinks=True, absorbed_rule="always", pe_form="fused_buffer")
+        self.scale = self.mla_spec.softmax_scale
         self.window = args.sliding_window
         self.candidate_topk = args.candidate_topk
         self.base = float(args.rope_parameters[kind]["rope_theta"])
@@ -845,8 +841,8 @@ class Attention(nn.Module):
         self.kv_a_proj_with_mqa = nn.Linear(args.hidden_size, self.kv_lora_rank + self.qk_rope, bias=False)
         self.kv_a_layernorm = nn.RMSNorm(self.kv_lora_rank, eps=args.rms_norm_eps)
         # kv_b_proj is folded into these at sanitize time.
-        self.embed_q = MultiLinear(self.qk_nope, self.kv_lora_rank, H)
-        self.unembed_out = MultiLinear(self.kv_lora_rank, self.v_dim, H)
+        self.embed_q = MultiLinear(self.qk_nope, self.kv_lora_rank, H, init="zeros")
+        self.unembed_out = MultiLinear(self.kv_lora_rank, self.v_dim, H, init="zeros")
         self.linear_gate = nn.Linear(args.hidden_size, H * self.v_dim, bias=False)
         self.o_proj = nn.Linear(H * self.v_dim, args.hidden_size, bias=False)
         self.post_proj_norm = nn.RMSNorm(args.hidden_size, eps=args.rms_norm_eps)
@@ -1034,7 +1030,7 @@ class Attention(nn.Module):
                 # One query: the slice above is exactly its visible window,
                 # so the mask would be all true; skip building it (decode).
                 return mla_attend(q, kv[:, None], None, sinks, self.scale, r)
-            allowed = (kpos[None, :] <= qpos[:, None]) & (kpos[None, :] > qpos[:, None] - self.window)
+            allowed = _window_attention.window_keep(qpos, kpos, self.window)
             return mla_attend(q, kv[:, None], allowed[None, None], sinks, self.scale, r)
         indexer = self.compressed_indexer
         token_keys = indexer.token_key_norm(indexer.token_key_projection(x))
@@ -1247,11 +1243,11 @@ class EngramHasher:
         self.moduli = np.asarray(sizes, dtype=np.int64)
         self.offsets = np.concatenate([[0], np.cumsum(self.moduli)[:-1]]).astype(np.int64)
         self.rows = int(self.moduli.sum())
-        compressed = int(table.max()) + 1
-        half_bound = max(1, np.iinfo(np.int64).max // compressed // 2)
-        rng = np.random.default_rng(int(seed) + 10007 * int(layer_id))
-        drawn = rng.integers(0, half_bound, size=self.max_ngram, dtype=np.int64)
-        self.multipliers = drawn * 2 + 1
+        self.spec = EngramSpec(max_ngram=self.max_ngram, heads_per_ngram=self.heads,
+                               multiplier_law="numpy_default_rng", history_law="pad_before_start",
+                               pad_id=self.pad_id, seed=int(seed))
+        self.multipliers = seeded_multipliers(self.spec, layer=int(layer_id),
+                                              compressed_vocab=int(table.max()) + 1)
 
     def hash_ids(self, ngram_tokens: np.ndarray) -> np.ndarray:
         """``[B, L, max_ngram]`` token ids -> per-head ids ``[B, L, heads*orders]``."""
@@ -1259,15 +1255,7 @@ class EngramHasher:
         size = self.table.size
         compressed = np.where(tokens < size, self.table[np.minimum(tokens, size - 1)],
                               self.table[self.pad_id])
-        mixed = compressed * self.multipliers
-        out = []
-        for n in range(2, self.max_ngram + 1):
-            mix = mixed[..., 0]
-            for k in range(1, n):
-                mix = np.bitwise_xor(mix, mixed[..., k])
-            start = (n - 2) * self.heads
-            out.append(mix[..., None] % self.moduli[start:start + self.heads])
-        return np.concatenate(out, axis=-1)
+        return ngram_hash(compressed, self.multipliers, self.moduli, self.heads)
 
     def table_rows(self, ngram_tokens: np.ndarray) -> np.ndarray:
         """Flat table row of each head's id (head offset added)."""
@@ -2429,19 +2417,19 @@ class Model(nn.Module):
         lane has vision spans) replaces the slot as the reference's
         ``document_offsets`` (``build_ngram_tokens``).
         """
-        a = self.args
-        n = a.engram_max_ngram_size
-        B, L = tokens.shape
-        history = np.concatenate([tail[:, -(n - 1):] if tail.size else np.zeros((B, 0), np.int64),
-                                  tokens], axis=1)
-        lead = history.shape[1] - L
-        out = np.full((B, L, n), a.engram_pad_id, dtype=np.int64)
-        for k in range(n):
-            pos = np.arange(L) + start if document_positions is None else document_positions
-            src = np.arange(L) + lead - k
-            ok = (pos >= k) & (src >= 0)
-            out[:, ok, k] = history[:, src[ok]]
-        return out
+        return pad_before_start_windows(self._engram_window_spec(), tokens, start, tail,
+                                        document_positions)
+
+    def _engram_window_spec(self):
+        """The Engram window spec, built once from ``args`` (a null field refuses)."""
+        spec = getattr(self, "_engram_spec_cache", None)
+        if spec is None:
+            a = self.args
+            spec = EngramSpec(max_ngram=a.engram_max_ngram_size, heads_per_ngram=a.engram_n_head_per_ngram,
+                              multiplier_law="numpy_default_rng", history_law="pad_before_start",
+                              pad_id=a.engram_pad_id, seed=a.engram_seed or 0)
+            object.__setattr__(self, "_engram_spec_cache", spec)
+        return spec
 
     @property
     def engram_tail_keep(self) -> int:
@@ -3354,7 +3342,7 @@ class DFlyFusion(nn.Module):
         self.gate = mx.zeros((d,))
 
     def __call__(self, anchors, target_hidden):
-        fused = self.eh_proj(mx.concatenate([self.enorm(anchors), self.hnorm(target_hidden)], axis=-1))
+        fused = fuse_mtp_module(NEXTN_FUSION, self, anchors, target_hidden)
         return anchors + self.gate * fused
 
 
@@ -3369,7 +3357,7 @@ class DFlyHiddenCorrection(nn.Module):
 
     def __call__(self, hidden, previous_embed):
         x = mx.concatenate([self.hidden_norm(hidden), self.embed_norm(previous_embed)], axis=-1)
-        return hidden + self.down_proj(nn.silu(self.gate_proj(x)) * self.up_proj(x))
+        return hidden + gated_mlp(_DFLY_CORRECTION_MLP, self.gate_proj, self.up_proj, self.down_proj, x)
 
 
 class DFlyLayer(nn.Module):

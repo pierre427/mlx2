@@ -9,21 +9,20 @@ provenance/kimi-linear-speculative.json.
 
 from __future__ import annotations
 
-import hashlib
 from pathlib import Path
 
 import mlx.core as mx
 
 from .ling_tree_executor import LingTreeExecutor, LingTreeTransaction
 from .models.kimi_tree import KimiTree
+from .technologies.tree_verify import revision_token
+from .technologies.tree_verify import TECHNOLOGY_SOURCES, _TECHNOLOGIES
 
 PROTOCOL = "kimi_linear_layerwise_packed_tree_v1"
 
 
 class KimiTreeTransaction(LingTreeTransaction):
-    def __init__(self, trees, token):
-        super().__init__(trees, token)
-        self.provider_protocol = PROTOCOL
+    protocol = PROTOCOL
 
 
 # Every source the tree forward executes: the tree contract, the Kimi model
@@ -31,8 +30,11 @@ class KimiTreeTransaction(LingTreeTransaction):
 # kernel modules those laws dispatch to.  Relative to runtime/.
 SOURCES = (
     "kimi_tree_executor.py", "ling_tree_executor.py", "hybrid_tree_executor.py",
+    "technologies/tree_verify.py", "technologies/dispatch.py",
     "models/kimi_tree.py", "models/ling_tree.py", "models/kimi_linear.py",
     "models/bailing_hybrid.py", "models/base.py", "models/qsdpa_decode_metal.py", "models/cache.py",
+    "technologies/window_attention/__init__.py", "technologies/window_attention/vector_sources.py",
+    "technologies/window_attention/vector_launch.py", "technologies/dispatch.py",
     "models/gated_delta.py", "models/gdn_chunk32.py", "models/kda_chunk_wy.py",
     "models/kimi_linear_fused.py", "models/qwen4_fused_gdn_prefill.py",
     "models/kimi_linear_mla_flash.py", "models/kimi_linear_mla_fused.py",
@@ -42,7 +44,16 @@ SOURCES = (
     "models/switch_layers.py", "models/moe_nax_gather.py", "models/invariant_prefill.py",
     # dense_weight untiles raw TensorFold banks for the absorbed MLA and router.
     "tensorfold_qwen38/lane_qmm.py",
+    # The technologies the Kimi/Ling laws call: the MLA reference, the
+    # linear-recurrence KDA laws and recurrence dispatch, their shared
+    # dispatch, and the gradient guard it asks.
+    "technologies/__init__.py", "technologies/linear_recurrence.py", 
+    "technologies/mla.py", "models/differentiable.py",
 )
+
+# Bind every technology module (runtime/technologies/**), deduplicated.
+SOURCES = tuple(dict.fromkeys(SOURCES + tuple(
+    "technologies/" + path.relative_to(_TECHNOLOGIES).as_posix() for path in TECHNOLOGY_SOURCES)))
 # Package imports of the Kimi tree/model/kernel modules left unbound, with why.
 UNBOUND_IMPORTS = {
     "served_exp": "device-fault classification in exception handlers; no numerics",
@@ -52,35 +63,19 @@ UNBOUND_IMPORTS = {
 }
 
 
-def _stat(path):
-    stat = path.stat()
-    return stat.st_ino, stat.st_size, stat.st_mtime_ns
-
-
 class KimiTreeExecutor(LingTreeExecutor):
     protocol = PROTOCOL
+    _identity_style = "name"
+    # Revalidation re-hashes only when a source's metadata moved: the bound
+    # set is ~0.8 MB, too much to hash on every tree dispatch.
+    _revision_error = "Kimi packed tree source changed"
 
     def __init__(self):
         root = Path(__file__).parent
-        self._sources = tuple(root / name for name in SOURCES)
-        self.source_identity = self._identity()
-        self._source_stats = tuple(_stat(path) for path in self._sources)
-        self.source_revision_token = hashlib.sha256(repr(self.source_identity).encode()).hexdigest()
+        self._bind_sources(tuple(root / name for name in SOURCES))
+        self.source_revision_token = revision_token(self.source_identity)
         self.dispatches = 0
         self.projection_rows = 0
-
-    def _identity(self):
-        return tuple((path.name, hashlib.sha256(path.read_bytes()).hexdigest()) for path in self._sources)
-
-    def validate_revision(self):
-        # Re-hash only when a source's inode, size or mtime moved: the bound
-        # set is ~0.8 MB, too much to hash on every tree dispatch.
-        stats = tuple(_stat(path) for path in self._sources)
-        if stats == self._source_stats:
-            return
-        if self._identity() != self.source_identity:
-            raise RuntimeError("Kimi packed tree source changed")
-        self._source_stats = stats
 
     def forward_many(self, model, inputs, parents, caches, layers, *, cached, configured_limit):
         self.validate_revision()

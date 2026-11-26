@@ -15,6 +15,7 @@ from .cache import KVCache
 from .pipeline import PipelineMixin
 from .rope_utils import initialize_rope
 from .switch_layers import SwitchGLU
+from ..technologies.moe_router import cached_spec, route as _route_reference
 
 
 @dataclass
@@ -131,17 +132,13 @@ def expert_select(
     routed_scaling_factor,
     norm_topk_prob,
 ):
-    scores = mx.sigmoid(gates.astype(mx.float32))
-    orig_scores = scores
-    scores = scores + expert_bias
-
-    inds = mx.argpartition(scores, kth=-top_k, axis=-1)[..., -top_k:]
-    scores = mx.take_along_axis(orig_scores, inds, axis=-1)
-    if top_k > 1 and norm_topk_prob:
-        scores = scores / (scores.sum(axis=-1, keepdims=True) + 1e-20)
-    scores = scores * routed_scaling_factor
-
-    return inds, scores
+    spec = cached_spec(
+        top_k=top_k, score_func="sigmoid", score_dtype="float32", use_bias=True,
+        topk_method="argpartition_high", norm_topk_prob=bool(norm_topk_prob),
+        norm_eps=1e-20, norm_min_top_k=2,
+        routed_scaling_factor=float(routed_scaling_factor),
+    )
+    return _route_reference(gates, spec, expert_bias)
 
 
 class MoEGate(nn.Module):

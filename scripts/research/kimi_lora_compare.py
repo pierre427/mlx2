@@ -20,6 +20,12 @@ METRICS = ('correct', 'format_ok', 'correct_and_format', 'capped',
            'unsupported_completion', 'protocol_failed')
 EVALUATION_CODE = ('scripts/research/kimi_lora_round.py', 'scripts/research/kimi_lora_data.py',
                    'src/mlx2/adapters/kimi_linear.py', 'src/mlx2/runtime/models/kimi_linear.py')
+# Bound by rounds recorded after the MLA math moved into technologies/
+# (2026-11-25). Required, and part of the binding, only on receipts that
+# carry them: two older arms still compare; an old arm against a new one has
+# different bindings and refuses.
+RECORDED_EVALUATION_CODE = ('src/mlx2/runtime/technologies/mla.py',
+                            'src/mlx2/runtime/technologies/dispatch.py')
 
 
 def sha(path):
@@ -107,6 +113,7 @@ def load_arm(receipt_path, arm):
             raise ValueError('receipt summary does not match recorded grades: ' + key)
     code = receipt.get('code_sha256', {})
     evaluation_code = (*EVALUATION_CODE, *SAMPLING_CODE) if explicit_receipt else EVALUATION_CODE
+    evaluation_code = (*evaluation_code, *(key for key in RECORDED_EVALUATION_CODE if key in code))
     if any(not isinstance(code.get(key), str) or len(code[key]) != 64 for key in evaluation_code):
         raise ValueError('receipt lacks exact evaluation code bindings')
     actual = receipt.get('evaluation_execution', {}).get(arm, receipt.get('actual_execution'))

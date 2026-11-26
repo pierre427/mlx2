@@ -10,22 +10,28 @@ from __future__ import annotations
 import mlx.core as mx
 
 from ...cow_cache import lend_append_only_kv, snapshot_prompt_cache_descriptors
+from ...technologies.tree_verify import (
+    KV_RAW_ROWS_SKIP_CHAIN_DTYPE_GUARD,
+    KVTreeOps,
+    RecurrentTerminalOps,
+    TreeTopology,
+    history_terminal_planes,
+    legacy_topology,
+    publish_descriptors,
+)
 from ..cache import ArraysCache, CacheList, KVCache, RotatingKVCache
 from .cache import InklingConvolutionCache
+
+TOPOLOGY = legacy_topology("inkling_packed")
+_KV = KVTreeOps(KV_RAW_ROWS_SKIP_CHAIN_DTYPE_GUARD)
+_SHORTCONV = RecurrentTerminalOps(history_terminal_planes(4), mixer="shortconv")
 
 
 class InklingTree:
     def __init__(self, parents, cache, *, descriptor_plan=None, descriptor_scope=None):
-        self.parents = tuple(parents)
-        if not 1 <= len(parents) <= 16:
-            raise ValueError("Inkling trees require 1..16 rows")
-        self.paths = []
-        for row, parent in enumerate(parents):
-            if type(parent) is not int or (
-                (row == 0 and parent != -1) or (row > 0 and not 0 <= parent < row)
-            ):
-                raise ValueError("Inkling tree must have one parent-first root")
-            self.paths.append([*(self.paths[parent] if parent >= 0 else []), row])
+        self.topology = TreeTopology(parents, TOPOLOGY)
+        self.parents = self.topology.parents
+        self.paths = self.topology.path_lists()
         # Depth-d chain path [0, ..., d]; a node whose path equals it reads a
         # prefix slice of K/V in the local-attention loop.
         self._chain_paths = [list(range(depth + 1)) for depth in range(len(parents))]
@@ -472,13 +478,7 @@ class InklingTree:
         return model.tap_outputs(hidden, taps, layers)
 
     def validate_path(self, path):
-        path = list(path)
-        if (
-            not path
-            or any(type(i) is not int or not 0 <= i < len(self.paths) for i in path)
-            or path != self.paths[path[-1]]
-        ):
-            raise ValueError("Inkling commit must follow one complete root path")
+        self.topology.validate_path(path)
 
     @staticmethod
     def forward_cohort(model, trees, tokens, layers):
@@ -574,39 +574,21 @@ class InklingTree:
                 )
                 private.caches = (chosen, private[1])
             else:
-                start = int(live[0].offset)
                 # Rows of a root-prefix path (every chain) already sit in
                 # order at start..start+len(path): nothing to write back.
                 # Other paths gather from the rows this round appended, not
                 # from a view of the lent buffer: a lazy view feeding the
                 # write stops MLX from donating the buffer, so every global
                 # layer copied its whole K/V prefix on each commit.
-                if path != list(range(len(path))):
-                    for field, raw in zip(
-                        ("keys", "values"), self.raw_kv[id(private)], strict=True
-                    ):
-                        values = getattr(private[0], field)
-                        source = (
-                            raw
-                            if raw.dtype == values.dtype
-                            else values[..., start : start + len(self.paths), :]
-                        )
-                        values[..., start : start + len(path), :] = mx.take(
-                            source, ids, axis=2
-                        )
-                        setattr(private[0], field, values)
-                private[0].offset = start + len(path)
-            history = self.histories[id(private[1])]
-            private[1].cache = [history[i][path[-1]] for i in range(4)]
-            private[1].advance(len(path))
+                _KV.prepare_commit(
+                    private[0], start=int(live[0].offset), path=list(path),
+                    width=len(self.paths), raw=self.raw_kv[id(private)],
+                )
+            _SHORTCONV.prepare_commit(private[1], self.histories[id(private[1])], path)
             prepared.extend(
                 (dst, src.__dict__.copy())
                 for dst, src in zip(live.caches, private.caches, strict=True)
             )
         return prepared
 
-    @staticmethod
-    def publish(prepared):
-        for live, fields in prepared:
-            live.__dict__.clear()
-            live.__dict__.update(fields)
+    publish = staticmethod(publish_descriptors)

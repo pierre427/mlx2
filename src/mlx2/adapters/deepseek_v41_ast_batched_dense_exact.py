@@ -201,16 +201,16 @@ def mixes_tile(block, h, kind):
     In particular, normalize AFTER the projection as Source does. Source's
     coefficient split remains separate from the residual HC expansion policy.
     """
-    import mlx.core as mx
     from ..runtime.models.deepseek_v4 import _sinkhorn_mix_fp32
     c, model = block.c, block.model
     rows = _rows(h, ndim=4, width=c.hidden_size)
     if h.shape[2] != c.hc_mult or kind not in ("attn", "ffn"):
         raise ValueError("Source AST M1 HC kind/hidden geometry mismatch")
     fn, scale, base = block.hc[kind]
-    flat = h.reshape(*h.shape[:2], -1).astype(mx.float32)
-    mixes = _float_batch_matmul(flat, fn)*mx.rsqrt(
-        mx.mean(mx.square(flat), -1, keepdims=True)+c.rms_norm_eps)
+    from ..runtime.models.deepseek_v41 import _hc_spec
+    from ..runtime.technologies.hyper_connections import hc_mixes
+    mixes = hc_mixes(_hc_spec(c), h.reshape(*h.shape[:2], -1),
+                     project=lambda flat: _float_batch_matmul(flat, fn))
     _record(model, "mixes", rows)
     if getattr(model, "hc_coeff_policy", "reference") == "source_fused_fp32":
         if c.hc_mult == 4:
@@ -253,5 +253,6 @@ def implementation_identity():
     root = Path(__file__).resolve().parents[1]
     paths = (Path(__file__), root/"runtime/gguf/source_ast_m1_dense_rows.py",
              root/"runtime/gguf/source_dense.py", root/"adapters/deepseek_v41_source_weights.py",
-             root/"runtime/models/deepseek_v41_source_hc.py")
+             root/"runtime/models/deepseek_v41_source_hc.py",
+             root/"runtime/technologies/hyper_connections.py", root/"runtime/technologies/dispatch.py")
     return hashlib.sha256(b"".join(hashlib.sha256(p.read_bytes()).digest() for p in paths)).hexdigest()

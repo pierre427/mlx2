@@ -32,6 +32,13 @@ import mlx.nn as nn
 import numpy as np
 
 from ..models.cache import _BaseCache
+from ..technologies.drafter_blocks import (
+    DraftAttention,
+    DraftAttentionSpec,
+    GatedMLP,
+    GatedMLPSpec,
+    chain_attend_rows,
+)
 
 _ARCHITECTURE = "EagleCohereForCausalLM"
 
@@ -234,57 +241,20 @@ class _Rows:
         self.rows = rows
 
 
-class CohereEagleAttention(nn.Module):
+class CohereEagleAttention(DraftAttention):
+    """Separate q/k/v without q/k norm, biased ``o_proj``, GPT-J (interleaved)
+    RoPE, and the vLLM Cohere SWA chain law: a query at ``pos`` sees keys in
+    ``[pos - sliding_window, pos]``.  Math: technologies.drafter_blocks."""
+
     def __init__(self, config: CohereEagleConfig):
-        super().__init__()
-        dim = config.hidden_size
-        self.n_heads = config.num_attention_heads
-        self.n_kv_heads = config.num_key_value_heads
-        self.head_dim = config.head_dim
-        self.scale = self.head_dim ** -0.5
-        # vLLM: a Cohere SWA layer sees [pos - sliding_window, pos].
-        self.window = config.sliding_window
-        self.q_proj = nn.Linear(dim, self.n_heads * self.head_dim, bias=False)
-        self.k_proj = nn.Linear(dim, self.n_kv_heads * self.head_dim, bias=False)
-        self.v_proj = nn.Linear(dim, self.n_kv_heads * self.head_dim, bias=False)
-        self.o_proj = nn.Linear(self.n_heads * self.head_dim, dim, bias=True)
-        # Cohere pairs RoPE dimensions GPT-J style (interleaved).
-        self.rope = nn.RoPE(self.head_dim, traditional=True, base=config.rope_theta)
-
-    def project(self, x):
-        batch, length, _ = x.shape
-        q = self.q_proj(x).reshape(batch, length, self.n_heads, self.head_dim)
-        k = self.k_proj(x).reshape(batch, length, self.n_kv_heads, self.head_dim)
-        v = self.v_proj(x).reshape(batch, length, self.n_kv_heads, self.head_dim)
-        return q.transpose(0, 2, 1, 3), k.transpose(0, 2, 1, 3), v.transpose(0, 2, 1, 3)
-
-    def attend(self, q, k, v, *, position, prior_k, prior_v, prior_start):
-        """One row.  ``q/k/v``: [1, H, L, D] for positions ``position..+L-1``;
-        ``prior_*`` are earlier keys starting at absolute ``prior_start``."""
-        length = q.shape[2]
-        q = self.rope(q, offset=position)
-        k = self.rope(k, offset=position)
-        keys = mx.concatenate([prior_k, k.astype(prior_k.dtype)], axis=2) if prior_k.shape[2] else k
-        values = mx.concatenate([prior_v, v.astype(prior_v.dtype)], axis=2) if prior_v.shape[2] else v
-        key_pos = mx.arange(prior_start, position + length)
-        query_pos = mx.arange(position, position + length)
-        delta = query_pos[:, None] - key_pos[None, :]
-        mask = (delta >= 0) & (delta <= self.window)
-        out = mx.fast.scaled_dot_product_attention(
-            q, keys.astype(q.dtype), values.astype(q.dtype), scale=self.scale, mask=mask
-        )
-        return out, k
+        super().__init__(DraftAttentionSpec.from_config(
+            config, rope_traditional=True, qk_norm=False, o_bias=True, mask_law="causal_window",
+        ))
 
 
-class CohereEagleMLP(nn.Module):
+class CohereEagleMLP(GatedMLP):
     def __init__(self, dim, hidden):
-        super().__init__()
-        self.gate_proj = nn.Linear(dim, hidden, bias=True)
-        self.up_proj = nn.Linear(dim, hidden, bias=True)
-        self.down_proj = nn.Linear(hidden, dim, bias=True)
-
-    def __call__(self, x):
-        return self.down_proj(nn.silu(self.gate_proj(x)) * self.up_proj(x))
+        super().__init__(dim, hidden, GatedMLPSpec(bias=True))
 
 
 class CohereEagleLayer(nn.Module):
@@ -395,33 +365,15 @@ class CohereEagleDraftModel(nn.Module):
             h = layer.input_layernorm(x)
             attn = layer.self_attn
             q, k, v = attn.project(h)
-            outputs = []
-            for row, caches in enumerate(rows):
-                cache = caches[index]
-                prior_k, prior_v = cache.keys_and_values()
-                local = None if commit else chain[row][index]
-                if local is not None and local[0] is not None:
-                    prior_k = mx.concatenate([prior_k, local[0]], axis=2) if prior_k.shape[2] else local[0]
-                    prior_v = mx.concatenate([prior_v, local[1]], axis=2) if prior_v.shape[2] else local[1]
-                position = cache.offset + (0 if local is None or local[0] is None else local[0].shape[2])
-                out, rotated = attn.attend(
-                    q[row:row + 1], k[row:row + 1], v[row:row + 1],
-                    position=position, prior_k=prior_k, prior_v=prior_v,
-                    prior_start=position - prior_k.shape[2],
-                )
-                outputs.append(out)
-                if commit:
-                    cache.append(rotated, v[row:row + 1])
-                else:
-                    old = chain[row][index]
-                    if old[0] is None:
-                        chain[row][index] = (rotated, v[row:row + 1])
-                    else:
-                        chain[row][index] = (
-                            mx.concatenate([old[0], rotated], axis=2),
-                            mx.concatenate([old[1], v[row:row + 1]], axis=2),
-                        )
-            o = mx.concatenate(outputs, axis=0).transpose(0, 2, 1, 3).reshape(batch, length, -1)
+            o, new_locals = chain_attend_rows(
+                attn, q, k, v, [caches[index] for caches in rows],
+                None if commit else [chain[row][index] for row in range(len(rows))],
+                commit=commit,
+            )
+            if not commit:
+                for row, local in enumerate(new_locals):
+                    chain[row][index] = local
+            o = o.transpose(0, 2, 1, 3).reshape(batch, length, -1)
             x = x + attn.o_proj(o) + layer.mlp(h)
         return self.norm(x)
 

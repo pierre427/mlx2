@@ -32,8 +32,14 @@ class FrameGeometry:
 
 @lru_cache(maxsize=1)
 def implementation_identity():
+    technologies = Path(__file__).resolve().parents[1] / "technologies"
     paths = (__file__, str(Path(__file__).with_name("deepseek_v41.py")),
-             str(Path(__file__).with_name("deepseek_v41_fused.py")))
+             str(Path(__file__).with_name("deepseek_v41_fused.py")),
+             str(technologies / "sparse_selection.py"),
+             # HC math moved to the hyper-connections technology.
+             str(technologies / "hyper_connections.py"),
+             str(technologies / "window_attention" / "__init__.py"),
+             str(technologies / "dispatch.py"))
     return hashlib.sha256((POLICY + ":" + ":".join(
         hashlib.sha256(Path(path).read_bytes()).hexdigest() for path in paths
     )).encode()).hexdigest()

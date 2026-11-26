@@ -43,9 +43,19 @@ import mlx.core as mx
 import mlx.nn as nn
 import numpy as np
 
+from ..technologies.drafter_blocks import (
+    DraftAttention,
+    DraftAttentionSpec,
+    GatedMLP,
+    GatedMLPSpec,
+    TapInjectionSpec,
+    inject_target_taps,
+    prenorm_block_layers,
+)
 from .cohere_eagle import EagleWindowKVCache, _Rows
 
 ARCHITECTURE = "MuseGlimmerAssistantModel"
+_TAP_INJECTION = TapInjectionSpec()
 # v2: raw lm_head logits and the bidirectional full block (reference law);
 # v1 projected through the target's logits tail with a causal block.
 MUSE_ASSISTANT_LAW_VERSION = "muse-assistant-raw-head-bidirectional-v2"
@@ -195,74 +205,20 @@ def expected_weights(config: MuseDFlashConfig) -> dict[str, tuple[str, list[int]
     return out
 
 
-class MuseDFlashAttention(nn.Module):
+class MuseDFlashAttention(DraftAttention):
+    """Separate q/k/v, per-head q/k RMSNorm, NeoX RoPE; the reference
+    sliding-layer law: a context key at position ``p`` is visible to a query
+    at ``q`` only when ``q - p < window``; every block key is visible to every
+    block query (bidirectional).  The resident ring holds the last
+    ``window - 1`` keys.  Math: technologies.drafter_blocks."""
+
     def __init__(self, config: MuseDFlashConfig):
-        super().__init__()
-        dim = config.hidden_size
-        self.n_heads = config.num_attention_heads
-        self.n_kv_heads = config.num_key_value_heads
-        self.head_dim = config.head_dim
-        self.window = config.sliding_window
-        self.scale = self.head_dim ** -0.5
-        self.q_proj = nn.Linear(dim, self.n_heads * self.head_dim, bias=False)
-        self.k_proj = nn.Linear(dim, self.n_kv_heads * self.head_dim, bias=False)
-        self.v_proj = nn.Linear(dim, self.n_kv_heads * self.head_dim, bias=False)
-        self.o_proj = nn.Linear(self.n_heads * self.head_dim, dim, bias=False)
-        self.q_norm = nn.RMSNorm(self.head_dim, eps=config.rms_norm_eps)
-        self.k_norm = nn.RMSNorm(self.head_dim, eps=config.rms_norm_eps)
-        self.rope = nn.RoPE(self.head_dim, traditional=False, base=config.rope_theta)
-
-    def _kv(self, x):
-        batch, length, _ = x.shape
-        k = self.k_proj(x).reshape(batch, length, self.n_kv_heads, self.head_dim)
-        v = self.v_proj(x).reshape(batch, length, self.n_kv_heads, self.head_dim)
-        return self.k_norm(k).transpose(0, 2, 1, 3), v.transpose(0, 2, 1, 3)
-
-    def context_kv(self, context, cache):
-        """Commit one row's context K/V (RoPE at absolute positions)."""
-        k, v = self._kv(context)
-        cache.append(self.rope(k, offset=cache.offset), v)
-
-    def block(self, x, cache):
-        """One row's proposal block over committed context (not stored).
-
-        Reference sliding-layer law: a context key at position ``p`` is
-        visible to a query at ``q`` only when ``q - p < window``; every block
-        key is visible to every block query (bidirectional; the block is far
-        shorter than the window).  The resident ring holds the last
-        ``window - 1`` keys.
-        """
-        batch, length, _ = x.shape
-        q = self.q_proj(x).reshape(batch, length, self.n_heads, self.head_dim)
-        q = self.rope(self.q_norm(q).transpose(0, 2, 1, 3), offset=cache.offset)
-        k, v = self._kv(x)
-        k = self.rope(k, offset=cache.offset)
-        ctx_k, ctx_v = cache.keys_and_values()
-        resident = int(ctx_k.shape[2])
-        keys = mx.concatenate([ctx_k.astype(k.dtype), k], axis=2) if resident else k
-        values = mx.concatenate([ctx_v.astype(v.dtype), v], axis=2) if resident else v
-        if resident:
-            # Context column c holds absolute position offset - resident + c.
-            rows = mx.arange(length)[:, None]
-            columns = mx.arange(resident)[None, :]
-            context = columns > rows + resident - self.window
-            block = mx.ones((length, length), dtype=mx.bool_)
-            mask = mx.concatenate([context, block], axis=-1)
-        else:
-            mask = None
-        out = mx.fast.scaled_dot_product_attention(q, keys, values, scale=self.scale, mask=mask)
-        return self.o_proj(out.transpose(0, 2, 1, 3).reshape(batch, length, -1))
+        super().__init__(DraftAttentionSpec.from_config(config, mask_law="bidirectional_window"))
 
 
-class MuseDFlashMLP(nn.Module):
+class MuseDFlashMLP(GatedMLP):
     def __init__(self, dim, hidden):
-        super().__init__()
-        self.gate_proj = nn.Linear(dim, hidden, bias=False)
-        self.up_proj = nn.Linear(dim, hidden, bias=False)
-        self.down_proj = nn.Linear(hidden, dim, bias=False)
-
-    def __call__(self, x):
-        return self.down_proj(nn.silu(self.gate_proj(x)) * self.up_proj(x))
+        super().__init__(dim, hidden, GatedMLPSpec())
 
 
 class MuseDFlashLayer(nn.Module):
@@ -354,7 +310,9 @@ class MuseDFlashDraftModel(nn.Module):
         if hidden.shape[1] == 0:
             return
         rows = self._rows(cache)
-        context = self.hidden_norm(self.fc(hidden))
+        context = inject_target_taps(
+            _TAP_INJECTION, hidden, fc=self.fc, hidden_norm=self.hidden_norm
+        )
         for row, caches in enumerate(rows):
             for layer, entry in zip(self.layers, caches):
                 layer.self_attn.context_kv(context[row:row + 1], entry)
@@ -384,14 +342,7 @@ class MuseDFlashDraftModel(nn.Module):
         # The drafter consumes the target's raw token embedding (the target's
         # scaleless embedding RMSNorm belongs to the target trunk).
         x = self._target.model.embed_tokens(tokens)
-        for index, layer in enumerate(self.layers):
-            h = layer.input_layernorm(x)
-            attn = mx.concatenate(
-                [layer.self_attn.block(h[row:row + 1], caches[index]) for row, caches in enumerate(rows)],
-                axis=0,
-            )
-            x = x + attn
-            x = x + layer.mlp(layer.post_attention_layernorm(x))
+        x = prenorm_block_layers(self.layers, x, rows)
         return self._logits(self.norm(x)[:, 1:1 + count])
 
     def draft_distributions(

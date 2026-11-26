@@ -16,6 +16,7 @@ from .base import BaseModelArgs, create_attention_mask, scaled_dot_product_atten
 from .cache import KVCache, RotatingKVCache
 from .rope_utils import initialize_rope
 from .switch_layers import SwitchGLU
+from ..technologies.moe_router import cached_spec, route as _route_reference
 
 
 @dataclass
@@ -38,16 +39,6 @@ class ModelArgs(BaseModelArgs):
 
 
 # These operators emulate particular methods in torch that don't exist in MLX natively
-def mlx_topk(a, k, axis=-1):
-    """MLX equivalent of torch.topk"""
-    partitioned_indices = mx.argpartition(a, kth=-k, axis=axis)
-    # Extract only the top k indices (last k elements after partition)
-    top_k_indices = partitioned_indices[..., -k:]
-    # Get the corresponding values
-    top_k_values = mx.take_along_axis(a, top_k_indices, axis=axis)
-    return top_k_values, top_k_indices
-
-
 @partial(mx.compile, shapeless=True)
 def swiglu(x_linear, x_glu, alpha: float = 1.702, limit: float = 7.0):
     # Clamp the input values
@@ -196,8 +187,9 @@ class MLPBlock(nn.Module):
             x = sum_gradients(self.sharding_group)(x)
 
         g = self.router(x)
-        experts, indices = mlx_topk(g, k=self.num_experts_per_tok, axis=-1)
-        expert_weights = mx.softmax(experts, axis=-1, precise=True)
+        indices, expert_weights = _route_reference(
+            g, cached_spec(top_k=self.num_experts_per_tok, softmax_position="after_topk")
+        )
 
         # Experts block
         x = self.experts(x, indices)

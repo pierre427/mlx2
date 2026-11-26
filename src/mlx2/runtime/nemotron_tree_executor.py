@@ -11,7 +11,6 @@ provenance/nemotron-h-mamba-tree.json.
 
 from __future__ import annotations
 
-import hashlib
 from pathlib import Path
 
 import mlx.core as mx
@@ -20,6 +19,8 @@ from .hybrid_tree_executor import HybridTreeExecutor
 from .models.nemotron_mamba_tree import TREE_KERNEL_LAW, parity_status
 from .models.nemotron_tree import NemotronTree
 from .target_tree_executor import TargetTreeDispatchMetrics
+from .technologies.tree_verify import TreeLaneTransaction, revision_token
+from .technologies.tree_verify import TECHNOLOGY_SOURCES, _TECHNOLOGIES
 
 PROTOCOL = "nemotron_h_layerwise_exact_tree_v1"
 # Per-node law: row n equals one-token decode along paths[n] on the same
@@ -29,69 +30,46 @@ TREE_LAW = "nemotron-h-exact-tree-v1:one-token-decode-per-path"
 # Every source the tree forward and commit execute, relative to runtime/.
 SOURCES = (
     "nemotron_tree_executor.py", "hybrid_tree_executor.py", "target_tree_executor.py",
+    "technologies/tree_verify.py", "technologies/dispatch.py",
     "models/nemotron_tree.py", "models/nemotron_mamba_tree.py", "models/nemotron_h.py",
+    "technologies/moe_router.py", 
     "models/nemotron_mamba_conv.py", "models/nemotron_mamba_ssm.py",
     "models/nemotron_mamba_norm.py", "models/served_exp.py", "models/ssm.py",
     "models/base.py", "models/cache.py", "models/qsdpa_decode_metal.py",
+    "technologies/window_attention/__init__.py", "technologies/window_attention/vector_sources.py",
+    "technologies/window_attention/vector_launch.py", 
     "models/fp_verify_tensor.py", "models/fp_row_exact_qmv.py", "models/row_exact_qmv.py",
     "models/switch_layers.py", "models/moe_nax_gather.py", "models/nemotron_routed_decode.py",
     "row_exact/ops.py", "row_exact/recipes.py", "row_exact/canary.py", "row_exact_verify.py",
 )
 
+# Bind every technology module (runtime/technologies/**), deduplicated.
+SOURCES = tuple(dict.fromkeys(SOURCES + tuple(
+    "technologies/" + path.relative_to(_TECHNOLOGIES).as_posix() for path in TECHNOLOGY_SOURCES)))
 
-def _stat(path):
-    stat = path.stat()
-    return stat.st_ino, stat.st_size, stat.st_mtime_ns
 
-
-class NemotronTreeTransaction:
-    executor_cached = False
-    physical_packed = False  # no physical cross-request packing
+class NemotronTreeTransaction(TreeLaneTransaction):
+    protocol = PROTOCOL
+    count_error = "Nemotron tree commit lane count mismatch or closed transaction"
+    close_on_refused_path = True  # legacy: validated inside its try/finally
 
     def __init__(self, trees, token):
-        self.trees = trees
-        self.closed = False
-        self.provider_protocol = PROTOCOL
-        self.provider_revision_token = token
-
-    def commit_paths(self, paths):
-        if self.closed or len(paths) != len(self.trees):
-            raise RuntimeError("Nemotron tree commit lane count mismatch or closed transaction")
-        try:
-            for tree, path in zip(self.trees, paths, strict=True):
-                tree.validate_path(path)
-            prepared = []
-            for tree, path in zip(self.trees, paths, strict=True):
-                prepared.extend(tree.prepare_commit(path))
-            NemotronTree.publish(prepared)
-            return [tree.live for tree in self.trees]
-        finally:
-            self._close()
-
-    def commit(self, *, accepted_lengths):
-        return self.commit_paths([list(range(int(length))) for length in accepted_lengths])
-
-    def abort(self):
-        self._close()
-
-    def _close(self):
-        self.closed = True
-        for tree in self.trees:
-            tree.release()
+        super().__init__(trees, token, publish=NemotronTree.publish)
 
 
 class NemotronTreeExecutor(HybridTreeExecutor):
     protocol = PROTOCOL
     maximum_cohort_width = 1
+    _identity_style = "relative"
+    _source_root = Path(__file__).parent
+    _revision_error = "Nemotron tree source changed"
 
     def __init__(self):
         root = Path(__file__).parent
-        self._sources = tuple(root / name for name in SOURCES)
-        self.source_identity = self._identity()
-        self._source_stats = tuple(_stat(path) for path in self._sources)
-        self.source_revision_token = hashlib.sha256(
-            repr((self.source_identity, TREE_LAW, TREE_KERNEL_LAW)).encode()
-        ).hexdigest()
+        self._bind_sources(tuple(root / name for name in SOURCES))
+        self.source_revision_token = revision_token(
+            (self.source_identity, TREE_LAW, TREE_KERNEL_LAW)
+        )
         self.dispatches = 0
         self.rows = 0
         self.backends = {}
@@ -103,21 +81,6 @@ class NemotronTreeExecutor(HybridTreeExecutor):
         executor = cls()
         executor.selected = bool(selected)
         return executor
-
-    def _identity(self):
-        return tuple(
-            (path.relative_to(Path(__file__).parent).as_posix(),
-             hashlib.sha256(path.read_bytes()).hexdigest())
-            for path in self._sources
-        )
-
-    def validate_revision(self):
-        stats = tuple(_stat(path) for path in self._sources)
-        if stats == self._source_stats:
-            return
-        if self._identity() != self.source_identity:
-            raise RuntimeError("Nemotron tree source changed")
-        self._source_stats = stats
 
     def forward(self, model, inputs, parents, cache, layers, *, cached):
         return self.forward_many(

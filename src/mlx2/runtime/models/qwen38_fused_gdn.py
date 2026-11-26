@@ -23,6 +23,7 @@ from . import qwen4_fused_gdn as kernels
 from . import qwen4_fused_gdn_prefill as prefill_kernels
 from . import qwen4_fused_gdn_verify as verify_kernels
 from .gdn_state import check_state
+from ..technologies import linear_recurrence as _lr
 from .qwen3_5 import GatedDeltaNet as ReferenceGatedDeltaNet
 from .qwen3_next import Qwen3NextRMSNormGated
 from .qwen_gdn_contracts import QWEN36_GDN_CONTRACT, QWEN38_GDN_CONTRACT
@@ -148,7 +149,7 @@ class GatedDeltaNet(ReferenceGatedDeltaNet):
         return None
 
     def _try_fused_decode(self, qkv, z, b, a, mask, cache, *, account=True):
-        if _differentiable.routed("fused_gdn"):
+        if _lr.kernel_refused("fused_gdn"):
             # A gradient trace: the fused kernels have no VJP; run the ordinary
             # recurrence (not a serving fallback, so no counter).
             return None
@@ -532,36 +533,13 @@ class GatedDeltaNet(ReferenceGatedDeltaNet):
         def restore_rows(lengths):
             # Snapshot slabs contain only positions before the lane's final
             # valid row.  Select checkpoint/final explicitly so neither zero
-            # nor full acceptance reads an unwritten padded snapshot.
-            if isinstance(lengths, mx.array):
-                lengths = lengths.tolist()
-            values = list(lengths)
-            if len(values) == 1 and rows > 1:
-                values *= rows
-            if len(values) != rows:
-                raise ValueError('batched GDN rollback length count changed')
-            ends = [
-                min(max(int(value), 0), int(count))
-                for value, count in zip(values, row_steps)
-            ]
-
-            def pick(snapshots, before, final):
-                selected = []
-                for lane, (end, count) in enumerate(zip(ends, row_steps)):
-                    if end == 0:
-                        value = before[lane:lane + 1]
-                    elif end == count:
-                        value = final[lane:lane + 1]
-                    else:
-                        value = snapshots[lane:lane + 1, end - 1]
-                    selected.append(value)
-                return mx.contiguous(mx.concatenate(selected, axis=0))
-
+            # nor full acceptance reads an unwritten padded snapshot.  The
+            # selection is the shared device-side one (no host read-back).
             if account:
                 self.fused_gdn_counters['batch_verify_rollbacks'] += 1
             return [
-                pick(convs, initial[0], conv),
-                pick(states, initial[1], state),
+                _lr.select_rollback_rows(lengths, row_steps, convs, initial[0], conv),
+                _lr.select_rollback_rows(lengths, row_steps, states, initial[1], state),
             ]
 
         def restore(length):

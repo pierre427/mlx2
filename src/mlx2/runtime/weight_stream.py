@@ -215,28 +215,15 @@ class TensorLocation:
 
 
 def _decode_header(first8: bytes, read_payload, size: int, path) -> Dict[str, dict]:
-    def unique_object(pairs):
-        result = {}
-        for key, value in pairs:
-            if key in result:
-                raise StreamingUnavailable(f"duplicate safetensors key {key!r}: {path}")
-            result[key] = value
-        return result
+    from .technologies.embedding_tables import parse_safetensors_header
 
-    if len(first8) != 8:
-        raise StreamingUnavailable(f"truncated safetensors header: {path}")
-    length = int.from_bytes(first8, "little")
-    if not 0 < length <= min(_SAFETENSORS_HEADER_LIMIT, size - 8):
-        raise StreamingUnavailable(f"invalid safetensors header length: {path}")
-    raw = read_payload(length)
-    try:
-        header = json.loads(raw.decode("utf-8"), object_pairs_hook=unique_object)
-    except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError) as error:
-        raise StreamingUnavailable(f"invalid safetensors JSON header: {path}") from error
+    header, data_offset = parse_safetensors_header(
+        first8, read_payload, strict_error=StreamingUnavailable, path=path, file_size=size,
+        header_limit=_SAFETENSORS_HEADER_LIMIT)
     if not isinstance(header, dict) or "__data_offset__" in header:
         raise StreamingUnavailable(f"invalid safetensors header object: {path}")
     header.pop("__metadata__", None)
-    return {"__data_offset__": 8 + length, **header}
+    return {"__data_offset__": data_offset, **header}
 
 
 def read_safetensors_header(path: Path) -> Dict[str, dict]:

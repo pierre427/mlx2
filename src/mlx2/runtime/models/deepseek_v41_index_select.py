@@ -39,6 +39,8 @@ provenance/ds41-index-select-tiling.json.
 
 import mlx.core as mx
 
+from ..technologies import sparse_selection as _sparse
+
 TILING_POLICIES = ("reference", "key_chunked_v1")
 SELECT_POLICIES = ("reference", "compact_v1")
 # Reduced (head-summed) score row budget per query-row tile. Same value as
@@ -75,17 +77,9 @@ def compact_ascending(keep, width):
     return out[..., :width]
 
 
-def stable_keep_mask(scores, top_k):
-    """The kept-column mask of ``deepseek_v4.stable_pool_topk`` (same law)."""
-    count = scores.shape[-1]
-    if type(top_k) is not int or not 1 <= top_k <= count:
-        raise ValueError("pool top-k must fit the available rows")
-    candidates = mx.argpartition(-scores, kth=top_k - 1, axis=-1)[..., :top_k]
-    cutoff = mx.min(mx.take_along_axis(scores, candidates, axis=-1), axis=-1, keepdims=True)
-    better = scores > cutoff
-    tied = scores == cutoff
-    remaining = top_k - mx.sum(better, axis=-1, keepdims=True)
-    return better | (tied & (mx.cumsum(tied.astype(mx.int32), axis=-1) <= remaining))
+# The kept-column mask of ``deepseek_v4.stable_pool_topk`` (same law); one
+# implementation in technologies.sparse_selection.
+stable_keep_mask = _sparse.stable_keep_mask
 
 
 def stable_topk_compact(scores, top_k):
@@ -134,17 +128,26 @@ def reduced_scores_chunked(query, weight, keys_for, count, chunk):
     (1, last-first, D) float32. Returns (1, R, count) float32 with the
     reference expression per element.
     """
+    from .deepseek_v41 import INDEX_SPEC
+
     parts = []
     for first in range(0, count, chunk):
         last = min(count, first + chunk)
-        part = mx.einsum("bhsd,btd->bsht", query, keys_for(first, last))
-        parts.append(mx.sum(mx.maximum(part, 0) * weight[:, :, :, None], 2))
+        parts.append(_sparse.score(INDEX_SPEC, query, keys_for(first, last), weight))
     return parts[0] if len(parts) == 1 else mx.concatenate(parts, -1)
 
 
 def implementation_identity():
-    """Bind numerics identity to this file's bytes until GPU bitwise evidence exists."""
+    """Bind numerics identity to this file's bytes until GPU bitwise evidence exists.
+
+    The keep-mask law and the score expression now live in
+    technologies.sparse_selection, so the identity also binds those laws'
+    source (``sparse_selection.implementation_identity``, which over-binds).
+    """
     import hashlib
     from pathlib import Path
 
-    return hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+    from .deepseek_v41 import INDEX_SPEC
+
+    law = _sparse.implementation_identity(INDEX_SPEC)
+    return hashlib.sha256(Path(__file__).read_bytes() + law.encode()).hexdigest()

@@ -10,6 +10,7 @@ from pathlib import Path
 import subprocess
 
 from ..runtime.target_tree_executor import TargetTreeDispatchMetrics
+from ..runtime.technologies.tree_verify import file_sha256
 
 AST_CHAIN_ORACLE_SCHEMA = "mlx2.qwen38-ast-chain-oracle.v1"
 AST_CHAIN_ORACLE_CHECKS = (
@@ -57,15 +58,12 @@ def ast_fast_cohort_domain():
 
 
 def _rooted_tree(inputs, parents):
+    from ..runtime.technologies.tree_verify import is_rooted_tree, legacy_topology
+
     return (
         1 <= len(inputs) <= 16
         and len(parents) == len(inputs)
-        and type(parents[0]) is int
-        and parents[0] == -1
-        and all(
-            type(parent) is int and 0 <= parent < index
-            for index, parent in enumerate(parents[1:], 1)
-        )
+        and is_rooted_tree(parents, legacy_topology("qwen38_rooted_tree"))
     )
 
 
@@ -82,6 +80,9 @@ _AST_SOURCE_PATHS = (
     "src/mlx2/runtime/qwen38_tensorfold.py",
     "src/mlx2/runtime/target_tree_executor.py",
     "src/mlx2/runtime/models/qwen38_tree_gdn.py",
+    "src/mlx2/runtime/technologies/tree_verify.py",
+    "src/mlx2/runtime/technologies/dispatch.py",
+    "src/mlx2/runtime/technologies/linear_recurrence.py",
     "src/mlx2/adapters/qwen38_fast_ast.py",
     "src/mlx2/runtime/lane/installer.py",
     "src/mlx2/runtime/lane/policy.py",
@@ -113,7 +114,7 @@ def _ast_source_binding(target_binding):
     ).returncode:
         raise ValueError("AST TensorFold oracle requires clean bound source")
     return revision, {
-        path: hashlib.sha256((_ROOT / path).read_bytes()).hexdigest() for path in paths
+        path: file_sha256(_ROOT / path) for path in paths
     }
 
 

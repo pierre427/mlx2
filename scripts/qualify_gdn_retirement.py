@@ -101,7 +101,11 @@ IDENTITY_FILES = (
     "src/mlx2/runtime/hybrid_speculative.py",
     "src/mlx2/runtime/generate.py",
     "src/mlx2/runtime/models/cache.py",
+    "src/mlx2/runtime/technologies/window_attention/__init__.py", "src/mlx2/runtime/technologies/window_attention/vector_sources.py",
+    "src/mlx2/runtime/technologies/window_attention/vector_launch.py", "src/mlx2/runtime/technologies/dispatch.py",
     "src/mlx2/runtime/models/qwen3_5.py",
+    "src/mlx2/runtime/technologies/linear_recurrence.py",
+    "src/mlx2/runtime/models/differentiable.py",
 )
 FILLER = "The keeper logged wind, swell and cloud each hour; ships passed at dusk. "
 

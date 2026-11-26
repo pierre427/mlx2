@@ -34,7 +34,9 @@ from dataclasses import dataclass
 import mlx.core as mx
 import numpy as np
 
+from ..technologies import window_attention as _window_attention
 from .mimo_v2_weights import MXFP4_GROUP
+from ..technologies.moe_router import cached_spec, route as _route_reference
 
 
 @dataclass(frozen=True)
@@ -188,12 +190,8 @@ def linear(x: mx.array, w: mx.array) -> mx.array:
 
 def attention_mask(T: int, window: int | None) -> mx.array:
     """Additive [T, T] mask: causal, and ``kv > q - window`` for a sliding layer."""
-    q = mx.arange(T)[:, None]
-    k = mx.arange(T)[None, :]
-    keep = k <= q
-    if window is not None:
-        keep = keep & (k > q - window)
-    return mx.where(keep, mx.array(0.0, mx.float32), mx.array(-mx.inf, mx.float32))
+    positions = mx.arange(T)
+    return _window_attention.additive_mask(_window_attention.window_keep(positions, positions, window))
 
 
 def attention(w: dict, x: mx.array, spec: AttnSpec, cfg: MiMoV2Config, *,
@@ -208,29 +206,16 @@ def attention(w: dict, x: mx.array, spec: AttnSpec, cfg: MiMoV2Config, *,
     cos, sin = rope_cos_sin(T, spec.rope_dim, spec.rope_theta, x.dtype)
     q = apply_partial_rope(q, cos, sin, spec.rope_dim)
     k = apply_partial_rope(k, cos, sin, spec.rope_dim)
-    groups = spec.heads // spec.kv_heads
-    if groups > 1:
-        k = mx.repeat(k, groups, axis=1)
-        v = mx.repeat(v, groups, axis=1)
     mask = attention_mask(T, spec.window if spec.sliding else None)
     sink = w.get("self_attn.attention_sink_bias") if spec.sink else None
     if spec.sink and sink is None:
         raise ValueError("layer declares an attention sink but has no attention_sink_bias")
-    scale = spec.head_dim ** -0.5
-    step = row_chunk or T
-    outs = []
-    for r0 in range(0, T, step):
-        r1 = min(T, r0 + step)
-        s = (q[:, :, r0:r1] @ k.transpose(0, 1, 3, 2)) * scale
-        s = s.astype(mx.float32) + mask[r0:r1]
-        if sink is not None:
-            col = mx.broadcast_to(sink.astype(mx.float32).reshape(1, -1, 1, 1), (B, spec.heads, r1 - r0, 1))
-            s = mx.concatenate([s, col], axis=-1)
-        p = mx.softmax(s - mx.max(s, axis=-1, keepdims=True), axis=-1).astype(x.dtype)
-        if sink is not None:
-            p = p[..., :-1]
-        outs.append(p @ v)
-    o = outs[0] if len(outs) == 1 else mx.concatenate(outs, axis=2)
+    o = _window_attention.reference_attention(
+        q, k, v,
+        _window_attention.WindowAttentionSpec(
+            sliding_window=spec.window if spec.sliding else None,
+            sink_logits=sink is not None, scale=spec.head_dim ** -0.5, mask_form="additive"),
+        mask=mask, sinks=sink, row_chunk=row_chunk, probs_dtype=x.dtype)
     o = o.transpose(0, 2, 1, 3).reshape(B, T, spec.heads * spec.v_head_dim)
     return linear(o, w["self_attn.o_proj.weight"])
 
@@ -257,22 +242,15 @@ def route(w: dict, x: mx.array, cfg: MiMoV2Config) -> tuple:
     B, T, d = x.shape
     E, k = cfg.n_routed_experts, cfg.top_k
     logits = x.reshape(-1, d).astype(mx.float32) @ w["mlp.gate.weight"].astype(mx.float32).T
-    scores = mx.sigmoid(logits)
-    choice = scores + w["mlp.gate.e_score_correction_bias"].astype(mx.float32)[None, :]
-    if cfg.n_group > 1:
-        g = choice.reshape(-1, cfg.n_group, E // cfg.n_group)
-        top2 = mx.sort(g, axis=-1)[..., -2:].sum(-1)                         # [N, n_group]
-        keep_g = mx.argsort(-top2, axis=-1)[:, :cfg.topk_group]
-        gmask = mx.zeros(top2.shape, mx.bool_)
-        gmask = mx.put_along_axis(gmask, keep_g, mx.array(True), axis=-1)
-        emask = mx.repeat(gmask, E // cfg.n_group, axis=-1)
-        choice = mx.where(emask, choice, mx.array(-mx.inf, mx.float32))
-    inds = mx.argsort(-choice, axis=-1)[:, :k]
-    weights = mx.take_along_axis(scores, inds, axis=-1)
-    if k > 1 and cfg.norm_topk_prob:
-        weights = weights / (weights.sum(-1, keepdims=True) + 1e-20)
-    weights = weights * cfg.routed_scaling_factor
-    return inds.astype(mx.int32).reshape(B, T, k), weights.reshape(B, T, k)
+    spec = cached_spec(
+        top_k=k, score_func="sigmoid", use_bias=True, bias_cast="to_scores",
+        n_group=cfg.n_group, topk_group=cfg.topk_group, group_select="keep_argsort",
+        topk_method="argsort_neg", norm_topk_prob=bool(cfg.norm_topk_prob),
+        norm_eps=1e-20, norm_min_top_k=2,
+        routed_scaling_factor=float(cfg.routed_scaling_factor), index_dtype="int32",
+    )
+    inds, weights = _route_reference(logits, spec, w["mlp.gate.e_score_correction_bias"])
+    return inds.reshape(B, T, k), weights.reshape(B, T, k)
 
 
 # ---------------------------------------------------------------- experts

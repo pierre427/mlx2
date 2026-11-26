@@ -23,7 +23,8 @@ def test_executor_source_binding_is_cached_until_a_source_changes(
     assert first.source_identity == second.source_identity
     assert first.source_revision == second.source_revision == "abc123"
     assert first.source_revision_token == second.source_revision_token
-    assert len(first.source_identity) == 17
+    # Flash-Next sources plus every technology module (tree_verify binds them all).
+    assert len(first.source_identity) == len(set(first.source_identity))
 
     # A changed source state on disk misses the cache (rehash + rev-parse).
     root = tmp_path

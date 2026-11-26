@@ -86,7 +86,10 @@ _REFUSED = (
 def implementation_identity():
     root = Path(__file__).resolve().parents[1]
     names = ('adapters/deepseek_v41_source_layer_major.py', 'runtime/models/deepseek_v41.py',
-             'runtime/models/deepseek_v41_cache.py', 'runtime/models/deepseek_v41_ced.py')
+             'runtime/models/deepseek_v41_cache.py', 'runtime/models/deepseek_v41_ced.py',
+             'runtime/technologies/sparse_selection.py', 'runtime/technologies/hyper_connections.py',
+             'runtime/technologies/dispatch.py', 'runtime/technologies/window_attention/__init__.py',
+             'runtime/technologies/window_attention/vector_sources.py', 'runtime/technologies/window_attention/vector_launch.py')
     return hashlib.sha256(''.join(name + ':' + hashlib.sha256((root / name).read_bytes()).hexdigest()
                                   for name in names).encode()).hexdigest()
 

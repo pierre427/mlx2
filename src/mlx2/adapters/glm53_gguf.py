@@ -790,8 +790,14 @@ class Glm53GGUFAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             "src/mlx2/runtime/drafters/dflash2.py",
             "src/mlx2/runtime/drafters/dflash2_config.py",
             "src/mlx2/runtime/models/glm53_gguf.py",
+            "src/mlx2/runtime/technologies/mla.py",
+            "src/mlx2/runtime/technologies/moe_router.py",
+            "src/mlx2/runtime/technologies/dispatch.py",
             "src/mlx2/runtime/models/glm53_gguf_mtp.py",
+            "src/mlx2/runtime/technologies/drafter_blocks.py",
             "src/mlx2/runtime/models/glm53_gguf_indexer.py",
+            # Indexer score/top-k laws (moved there, bound as a file).
+            "src/mlx2/runtime/technologies/sparse_selection.py",
             "src/mlx2/runtime/models/glm53_sparse_attention.py",
             # Kernel files bound unconditionally (round 2, WP5): they define
             # the served arithmetic, so a kernel-only edit must move the
@@ -808,6 +814,8 @@ class Glm53GGUFAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             "src/mlx2/runtime/models/glm53_glue_metal.py",
             "src/mlx2/runtime/models/glm53_kda_fused.py",
             "src/mlx2/runtime/models/gated_delta.py",
+            "src/mlx2/runtime/technologies/linear_recurrence.py",
+            "src/mlx2/runtime/models/differentiable.py",
             "src/mlx2/runtime/models/precise_ops.py",
             "src/mlx2/runtime/models/glm53_compile_regions.py",
             "src/mlx2/runtime/models/glm53_hc_mega.py",
@@ -818,6 +826,9 @@ class Glm53GGUFAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             "src/mlx2/runtime/gguf/reader.py",
             "src/mlx2/runtime/gguf/native_read_view.py",
             "src/mlx2/runtime/models/deepseek_v4_hc.py",
+            # GLM HC math (collapse/expand/coefficients) and the HC4 Metal
+            # source text that deepseek_v4_hc / glm53_hc_mega generate.
+            "src/mlx2/runtime/technologies/hyper_connections.py",
             "src/mlx2/runtime/gguf/k_metal.py",
             "src/mlx2/runtime/gguf/packed_metal.py",
             "src/mlx2/runtime/gguf/weights.py",

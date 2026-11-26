@@ -171,8 +171,16 @@ def implementation_identity():
     root = Path(__file__).resolve().parents[3]
     names = ("src/mlx2/adapters/deepseek_v41_ast_target.py",
              "src/mlx2/runtime/models/deepseek_v41.py",
+             "src/mlx2/runtime/technologies/sparse_selection.py", "src/mlx2/runtime/technologies/window_attention/__init__.py",
+             "src/mlx2/runtime/technologies/window_attention/vector_sources.py", "src/mlx2/runtime/technologies/window_attention/vector_launch.py",
+             # route_experts and the router reference it calls
+             "src/mlx2/runtime/models/deepseek_v4.py",
+             "src/mlx2/runtime/technologies/moe_router.py",
+             "src/mlx2/runtime/technologies/dispatch.py",
              "src/mlx2/runtime/models/deepseek_v41_cache.py",
              "src/mlx2/adapters/deepseek_v41_source.py",
+             "src/mlx2/runtime/technologies/embedding_tables.py",
+             
              "src/mlx2/adapters/deepseek_v41_source_canonical_prefill.py",
              "src/mlx2/adapters/deepseek_v41_source_checkpoint_resources.py",
              "src/mlx2/adapters/deepseek_v41_ast_bank_manager.py",
@@ -184,6 +192,8 @@ def implementation_identity():
              "src/mlx2/adapters/deepseek_v41_source_weights.py",
              "src/mlx2/runtime/models/deepseek_v41_quant.py",
              "src/mlx2/runtime/models/deepseek_v41_source_hc.py",
+             "src/mlx2/runtime/technologies/hyper_connections.py",
+             
              "src/mlx2/runtime/models/deepseek_v41_fused.py",
              "src/mlx2/runtime/models/served_exp.py",
              "src/mlx2/adapters/deepseek_v41_source_math.py",

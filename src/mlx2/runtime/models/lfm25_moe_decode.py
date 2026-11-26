@@ -13,6 +13,8 @@ from pathlib import Path
 
 import mlx.core as mx
 
+from ..technologies.moe_router import cached_spec, route as _route_reference
+
 MODE = "sigmoid_tail_v1"
 SCHEMA = "mlx2.lfm25-moe-decode.v1"
 
@@ -111,14 +113,14 @@ def route(block, probabilities, activation_dtype=mx.bfloat16):
 
 
 def reference_route(block, probabilities, activation_dtype=mx.bfloat16):
-    selection = probabilities.astype(mx.float32)
-    if block.use_expert_bias:
-        selection = selection + block.expert_bias
-    indices = mx.argpartition(selection, kth=-block.top_k, axis=-1)[..., -block.top_k:]
-    scores = mx.take_along_axis(probabilities, indices, axis=-1)
-    if block.norm_topk_prob:
-        scores = scores / (mx.sum(scores, axis=-1, keepdims=True) + 1e-6)
-    return indices, (scores * block.routed_scaling_factor).astype(activation_dtype)
+    # The block's ordinary law over already-computed sigmoid probabilities.
+    spec = cached_spec(
+        top_k=block.top_k, score_func="identity", selection_dtype="float32",
+        use_bias=bool(block.use_expert_bias), norm_topk_prob=bool(block.norm_topk_prob),
+        norm_eps=1e-6, routed_scaling_factor=float(block.routed_scaling_factor),
+    )
+    bias = block.expert_bias if block.use_expert_bias else None
+    return _route_reference(probabilities, spec, bias, out_dtype=activation_dtype)
 
 
 def combine(experts, scores):

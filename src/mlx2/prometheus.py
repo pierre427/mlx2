@@ -1751,6 +1751,38 @@ def _add_maxwell(builder: PrometheusBuilder, execution: Mapping[str, Any]) -> No
                           "Largest query chunk that gathers routed blocks.", rows)
 
 
+def _add_technologies(builder: PrometheusBuilder, execution: Mapping[str, Any]) -> None:
+    """Shared per-technology dispatch counters (runtime/technologies/dispatch)."""
+    technologies = execution.get("technologies")
+    if not isinstance(technologies, Mapping):
+        return
+
+    def rows(key, labels):
+        for row in technologies.get(key) or ():
+            if not isinstance(row, Mapping):
+                continue
+            count = row.get("count")
+            if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+                continue
+            yield count, {label: str(row.get(label, "")) for label in labels}
+
+    for count, labels in rows("selections", ("technology", "operation", "path")):
+        builder.counter(
+            "mlx2_technology_dispatch_total",
+            "Technology reference dispatches by selected path (a fast path, reference, "
+            "or failed_closed when a required path refused).",
+            count,
+            labels,
+        )
+    for count, labels in rows("refusals", ("technology", "operation", "path", "code")):
+        builder.counter(
+            "mlx2_technology_refusals_total",
+            "Fast-path refusals by bounded reason code during technology dispatch.",
+            count,
+            labels,
+        )
+
+
 def _add_execution(builder: PrometheusBuilder, execution: Mapping[str, Any]) -> None:
     """Export only reviewed advanced-path fields from adapter diagnostics."""
     _add_engram(builder, execution)
@@ -3010,6 +3042,7 @@ def render_engine_metrics(
     execution = snapshot.get("execution")
     if isinstance(execution, Mapping):
         _add_execution(builder, execution)
+        _add_technologies(builder, execution)
     spomin = snapshot.get("spomin_live_surgery")
     if isinstance(spomin, Mapping):
         for event, value in sorted((spomin.get("counts") or {}).items()):

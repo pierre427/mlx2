@@ -26,9 +26,19 @@ import mlx.core as mx
 import mlx.nn as nn
 import numpy as np
 
+from ..technologies.drafter_blocks import (
+    DraftAttention,
+    DraftAttentionSpec,
+    GatedMLP,
+    GatedMLPSpec,
+    TapInjectionSpec,
+    inject_target_taps,
+    prenorm_block_layers,
+)
 from .cohere_eagle import EagleWindowKVCache, _Rows
 
 _ARCHITECTURE = "DFlashLagunaForCausalLM"
+_TAP_INJECTION = TapInjectionSpec(per_tap_norm=True)
 
 
 @dataclass
@@ -153,71 +163,23 @@ def expected_weight_shapes(config: LagunaDFlashConfig) -> dict[str, list[int]]:
     return shapes
 
 
-class LagunaDFlashAttention(nn.Module):
+class LagunaDFlashAttention(DraftAttention):
+    """Packed ``qkv_proj``, per-head q/k RMSNorm, NeoX RoPE, a causal block
+    over all committed context, and per-head softplus gating (``g_proj``)
+    before ``o_proj``.  Math: technologies.drafter_blocks."""
+
     def __init__(self, config: LagunaDFlashConfig):
-        super().__init__()
-        self.n_heads = config.num_attention_heads
-        self.n_kv_heads = config.num_key_value_heads
-        self.head_dim = config.head_dim
-        self.scale = self.head_dim ** -0.5
-        dim = config.hidden_size
-        self.qkv_proj = nn.Linear(dim, (self.n_heads + 2 * self.n_kv_heads) * self.head_dim, bias=False)
-        self.o_proj = nn.Linear(self.n_heads * self.head_dim, dim, bias=False)
-        self.g_proj = nn.Linear(dim, self.n_heads, bias=False)
-        self.q_norm = nn.RMSNorm(self.head_dim, eps=config.rms_norm_eps)
-        self.k_norm = nn.RMSNorm(self.head_dim, eps=config.rms_norm_eps)
-        self.rope = nn.RoPE(self.head_dim, traditional=False, base=config.rope_theta)
+        super().__init__(DraftAttentionSpec.from_config(
+            config, qkv_layout="packed", head_gate="softplus_fp32", mask_law="causal_block",
+        ))
 
     def split(self, x):
-        batch, length, _ = x.shape
-        qkv = self.qkv_proj(x)
-        q_size = self.n_heads * self.head_dim
-        kv_size = self.n_kv_heads * self.head_dim
-        q = qkv[..., :q_size].reshape(batch, length, self.n_heads, self.head_dim)
-        k = qkv[..., q_size:q_size + kv_size].reshape(batch, length, self.n_kv_heads, self.head_dim)
-        v = qkv[..., q_size + kv_size:].reshape(batch, length, self.n_kv_heads, self.head_dim)
-        return (
-            self.q_norm(q).transpose(0, 2, 1, 3),
-            self.k_norm(k).transpose(0, 2, 1, 3),
-            v.transpose(0, 2, 1, 3),
-        )
-
-    def context_kv(self, context, cache):
-        """Commit one row's context K/V (RoPE at absolute positions)."""
-        _, k, v = self.split(context)
-        cache.append(self.rope(k, offset=cache.offset), v)
-
-    def block(self, x, cache):
-        """One row's causal proposal block over committed context (not stored)."""
-        batch, length, _ = x.shape
-        q, k, v = self.split(x)
-        q = self.rope(q, offset=cache.offset)
-        k = self.rope(k, offset=cache.offset)
-        ctx_k, ctx_v = cache.keys_and_values()
-        keys = mx.concatenate([ctx_k.astype(k.dtype), k], axis=2) if ctx_k.shape[2] else k
-        values = mx.concatenate([ctx_v.astype(v.dtype), v], axis=2) if ctx_v.shape[2] else v
-        mask = mx.concatenate(
-            [mx.ones((length, ctx_k.shape[2]), dtype=mx.bool_),
-             mx.tril(mx.ones((length, length), dtype=mx.bool_))], axis=-1
-        )
-        out = mx.fast.scaled_dot_product_attention(q, keys, values, scale=self.scale, mask=mask)
-        out = out.transpose(0, 2, 1, 3).reshape(batch, length, -1)
-        gate = nn.softplus(self.g_proj(x).astype(mx.float32)).astype(out.dtype)
-        out = (out.reshape(batch, length, self.n_heads, self.head_dim) * gate[..., None]).reshape(
-            batch, length, -1
-        )
-        return self.o_proj(out)
+        return self.project(x)
 
 
-class LagunaDFlashMLP(nn.Module):
+class LagunaDFlashMLP(GatedMLP):
     def __init__(self, dim, hidden):
-        super().__init__()
-        self.gate_proj = nn.Linear(dim, hidden, bias=False)
-        self.up_proj = nn.Linear(dim, hidden, bias=False)
-        self.down_proj = nn.Linear(hidden, dim, bias=False)
-
-    def __call__(self, x):
-        return self.down_proj(nn.silu(self.gate_proj(x)) * self.up_proj(x))
+        super().__init__(dim, hidden, GatedMLPSpec())
 
 
 class LagunaDFlashLayer(nn.Module):
@@ -290,9 +252,10 @@ class LagunaDFlashDraftModel(nn.Module):
         return cache.rows if isinstance(cache, _Rows) else [cache]
 
     def _context(self, hidden):
-        parts = mx.split(hidden, len(self.aux_hidden_norms), axis=-1)
-        normed = [norm(part) for norm, part in zip(self.aux_hidden_norms, parts)]
-        return self.hidden_norm(self.fc(mx.concatenate(normed, axis=-1)))
+        return inject_target_taps(
+            _TAP_INJECTION, hidden,
+            fc=self.fc, hidden_norm=self.hidden_norm, tap_norms=self.aux_hidden_norms,
+        )
 
     def append_context(self, hidden, cache):
         if hidden.shape[1] == 0:
@@ -310,14 +273,7 @@ class LagunaDFlashDraftModel(nn.Module):
              mx.full((len(anchors), count), self.config.mask_token_id, dtype=mx.int32)], axis=1
         )
         x = self.embed_tokens(tokens)
-        for index, layer in enumerate(self.layers):
-            h = layer.input_layernorm(x)
-            attn = mx.concatenate(
-                [layer.self_attn.block(h[row:row + 1], caches[index]) for row, caches in enumerate(rows)],
-                axis=0,
-            )
-            x = x + attn
-            x = x + layer.mlp(layer.post_attention_layernorm(x))
+        x = prenorm_block_layers(self.layers, x, rows)
         return self.lm_head(self.norm(x)[:, 1:])
 
     def draft_distributions(

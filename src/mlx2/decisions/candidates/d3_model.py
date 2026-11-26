@@ -6,6 +6,7 @@ import mlx.core as mx
 from mlx import nn
 
 from ...runtime.models.gated_delta import gated_delta_update
+from ...runtime.technologies import linear_recurrence as _lr
 from ...runtime.models.qwen3_5 import GatedDeltaNet, TextModelArgs
 from ...runtime.models.qwen38_27b import Qwen3NextAttention
 
@@ -44,17 +45,20 @@ class D3GatedNorm(nn.Module):
 
 
 class D3GatedDeltaNet(GatedDeltaNet):
-    """The trained reference's FP32 recurrence with explicit BF16 boundaries."""
+    """The trained reference's FP32 recurrence with explicit BF16 boundaries.
+
+    Its q/k law is the linear-recurrence ``l2_rsqrt`` in fp32.  It keeps its
+    own ``_gated_delta_update``: fp32 values in, readout cast back, and it
+    deliberately ignores installed prefill scans and the state class.
+    """
+
+    _RECURRENCE_LAWS = dict(qk_norm="l2_rsqrt", qk_norm_dtype="float32",
+                            beta_law="gate_sigmoid_input", decay_law="softplus_float32_inputs")
+    recurrence_spec = _lr.replace(_lr.QWEN35_GDN, **_RECURRENCE_LAWS)
 
     def __init__(self, args):
         super().__init__(args)
         self.norm = D3GatedNorm(args.linear_value_head_dim, args.rms_norm_eps)
-
-    def _normalize_qk(self, q, k):
-        q, k = q.astype(mx.float32), k.astype(mx.float32)
-        q = q * mx.rsqrt(mx.sum(q * q, axis=-1, keepdims=True) + 1e-6)
-        k = k * mx.rsqrt(mx.sum(k * k, axis=-1, keepdims=True) + 1e-6)
-        return q * (q.shape[-1] ** -0.5), k
 
     def _gated_delta_update(
         self, q, k, v, a, b, state, mask, use_kernel, *, prefill=False, allow_core=True

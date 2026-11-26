@@ -55,14 +55,11 @@ from ..switch_layers import (
 )
 
 
-def _route(x, weight, bias, top_k, route_scale):
-    # Same ops as ``language._route`` (kept textually identical).
-    scores = mx.sigmoid(x.astype(mx.float32) @ weight.astype(mx.float32).T)
-    indices = mx.argpartition(-(scores + bias), top_k - 1, axis=-1)[..., :top_k]
-    indices = mx.stop_gradient(indices)
-    weights = mx.take_along_axis(scores, indices, axis=-1)
-    weights = weights / (weights.sum(axis=-1, keepdims=True) + 1e-20) * route_scale
-    return indices, weights
+def _route(*args):
+    # ``language._route`` (the technologies.moe_router reference law).
+    from .language import _route as route
+
+    return route(*args)
 
 
 route_compiled = mx.compile(_route)
@@ -79,8 +76,10 @@ route_logdomain_compiled = mx.compile(_route_logdomain)
 
 
 def _scale_law(y, scale):
-    # ``nvfp4_linear._scale_law``: FP32 multiply, rounded back.
-    return (y.astype(mx.float32) * scale).astype(y.dtype)
+    # ``technologies.nvfp4_linear._scale_law``: FP32 multiply, rounded back.
+    from ...technologies.nvfp4_linear import _scale_law as law
+
+    return law(y, scale)
 
 
 def _swiglu_law(up, gate, gate_cap, up_cap):

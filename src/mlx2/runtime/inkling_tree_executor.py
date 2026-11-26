@@ -6,7 +6,6 @@ Convolution histories follow ancestry; requests retain independent caches.
 
 from __future__ import annotations
 
-import hashlib
 from pathlib import Path
 
 import mlx.core as mx
@@ -15,60 +14,36 @@ from .cow_cache import CommittedDescriptorPlan
 from .hybrid_tree_executor import HybridTreeExecutor
 from .models.inkling.tree import InklingTree
 from .target_tree_executor import TargetTreeDispatchMetrics
+from .technologies.tree_verify import (
+    TECHNOLOGY_SOURCES,
+    TreeLaneTransaction,
+    revision_token,
+    source_stat,
+)
 
 PROTOCOL = "inkling_layerwise_packed_tree_v1"
 
 
-def _source_stat(path):
-    value = path.stat()
-    return (
-        value.st_dev,
-        value.st_ino,
-        value.st_size,
-        value.st_mtime_ns,
-        value.st_ctime_ns,
-    )
+# Device, inode, size, mtime and ctime: same-sized writes with restored
+# mtimes still trigger exact content validation.
+_source_stat = source_stat
 
 
-class InklingTreeTransaction:
-    executor_cached = False
-    physical_packed = False
+class InklingTreeTransaction(TreeLaneTransaction):
+    protocol = PROTOCOL
+    count_error = "Inkling tree commit lane count mismatch or closed transaction"
 
     def __init__(self, trees, token, *, physical_packed=False, plain=False):
-        self.trees = trees
-        self.closed = False
-        self.provider_protocol = PROTOCOL
-        self.provider_revision_token = token
+        super().__init__(trees, token, publish=InklingTree.publish)
         self.physical_packed = physical_packed
         self.plain = plain
-
-    def commit_paths(self, paths):
-        if self.closed or len(paths) != len(self.trees):
-            raise RuntimeError(
-                "Inkling tree commit lane count mismatch or closed transaction"
-            )
-        for tree, path in zip(self.trees, paths, strict=True):
-            tree.validate_path(path)
-        try:
-            prepared = []
-            for tree, path in zip(self.trees, paths, strict=True):
-                prepared.extend(tree.prepare_commit(path))
-            InklingTree.publish(prepared)
-            return [tree.live for tree in self.trees]
-        finally:
-            self.closed = True
-
-    def commit(self, *, accepted_lengths):
-        return self.commit_paths(
-            [list(range(int(length))) for length in accepted_lengths]
-        )
-
-    def abort(self):
-        self.closed = True
 
 
 class InklingTreeExecutor(HybridTreeExecutor):
     protocol = PROTOCOL
+    _identity_style = "relative"
+    _source_root = Path(__file__).parent
+    _revision_error = "Inkling packed tree source changed"
     plain_anchor_protocol = "private-ordinary-anchor-v1"
     plain_anchor_max_width = 4
 
@@ -88,17 +63,16 @@ class InklingTreeExecutor(HybridTreeExecutor):
             root / "models/qwen36_moe_grouped.py",
             root / "models/qwen4_routed_decode.py",
             root / "hybrid_tree_executor.py",
+            *TECHNOLOGY_SOURCES,
             root / "cow_cache.py",
             root / "models/cache.py",
+            root / "technologies/window_attention/__init__.py",
+            root / "technologies/window_attention/vector_sources.py",
+            root / "technologies/window_attention/vector_launch.py",
+            root / "technologies/dispatch.py",
         )
-        before = tuple(_source_stat(path) for path in self._sources)
-        self.source_identity = self._identity()
-        self._source_stats = tuple(_source_stat(path) for path in self._sources)
-        if before != self._source_stats:
-            raise RuntimeError("Inkling packed tree source changed during binding")
-        self.source_revision_token = hashlib.sha256(
-            repr(self.source_identity).encode()
-        ).hexdigest()
+        self._bind_sources(self._sources)
+        self.source_revision_token = revision_token(self.source_identity)
         self.dispatches = 0
         self.projection_rows = 0
         self.physical_packed_dispatches = 0
@@ -130,25 +104,6 @@ class InklingTreeExecutor(HybridTreeExecutor):
             self.descriptor_plan_declines += 1
             self._descriptor_plans.pop(key, None)
         return tree
-
-    def _identity(self):
-        root = Path(__file__).parent
-        return tuple(
-            (str(path.relative_to(root)), hashlib.sha256(path.read_bytes()).hexdigest())
-            for path in self._sources
-        )
-
-    def validate_revision(self):
-        # Mine Kimi's metadata guard, adding device and ctime so same-sized
-        # writes with restored mtimes still trigger exact content validation.
-        stats = tuple(_source_stat(path) for path in self._sources)
-        if stats == self._source_stats:
-            return
-        if self._identity() != self.source_identity:
-            raise RuntimeError("Inkling packed tree source changed")
-        if tuple(_source_stat(path) for path in self._sources) != stats:
-            raise RuntimeError("Inkling packed tree source changed during validation")
-        self._source_stats = stats
 
     def forward_plain_anchors(self, model, inputs, caches, layers):
         """Accept lazy anchors from the generic ordinary parked pipeline."""

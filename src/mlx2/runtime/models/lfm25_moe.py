@@ -26,6 +26,7 @@ from .base import (
 from . import moe_nax_gather as _moe_nax
 from .cache import ArraysCache, KVCache
 from .switch_layers import SwitchGLU
+from ..technologies.moe_router import cached_spec, route as _route_reference
 
 @dataclass
 class ModelArgs(BaseModelArgs):
@@ -278,18 +279,13 @@ class SparseMoE(nn.Module):
             self.expert_bias = mx.zeros((args.num_experts,))
 
     def routing(self, x):
-        routing_weights = mx.sigmoid(self.gate(x))
-        selection_scores = routing_weights.astype(mx.float32)
-        if self.use_expert_bias:
-            selection_scores = selection_scores + self.expert_bias
-        indices = mx.argpartition(selection_scores, kth=-self.top_k, axis=-1)[
-            ..., -self.top_k :
-        ]
-        scores = mx.take_along_axis(routing_weights, indices, axis=-1)
-        if self.norm_topk_prob:
-            scores = scores / (mx.sum(scores, axis=-1, keepdims=True) + 1e-6)
-        scores = scores * self.routed_scaling_factor
-        return indices, scores.astype(x.dtype)
+        spec = cached_spec(
+            top_k=self.top_k, score_func="sigmoid", selection_dtype="float32",
+            use_bias=bool(self.use_expert_bias), norm_topk_prob=bool(self.norm_topk_prob),
+            norm_eps=1e-6, routed_scaling_factor=float(self.routed_scaling_factor),
+        )
+        bias = self.expert_bias if self.use_expert_bias else None
+        return _route_reference(self.gate(x), spec, bias, out_dtype=x.dtype)
 
     def __call__(self, x):
         handle = getattr(self, "_mlx2_decode_fusion", None)

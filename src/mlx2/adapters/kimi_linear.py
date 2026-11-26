@@ -517,14 +517,15 @@ class KimiLinearAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
         if self.tree_route:
             from ..runtime.hybrid_tree_executor import HybridTreeExecutor
             from ..runtime.kimi_tree_executor import KimiTreeExecutor
+            from ..runtime.technologies.tree_verify import build_tree_executor, tree_executor_choice
             from .qwen38_27b import _tile_node_budgets
 
-            serial = self.external_policy.get("ast_target_executor", "packed") == "serial"
+            choice = tree_executor_choice(self.external_policy)
             kwargs.setdefault("dynamic_singleton_tree", True)
             kwargs.setdefault("dynamic_tree_max_width", 4)
             kwargs.setdefault("dynamic_tree_overflow", "chain")
-            kwargs.setdefault("target_tree_executor_provider",
-                              (HybridTreeExecutor if serial else KimiTreeExecutor).create())
+            kwargs.setdefault("target_tree_executor_provider", build_tree_executor(
+                choice, serial=HybridTreeExecutor.create, packed=KimiTreeExecutor.create))
             kwargs.setdefault("tree_node_budget_by_lanes", _tile_node_budgets(
                 self.external_policy, 4, None, self.default_ast_tile_rows))
             for key in ("ast_topology", "ast_adaptive_rows"):

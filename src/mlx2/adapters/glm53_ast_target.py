@@ -16,14 +16,25 @@ import mlx.core as mx
 from ..runtime.cow_cache import snapshot_prompt_cache_descriptors
 from ..runtime.models.glm53_sparse_attention import Glm53MLAFrontier
 from ..runtime.target_tree_executor import TargetTreeDispatchMetrics
+from ..runtime.technologies.tree_verify import (
+    TECHNOLOGY_SOURCE_PATHS,
+    TreeTopology,
+    file_sha256,
+    legacy_topology,
+)
 
 PROTOCOL = "glm53-ordinary-row-tree-v1"
+TOPOLOGY = legacy_topology("glm_rooted_tree")
 ROOT = Path(__file__).resolve().parents[3]
-SOURCE_PATHS = (
+SOURCE_PATHS = tuple(dict.fromkeys((
     "src/mlx2/adapters/glm53_ast_target.py",
     "src/mlx2/adapters/glm53_layer_tree.py",
     "src/mlx2/runtime/models/glm53_gguf.py",
+    "src/mlx2/runtime/technologies/mla.py",
+    "src/mlx2/runtime/technologies/hyper_connections.py",
+    "src/mlx2/runtime/technologies/moe_router.py",
     "src/mlx2/runtime/models/glm53_gguf_indexer.py",
+    "src/mlx2/runtime/technologies/sparse_selection.py",
     "src/mlx2/runtime/models/glm53_sparse_attention.py",
     "src/mlx2/runtime/gguf/packed_metal.py",
     "src/mlx2/runtime/gguf/k_metal.py",
@@ -31,16 +42,20 @@ SOURCE_PATHS = (
     "src/mlx2/runtime/gguf/kblock_union_shared.py",
     "src/mlx2/runtime/cow_cache.py",
     "src/mlx2/runtime/models/gated_delta.py",
+    "src/mlx2/runtime/technologies/linear_recurrence.py",
+    "src/mlx2/runtime/technologies/dispatch.py",
+    "src/mlx2/runtime/models/differentiable.py",
     "src/mlx2/adapters/glm53_gguf.py",
     "src/mlx2/adapters/external_draft_policy.py",
     "src/mlx2/runtime/ast_tree_verify.py",
     "src/mlx2/runtime/ast_tree_tiles.py",
-)
+    *TECHNOLOGY_SOURCE_PATHS,
+)))
 
 
 def source_identity():
     return tuple(
-        (p, hashlib.sha256((ROOT / p).read_bytes()).hexdigest()) for p in SOURCE_PATHS
+        (p, file_sha256(ROOT / p)) for p in SOURCE_PATHS
     )
 
 
@@ -74,6 +89,7 @@ class Glm53TreeTransaction:
         )
         self.provider_protocol = provider.protocol
         self.parents = tuple(parents)
+        self.topology = TreeTopology(self.parents, TOPOLOGY)
         self.original = stamp(live)
         self.provider_revision_token = provider.source_revision_token
         self.closed = False
@@ -83,12 +99,7 @@ class Glm53TreeTransaction:
         if self.closed or stamp(self.live) != self.original:
             raise ValueError("GLM-5.3 AST transaction closed or live frontier changed")
         path = tuple(path)
-        if path and (
-            path[0] != 0
-            or any(type(i) is not int or not 0 <= i < len(self.parents) for i in path)
-            or any(self.parents[i] != p for p, i in zip((-1, *path[:-1]), path))
-        ):
-            raise ValueError("GLM-5.3 AST commit requires a root-connected path")
+        self.topology.validate_path(path, allow_empty=True)
         return self.materialize(self.base if not path else self.frontiers[path[-1]])
 
     def materialize(self, states):
@@ -168,19 +179,9 @@ class Glm53TargetTreeExecutor:
 
     def forward(self, model, inputs, parents, cache, layers, *, cached=True):
         self.validate_revision()
-        if (
-            model is not self.model
-            or not 1 <= len(inputs) <= 32
-            or len(parents) != len(inputs)
-            or parents[0] != -1
-            or any(
-                type(p) is not int or not 0 <= p < i
-                for i, p in enumerate(parents[1:], 1)
-            )
-        ):
-            raise ValueError(
-                "GLM-5.3 AST requires a parent-ordered rooted tree of at most32 rows"
-            )
+        if model is not self.model or len(parents) != len(inputs):
+            raise ValueError(TOPOLOGY.root_error)
+        TreeTopology(parents, TOPOLOGY)
         if any(
             type(t) is not int or not 0 <= t < model.args.vocab_size for t in inputs
         ):

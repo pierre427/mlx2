@@ -47,7 +47,22 @@ from .base import BaseModelArgs, create_attention_mask
 from .cache import KVCache
 from .rope_utils import initialize_rope
 from .switch_layers import SwitchGLU
+from ..technologies.moe_router import cached_spec, route as _route_reference
 from ..prefill_checkpoint_rows import select_checkpoint_rows
+from ..technologies.drafter_blocks import MTPFusionSpec, fuse_mtp_module
+
+# NEXTN tensors; the hidden is cast to the normed embedding's dtype first.
+_MTP_FUSION = MTPFusionSpec(hidden_cast="embed_dtype")
+# One MLA implementation (technologies/mla.py); the aliases keep the names
+# bailing_hybrid and tests import from here.
+from ..technologies import mla as _mla
+from ..technologies.mla import (  # noqa: F401
+    QuantizableMultiLinear as MultiLinear,
+    QuantizedMultiLinear,
+    absorbed_max_query,
+)
+from functools import lru_cache as _lru_cache
+from ..technologies import hyper_connections as _hc
 
 
 # --------------------------------------------------------------------------
@@ -123,7 +138,7 @@ class ModelArgs(BaseModelArgs):
 #: the geometric gate, ``0`` forces the expanded branch, a large value forces
 #: the absorbed branch). The two branches are the same math.
 ABSORBED_MAX_QUERY_OVERRIDE: Optional[int] = None
-_ABSORBED_UNBOUNDED = 1 << 30
+_ABSORBED_UNBOUNDED = 1 << 30  # == technologies.mla.ABSORBED_UNBOUNDED
 # Research-only toggle used by the source-bound GPU probe. Keep production
 # imports on the ordinary path until this capability has a qualification
 # receipt and an adapter route declaration.
@@ -151,76 +166,11 @@ def set_absorbed_max_query_override(value: Optional[int]) -> None:
     ABSORBED_MAX_QUERY_OVERRIDE = None if value is None else max(0, int(value))
 
 
-def absorbed_max_query(kv_lora_rank, qk_nope_head_dim, v_head_dim, cache_len=None) -> int:
-    """Largest query width L for which absorbed MLA is cheaper than expanded.
-
-    absorbed: 2*L*S*r + L*r*D; expanded: S*r*D + L*S*D (D = dn + dv). S is the
-    attended cache length; the asymptotic form (``cache_len=None``) overstates
-    the limit for cold prefill.
-    """
-    d = qk_nope_head_dim + v_head_dim
-    if cache_len is None:
-        numerator = kv_lora_rank * d
-        denom = 2 * kv_lora_rank - d
-    else:
-        numerator = cache_len * kv_lora_rank * d
-        denom = cache_len * (2 * kv_lora_rank - d) + kv_lora_rank * d
-    if denom <= 0:
-        return _ABSORBED_UNBOUNDED
-    return max(1, numerator // denom)
-
-
 def use_absorbed_path(query_len: int, cache_len: int, geometry) -> bool:
     limit = absorbed_max_query(*geometry, cache_len=cache_len)
     if ABSORBED_MAX_QUERY_OVERRIDE is not None:
         limit = ABSORBED_MAX_QUERY_OVERRIDE
     return query_len <= limit
-
-
-class MultiLinear(nn.Module):
-    def __init__(self, input_dims: int, output_dims: int, num_heads: int) -> None:
-        super().__init__()
-        scale = math.sqrt(1.0 / input_dims)
-        self.weight = mx.random.uniform(
-            low=-scale, high=scale, shape=(num_heads, output_dims, input_dims)
-        )
-
-    def __call__(self, x, transpose=True):
-        if transpose:
-            return x @ self.weight.swapaxes(-1, -2)
-        return x @ self.weight
-
-    def to_quantized(self, group_size: int, bits: int, mode: str = "affine"):
-        num_heads, output_dims, input_dims = self.weight.shape
-        ql = QuantizedMultiLinear(input_dims, output_dims, num_heads, group_size, bits, mode)
-        ql.weight, ql.scales, *biases = mx.quantize(self.weight, group_size, bits, mode=mode)
-        ql.biases = biases[0] if biases else None
-        return ql
-
-
-class QuantizedMultiLinear(nn.Module):
-    def __init__(self, input_dims, output_dims, num_heads, group_size, bits, mode):
-        super().__init__()
-        self.group_size = group_size
-        self.bits = bits
-        self.mode = mode
-        scale = math.sqrt(1 / input_dims)
-        weight = mx.random.uniform(low=-scale, high=scale, shape=(num_heads, output_dims, input_dims))
-        self.weight, self.scales, *biases = mx.quantize(weight, group_size, bits, mode=mode)
-        self.biases = biases[0] if biases else None
-        self.freeze()
-
-    def __call__(self, x, transpose=True):
-        return mx.quantized_matmul(
-            x,
-            self["weight"],
-            scales=self["scales"],
-            biases=self.get("biases"),
-            transpose=transpose,
-            group_size=self.group_size,
-            bits=self.bits,
-            mode=self.mode,
-        )
 
 
 # --------------------------------------------------------------------------
@@ -256,15 +206,14 @@ class Xing4_0Attention(nn.Module):
         self.absorbed_geometry = (self.kv_lora_rank, self.qk_nope_head_dim, self.v_head_dim)
         self.o_proj = nn.Linear(self.num_heads * self.v_head_dim, args.hidden_size, bias=args.attention_bias)
 
-        scaling = args.rope_scaling
-        if scaling is not None:
-            rope_type = scaling.get("type") or scaling.get("rope_type", "default")
-            mscale_all_dim = scaling.get("mscale_all_dim", 0)
-            factor = scaling.get("factor", 1.0)
-            # HF: only non-default rope types with a truthy mscale_all_dim.
-            if rope_type != "default" and mscale_all_dim and factor > 1:
-                s = 0.1 * mscale_all_dim * math.log(factor) + 1.0
-                self.scale = self.scale * s * s
+        # HF: yarn mscale only for non-default rope types with a truthy
+        # mscale_all_dim (mscale_rule="nondefault_rope_type").
+        self.mla_spec = _mla.MLASpec.from_config(
+            args, mscale_rule="nondefault_rope_type", mscale_order="sequential",
+            absorbed_rule="cost_model", absorbed_layout="fold_heads",
+            pe_form="score_bias", sdpa_route="fast",
+        )
+        self.scale = self.mla_spec.softmax_scale
         # HF's interleaved apply (rope_interleave=True) is MLX traditional RoPE
         # up to a fixed permutation of the rope dims that cancels in q_pe.k_pe.
         self.rope = initialize_rope(
@@ -284,15 +233,8 @@ class Xing4_0Attention(nn.Module):
         broadcast GQA form on M5).  Rows are ordered (position, head); a
         per-position mask is repeated per head to match.
         """
-        B, H, L, D = q_latent.shape
-        q = q_latent.transpose(0, 2, 1, 3).reshape(B, 1, L * H, D)
-        q_pe = (q_pe * self.scale).transpose(0, 2, 1, 3).reshape(B, 1, L * H, q_pe.shape[-1])
-        pe_scores = q_pe @ k_pe.swapaxes(-1, -2)
-        if mask is not None:
-            rows = mx.repeat(mask, H, axis=-2)
-            pe_scores = mx.where(rows, pe_scores, mx.array(mx.finfo(pe_scores.dtype).min, pe_scores.dtype))
-        output = mx.fast.scaled_dot_product_attention(q, kv_latent, kv_latent, scale=self.scale, mask=pe_scores)
-        return output.reshape(B, L, H, D).transpose(0, 2, 1, 3)
+        return _mla.absorbed_attention(
+            self.mla_spec, q_latent, q_pe, kv_latent, k_pe, mask, scale=self.scale)
 
     def _attend(self, q_nope, q_pe, kv_latent, k_pe, mask, *, fused_q_latent=None):
         """MLA over one latent history; returns [B, H, L, v_head_dim]."""
@@ -309,15 +251,12 @@ class Xing4_0Attention(nn.Module):
             return self.unembed_out(latent_output)
         if use_absorbed_path(L, k_pe.shape[-2], self.absorbed_geometry):
             return self.unembed_out(self._absorbed(self.embed_q(q_nope), q_pe, kv_latent, k_pe, mask))
-        pe_scores = (q_pe * self.scale) @ k_pe.swapaxes(-1, -2)
-        if mask is not None:
-            pe_scores = mx.where(mask, pe_scores, mx.array(mx.finfo(pe_scores.dtype).min, pe_scores.dtype))
-
-        # Call SDPA directly: the latent is both key and value, so a cache's
+        # sdpa_route="fast": the latent is both key and value, so a cache's
         # bucketed-attention hook (which reads cache.values) must not be used.
         k = self.embed_q(kv_latent, transpose=False)
         v = self.unembed_out(kv_latent)
-        return mx.fast.scaled_dot_product_attention(q_nope, k, v, scale=self.scale, mask=pe_scores)
+        return _mla.expanded_attention(
+            self.mla_spec, q_nope, q_pe, k, v, k_pe, mask, scale=self.scale)
 
     def __call__(self, x: mx.array, mask: Optional[mx.array] = None, cache: Optional[Any] = None) -> mx.array:
         B, L, _ = x.shape
@@ -428,13 +367,12 @@ def router_select(x, weight, e_score_correction_bias, top_k, routed_scaling_fact
     HF ignores ``n_group``/``topk_group`` (no group-limited selection); so do we.
     """
     logits = x.astype(mx.float32) @ weight.astype(mx.float32).T
-    scores = mx.sigmoid(logits)
-    biased = scores + e_score_correction_bias.astype(mx.float32)
-    inds = mx.argpartition(-biased, kth=top_k - 1, axis=-1)[..., :top_k]
-    weights = mx.take_along_axis(scores, inds, axis=-1)
-    if norm_topk_prob:
-        weights = weights / (weights.sum(axis=-1, keepdims=True) + 1e-20)
-    return inds, weights * routed_scaling_factor
+    spec = cached_spec(
+        top_k=top_k, score_func="sigmoid", use_bias=True, bias_cast="to_scores",
+        topk_method="argpartition_neg", norm_topk_prob=bool(norm_topk_prob),
+        norm_eps=1e-20, routed_scaling_factor=float(routed_scaling_factor),
+    )
+    return _route_reference(logits, spec, e_score_correction_bias)
 
 
 class MoEGate(nn.Module):
@@ -571,31 +509,39 @@ def mhc_stats(reset: bool = False) -> dict:
     return out
 
 
+# Xing4.0 mHC law (HF Xing4_0HyperConnection): no eps on the pre gate,
+# clamped combine logits, unnormalised exp(x - max) seed with no eps, then
+# ``hc_sinkhorn_iters`` full (row, column) passes, and ``comb @ streams``.
+_HC_LAW = dict(
+    pre_eps=False, comb_normalizer="exp_max_shift", comb_seed_eps=False,
+    softmax_counts_as_first_pass=False, orientation="direct", expand_out="residual",
+)
+_UPDATE_SPEC = _hc.HCSpec(**_HC_LAW)
+
+
+@_lru_cache(maxsize=64)
+def _hc_spec(n, iters=20, eps=1e-6, lo=None, hi=None, norm_eps=1e-6):
+    clip = None if lo is None else (lo, hi)
+    return _hc.HCSpec(hc_mult=n, sinkhorn_iters=iters, eps=eps, comb_clip=clip,
+                      norm_eps=norm_eps, **_HC_LAW)
+
+
 def _mhc_mix_logits(streams, hc_fn, norm_eps):
     """Unweighted fp32 RMSNorm over the flattened streams, then ``@ hc_fn.T``."""
-    flat = streams.reshape(*streams.shape[:-2], -1).astype(mx.float32)
-    flat = mx.fast.rms_norm(flat, None, norm_eps)
-    return flat @ hc_fn.astype(mx.float32).T
+    spec = _hc_spec(streams.shape[-2], norm_eps=norm_eps)
+    return _hc.hc_mixes(spec, streams.reshape(*streams.shape[:-2], -1), hc_fn)
 
 
 def _mhc_coeffs_body(streams, pre_w, post_w, comb_w, scale, pre_b, post_b, comb_b, iters, eps, lo, hi):
     """fp32 pre/post/comb + Sinkhorn + collapse. Every input shape-agnostic."""
-    pre = mx.sigmoid(pre_w * scale[0] + pre_b)
-    post = 2.0 * mx.sigmoid(post_w * scale[1] + post_b)
-    comb = mx.clip(comb_w * scale[2] + comb_b, lo, hi)
-    comb = mx.exp(comb - comb.max(axis=-1, keepdims=True))
-    for _ in range(iters):
-        comb = comb / (comb.sum(axis=-1, keepdims=True) + eps)
-        comb = comb / (comb.sum(axis=-2, keepdims=True) + eps)
-    collapsed = (mx.expand_dims(pre, -1) * streams.astype(mx.float32)).sum(axis=-2)
-    return post, comb, collapsed.astype(streams.dtype)
+    spec = _hc_spec(streams.shape[-2], iters, eps, lo, hi)
+    pre, post, comb = _hc.hc_gates(spec, pre_w, post_w, comb_w, scale, pre_b, post_b, comb_b)
+    return post, comb, _hc.hc_collapse(spec, streams, pre)
 
 
 def _mhc_update_body(streams, out, post, comb):
     """``post[..., None] * out[..., None, :] + comb @ streams`` in fp32 (HF orientation)."""
-    s32 = streams.astype(mx.float32)
-    new = mx.expand_dims(post, -1) * mx.expand_dims(out.astype(mx.float32), -2) + comb @ s32
-    return new.astype(streams.dtype)
+    return _hc.hc_expand(_UPDATE_SPEC, out, streams, post, comb)
 
 
 def _compiled(key, builder):
@@ -1040,9 +986,7 @@ class Model(nn.Module):
             raise RuntimeError("Xing4.0 MTP head is not loaded")
         layer = self.mtp.layers[0]
         embed = layer.embed_tokens if "embed_tokens" in layer else self.model.embed_tokens
-        e = layer.enorm(embed(tokens))
-        h = layer.hnorm(hidden.astype(e.dtype))
-        x = layer.eh_proj(mx.concatenate([e, h], axis=-1))
+        x = fuse_mtp_module(_MTP_FUSION, layer, embed(tokens), hidden)
         cache = mtp_cache[0]
         mask = create_attention_mask(x, cache, return_array=True)
         x = layer.block(x, mask, cache)

@@ -26,10 +26,14 @@ from .base import (
 )
 from .cache import ArraysCache, KVCache
 from .gated_delta import gated_delta_update
+from ..technologies import linear_recurrence as _lr
 from .rope_utils import initialize_rope
 from . import ling_rowwise, moe_nax_gather
 from .switch_layers import SwiGLU, SwitchGLU
 from .xing4_0 import MultiLinear
+from ..technologies.drafter_blocks import NEXTN_FUSION, fuse_mtp_module
+from ..technologies import mla as _mla
+from ..technologies.moe_router import cached_spec, route as _route_reference
 
 
 @dataclass
@@ -225,12 +229,14 @@ class MultiLatentAttention(nn.Module):
             bias=args.use_qkv_bias,
         )
 
-        if args.rope_scaling is not None:
-            mscale_all_dim = args.rope_scaling.get("mscale_all_dim", 0)
-            scaling_factor = args.rope_scaling.get("factor", 1)
-            if mscale_all_dim and scaling_factor > 1:
-                mscale = 0.1 * mscale_all_dim * math.log(scaling_factor) + 1.0
-                self.scale *= mscale * mscale
+        # yarn mscale whenever mscale_all_dim and factor > 1, applied as
+        # scale *= mscale * mscale (mscale_rule/mscale_order of the spec).
+        self.mla_spec = _mla.MLASpec.from_config(
+            args, mscale_rule="any_rope_type", mscale_order="squared",
+            absorbed_rule="single_row", absorbed_layout="broadcast",
+            pe_form="score_bias", sdpa_route="base",
+        )
+        self.scale = self.mla_spec.softmax_scale
 
         self.rope_base = float(args.rope_theta)
         # 3D M-RoPE here is the unscaled pair-interleaved law only (no YaRN).
@@ -424,24 +430,11 @@ class MultiLatentAttention(nn.Module):
         # one-row absorbed formula instead of the expanded one, so each verify
         # row follows the decode step's arithmetic order.
         absorbed = length == 1 or (self.ling_absorbed_verify_rows and length <= 16)
-        pe_scores = (q_pe * self.scale) @ k_pe.swapaxes(-1, -2)
-        if mask is not None:
-            pe_scores = mx.where(
-                mask,
-                pe_scores,
-                mx.array(mx.finfo(pe_scores.dtype).min, pe_scores.dtype),
-            )
-        if absorbed:
-            q_nope = self.embed_q(q_nope)
-            keys = values = kv_latent
-        else:
-            keys = self.embed_q(kv_latent, transpose=False)
-            values = self.unembed_out(kv_latent)
-        output = scaled_dot_product_attention(
-            q_nope, keys, values, cache=cache, scale=self.scale, mask=pe_scores,
+        output = _mla.score_bias_attend(
+            self.mla_spec, q_nope, q_pe, kv_latent, k_pe, mask,
+            embed_q=self.embed_q, unembed_out=self.unembed_out, absorbed=absorbed,
+            scale=self.scale, cache=cache,
         )
-        if absorbed:
-            output = self.unembed_out(output)
         if absorbed and length > 1:
             self.ling_calls["mla_absorbed_verify_rows"] += 1
         self.ling_calls["mla_reference"] += 1
@@ -508,16 +501,10 @@ class MultiLatentAttention(nn.Module):
         if cache is not None:
             kv_latent, k_pe = cache.update_and_fetch(kv_latent, k_pe)
 
-        pe_scores = (q_pe * self.scale) @ k_pe.swapaxes(-1, -2)
-        if mask is not None and not isinstance(mask, str):
-            pe_scores = mx.where(
-                mask[..., -1:, :],
-                pe_scores,
-                mx.array(mx.finfo(pe_scores.dtype).min, pe_scores.dtype),
-            )
-        output = scaled_dot_product_attention(
-            self.embed_q(q_nope), kv_latent, kv_latent,
-            cache=cache, scale=self.scale, mask=pe_scores,
+        last_mask = mask[..., -1:, :] if mask is not None and not isinstance(mask, str) else None
+        output = _mla.absorbed_attention(
+            self.mla_spec, self.embed_q(q_nope), q_pe, kv_latent, k_pe, last_mask,
+            scale=self.scale, cache=cache,
         )
         output = self.unembed_out(output).transpose(0, 2, 1, 3)
         self.ling_calls["mla_tail"] += 1
@@ -563,26 +550,7 @@ class ShortConv1d(nn.Module):
         mask: mx.array | None,
         lengths: mx.array | None,
     ) -> tuple[mx.array, mx.array]:
-        if mask is not None:
-            x = mx.where(mask[..., None], x, 0)
-
-        if state is None:
-            state = mx.zeros(
-                (x.shape[0], self.kernel_size - 1, x.shape[-1]),
-                dtype=x.dtype,
-            )
-        conv_input = mx.concatenate([state, x], axis=1)
-        output = nn.silu(self.conv(conv_input))
-        n_keep = self.kernel_size - 1
-
-        if lengths is not None:
-            ends = mx.clip(lengths, 0, x.shape[1])
-            positions = (ends[:, None] + mx.arange(n_keep))[..., None]
-            new_state = mx.take_along_axis(conv_input, positions, axis=1)
-        else:
-            new_state = mx.contiguous(conv_input[:, -n_keep:, :])
-
-        return output, new_state
+        return _lr.short_conv(x, state, mask, lengths, self.conv, kernel_size=self.kernel_size)
 
 
 class KimiDeltaAttention(nn.Module):
@@ -601,6 +569,10 @@ class KimiDeltaAttention(nn.Module):
         # Omitting it changes the recurrence even though every shape matches.
         self.lower_bound = args.kda_lower_bound
         self.scale = float(self.head_dim) ** -0.5
+        # Ling's KDA laws: rms q/k with eps 1e-6 on the MEAN, the bounded
+        # sigmoid gate (unbounded softplus when the checkpoint has no bound).
+        self.recurrence_spec = _lr.LinearRecurrenceSpec.from_config(
+            args, qk_norm="rms_mean", core_scan=True)
         self.ling_merged_conv = False
         self.ling_fused_norm = False
         self.ling_kda_fused = False
@@ -705,8 +677,7 @@ class KimiDeltaAttention(nn.Module):
             k = self.scale * ling_rowwise.rows(
                 lambda row: mx.fast.rms_norm(row, None, 1e-6), k, axis=1)
         else:
-            q = (self.scale**2) * mx.fast.rms_norm(q, None, 1e-6)
-            k = self.scale * mx.fast.rms_norm(k, None, 1e-6)
+            q, k = _lr.normalize_qk(self.recurrence_spec, q, k)
 
         if self.no_kda_lora:
             decay_logits = self.f_proj(x)
@@ -884,7 +855,7 @@ class KimiDeltaAttention(nn.Module):
         return tuple(item[0] for item in values), tuple(item[1] for item in values)
 
     def output_norm_gate(self, output, gate):
-        if self.ling_fused_norm and not self.training:
+        if self.ling_fused_norm and not self.training and not _lr.kernel_refused("kda_fused"):
             from .ling_fused import norm_gate
 
             result = norm_gate(output, gate, self.o_norm.weight, self.o_norm.eps)
@@ -947,44 +918,20 @@ def group_expert_select(
     score_function: str,
     group_mask_neg_inf: bool = False,
 ) -> tuple[mx.array, mx.array]:
-    input_type = gates.dtype
-    if score_function == "sigmoid":
-        scores = mx.sigmoid(gates.astype(mx.float32))
-    elif score_function == "softmax":
-        scores = mx.softmax(gates.astype(mx.float32), axis=-1, precise=True)
-    else:
+    if score_function not in ("sigmoid", "softmax"):
         raise ValueError(f"Unsupported MoE score function: {score_function}")
-
-    original_scores = scores
-    if expert_bias is not None:
-        scores = scores + expert_bias
-
-    if n_group > 1:
-        scores = mx.unflatten(scores, axis=-1, shape=(n_group, -1))
-        group_scores = mx.topk(scores, 2, axis=-1).sum(axis=-1, keepdims=True)
-        n_drop = n_group - topk_group
-        group_idx = mx.argpartition(
-            group_scores,
-            kth=n_drop - 1,
-            axis=-2,
-        )[..., :n_drop, :]
-        # Vendor masks dropped groups with -inf: with a negative expert_bias a
-        # kept expert can score below 0, so a 0.0 fill could pick a dropped one.
-        fill = -math.inf if group_mask_neg_inf else 0.0
-        scores = mx.put_along_axis(
-            scores,
-            mx.stop_gradient(group_idx),
-            mx.array(fill, dtype=scores.dtype),
-            axis=-2,
-        )
-        scores = mx.flatten(scores, -2, -1)
-
-    indices = mx.argpartition(-scores, kth=top_k - 1, axis=-1)[..., :top_k]
-    weights = mx.take_along_axis(original_scores, indices, axis=-1)
-    if top_k > 1 and norm_topk_prob:
-        weights = weights / (weights.sum(axis=-1, keepdims=True) + 1e-20)
-    weights = weights * routed_scaling_factor
-    return indices, weights.astype(input_type)
+    # Vendor masks dropped groups with -inf: with a negative expert_bias a
+    # kept expert can score below 0, so a 0.0 fill could pick a dropped one.
+    # 0.0 stays the legacy (non-vendor) law: RouterSpec.group_fill.
+    spec = cached_spec(
+        top_k=top_k, score_func=score_function, score_dtype="float32",
+        use_bias=expert_bias is not None, n_group=n_group, topk_group=topk_group,
+        group_fill=-math.inf if group_mask_neg_inf else 0.0,
+        topk_method="argpartition_neg", norm_topk_prob=bool(norm_topk_prob),
+        norm_eps=1e-20, norm_min_top_k=2,
+        routed_scaling_factor=float(routed_scaling_factor),
+    )
+    return _route_reference(gates, spec, expert_bias, out_dtype=gates.dtype)
 
 
 class Gate(nn.Module):
@@ -1236,7 +1183,7 @@ class MTPLayer(nn.Module):
         self.final_layernorm = nn.RMSNorm(args.hidden_size, eps=eps)
 
     def __call__(self, embeds, hidden, mask=None, cache=None):
-        x = self.eh_proj(mx.concatenate([self.enorm(embeds), self.hnorm(hidden)], axis=-1))
+        x = fuse_mtp_module(NEXTN_FUSION, self, embeds, hidden)
         x = x + self.attention(self.input_layernorm(x), mask, cache)
         x = x + self.mlp(self.post_attention_layernorm(x))
         return self.final_layernorm(x)

@@ -58,6 +58,8 @@ from typing import Optional
 import mlx.core as mx
 
 from .import_env import snapshot as _import_env_snapshot
+from ..technologies.window_attention import vector_launch as _VL
+from ..technologies.window_attention import vector_sources as _VS
 
 _import_env_snapshot(__name__)
 
@@ -161,31 +163,9 @@ def _log2f(value: float) -> float:
 # --------------------------------------------------------------------------
 
 
-def select_sdpa_blocks(devc: str, n_keys: int, n_simds: int) -> Optional[int]:
-    """``select_sdpa_blocks`` for the 's' and 'd' GPU classes."""
-    if devc == "s":
-        blocks = 64
-        if n_keys > 1024 and n_simds > 4:
-            if n_keys <= 8192:
-                blocks = 128
-            elif n_keys <= 32768:
-                blocks = 256
-            elif n_keys <= 65536:
-                blocks = 512
-            else:
-                blocks = 1024
-        return blocks
-    if devc == "d":
-        blocks = 128
-        if n_simds <= 2 and n_keys > 8192:
-            blocks = 256
-        elif n_simds >= 6:
-            if 16384 <= n_keys < 65536:
-                blocks = 512
-            elif n_keys >= 65536:
-                blocks = 1024
-        return blocks
-    return None
+# ``select_sdpa_blocks`` for the 's' and 'd' GPU classes: the window-attention
+# technology's copy of MLX's block choice (one copy for every transcription).
+select_sdpa_blocks = _VL.select_sdpa_blocks
 
 
 def sdpa_plan(n_keys: int, rows: int, heads: int, kv_heads: int, head_dim: int):
@@ -295,260 +275,11 @@ _PREP_SOURCE = r"""
     }
 """
 
-# The per-key update both passes share (sdpa_vector / sdpa_vector_2pass_1).
-_KEY_STEP = r"""
-#define ATTN_ROWS_KEY_STEP(QV, KP, VP, MAXV, SUMV, OV)                    \
-    {                                                                    \
-        U score = 0;                                                     \
-        for (int e = 0; e < PT; e++) {                                   \
-            score += QV[e] * KP[e];                                      \
-        }                                                                \
-        score = simd_sum(score);                                         \
-        U new_max = max(MAXV, score);                                    \
-        U factor = fast::exp(MAXV - new_max);                            \
-        U exp_score = fast::exp(score - new_max);                        \
-        MAXV = new_max;                                                  \
-        SUMV = SUMV * factor + exp_score;                                \
-        for (int e = 0; e < PT; e++) {                                   \
-            OV[e] = OV[e] * factor + exp_score * VP[e];                  \
-        }                                                                \
-    }
-"""
-
-# sdpa_vector: simdgroup s of a head's threadgroup visits keys s, s + 32, ...
-# Here chain s of HPT query heads (sharing one KV head) runs in its own
-# simdgroup; its state goes to the combine launch.
-_ONE_PASS_CHAINS = r"""
-    constexpr int BN = 32;
-    constexpr int PT = D / 32;
-    typedef float U;
-    const uint lane = thread_index_in_simdgroup;
-    const uint f = threadgroup_position_in_grid.x * SG + simdgroup_index_in_threadgroup;
-    const int s = int(f % BN);
-    const int hg = int(f / BN);
-    const int kv = threadgroup_position_in_grid.y;
-    const int row = threadgroup_position_in_grid.z;
-    const int rows = threadgroups_per_grid.z;
-    const int H = GQA * int(threadgroups_per_grid.y);
-    const int N = int(keys_shape[2]);
-    const float sc = scale[0];
-
-    U q[HPT][PT];
-    U o[HPT][PT];
-    U max_score[HPT];
-    U sum_exp_score[HPT];
-    for (int j = 0; j < HPT; j++) {
-        const int head = kv * GQA + hg * HPT + j;
-        const device T* qp = queries + (size_t)head * queries_strides[1]
-            + (size_t)row * queries_strides[2] + lane * PT;
-        for (int e = 0; e < PT; e++) {
-            q[j][e] = static_cast<U>(sc) * qp[e];
-            o[j][e] = 0;
-        }
-        max_score[j] = Limits<U>::finite_min;
-        sum_exp_score[j] = 0;
-    }
-    const device T* kp = keys + kv * keys_strides[1] + s * keys_strides[2] + lane * PT;
-    const device T* vp = values + kv * values_strides[1] + s * values_strides[2] + lane * PT;
-    const int k_step = BN * int(keys_strides[2]);
-    const int v_step = BN * int(values_strides[2]);
-@MASK_SETUP(s, BN)@
-    for (int i = s; i < N; i += BN) {
-        if (@USE_KEY@) {
-            for (int j = 0; j < HPT; j++) {
-                ATTN_ROWS_KEY_STEP(q[j], kp, vp, max_score[j], sum_exp_score[j], o[j])
-            }
-        }
-        kp += k_step;
-        vp += v_step;
-        @MASK_ADVANCE@
-    }
-
-    for (int j = 0; j < HPT; j++) {
-        const int head = kv * GQA + hg * HPT + j;
-        const size_t c = (size_t)(row * H + head) * BN + s;
-        if (lane == 0) {
-            maxs[c] = max_score[j];
-            sums[c] = sum_exp_score[j];
-        }
-        // [row, head, dim, chain]: the combine reads one dim's 32 chains.
-        for (int e = 0; e < PT; e++) {
-            outs[((size_t)(row * H + head) * D + lane * PT + e) * BN + s] = o[j][e];
-        }
-    }
-"""
-
-# sdpa_vector's closing reduction for one (head, row), then the gate.
-_ONE_PASS_COMBINE = r"""
-    constexpr int BN = 32;
-    constexpr int BD = 32;
-    constexpr int PT = D / BD;
-    typedef float U;
-    const uint simd_gid = simdgroup_index_in_threadgroup;
-    const uint simd_lid = thread_index_in_simdgroup;
-    const int head = threadgroup_position_in_grid.x;
-    const int row = threadgroup_position_in_grid.y;
-    const int H = threadgroups_per_grid.x;
-    const size_t c0 = (size_t)(row * H + head) * BN;
-
-    U max_score = maxs[c0 + simd_lid];
-    U new_max = simd_max(max_score);
-    U factor = fast::exp(max_score - new_max);
-    U sum_exp_score = simd_sum(sums[c0 + simd_lid] * factor);
-    U o[PT];
-    for (int i = 0; i < PT; i++) {
-        // MLX's outputs[simd_gid * BD + simd_lid]: dim simd_gid * PT + i of
-        // chain simd_lid.
-        o[i] = simd_sum(
-            outs[((size_t)(row * H + head) * D + simd_gid * PT + i) * BN + simd_lid] * factor);
-        o[i] = sum_exp_score == 0 ? o[i] : (o[i] / sum_exp_score);
-    }
-    if (simd_lid == 0) {
-        const size_t base = (size_t)row * (H * D) + head * D + simd_gid * PT;
-        for (int i = 0; i < PT; i++) {
-@STORE@
-        }
-    }
-"""
-
-# sdpa_vector_2pass_1: threadgroup (KV head, block), simdgroup (query head g of
-# that KV head, row); keys block, block + BLOCKS, ...
-_TWO_PASS_CHAINS = r"""
-    constexpr int PT = D / 32;
-    typedef float U;
-    const uint lane = thread_index_in_simdgroup;
-    const int kv = threadgroup_position_in_grid.x;
-    const int block = threadgroup_position_in_grid.z;
-    const int g = thread_position_in_threadgroup.y;
-    const int row = thread_position_in_threadgroup.z;
-    const int rows = threads_per_threadgroup.z;
-    const int head = GQA * kv + g;
-    const int N = int(keys_shape[2]);
-    const float sc = scale[0];
-    const int o_offset = head * rows + row;
-
-    U q[PT];
-    U o[PT] = {0};
-    const device T* qp = queries + (size_t)head * queries_strides[1]
-        + (size_t)row * queries_strides[2] + lane * PT;
-    for (int e = 0; e < PT; e++) {
-        q[e] = static_cast<U>(sc) * qp[e];
-    }
-    U max_score = Limits<U>::finite_min;
-    U sum_exp_score = 0;
-    const device T* kp = keys + kv * keys_strides[1] + block * keys_strides[2] + lane * PT;
-    const device T* vp = values + kv * values_strides[1] + block * values_strides[2] + lane * PT;
-    const int k_step = BLOCKS * int(keys_strides[2]);
-    const int v_step = BLOCKS * int(values_strides[2]);
-@MASK_SETUP(block, BLOCKS)@
-    for (int i = block; i < N; i += BLOCKS) {
-        if (@USE_KEY@) {
-            ATTN_ROWS_KEY_STEP(q, kp, vp, max_score, sum_exp_score, o)
-        }
-        kp += k_step;
-        vp += v_step;
-        @MASK_ADVANCE@
-    }
-    const size_t c = (size_t)o_offset * BLOCKS + block;
-    if (lane == 0) {
-        sums[c] = sum_exp_score;
-        maxs[c] = max_score;
-    }
-    for (int e = 0; e < PT; e++) {
-        partials[c * D + lane * PT + e] = static_cast<T>(o[e]);
-    }
-"""
-
-# sdpa_vector_2pass_2 for one (head, row), then the gate.
-_TWO_PASS_COMBINE = r"""
-    constexpr int BN = 32;
-    constexpr int BD = 32;
-    constexpr int elem_per_thread = D / BD;
-    typedef float U;
-
-    thread U o[elem_per_thread] = {0};
-    threadgroup U outputs[BN * BD];
-
-    const uint simd_gid = simdgroup_index_in_threadgroup;
-    const uint simd_lid = thread_index_in_simdgroup;
-    const int head = threadgroup_position_in_grid.x;
-    const int row = threadgroup_position_in_grid.y;
-    const int H = threadgroups_per_grid.x;
-    const int rows = threadgroups_per_grid.y;
-    const size_t q_offset = (size_t)head * rows + row;
-    const device T* pp = partials + q_offset * BLOCKS * D + simd_gid * D
-        + simd_lid * elem_per_thread;
-    const device float* sp = sums + q_offset * BLOCKS;
-    const device float* mp = maxs + q_offset * BLOCKS;
-
-    U sum_exp_score = 0.0;
-    U max_score = Limits<U>::finite_min;
-
-    for (int b = 0; b < BLOCKS / BN; ++b) {
-        max_score = max(max_score, mp[simd_lid + BN * b]);
-    }
-    max_score = simd_max(max_score);
-
-    for (int b = 0; b < BLOCKS / BN; ++b) {
-        U factor = fast::exp(mp[simd_lid + BN * b] - max_score);
-        sum_exp_score += factor * sp[simd_lid + BN * b];
-    }
-    sum_exp_score = simd_sum(sum_exp_score);
-
-    for (int b = 0; b < BLOCKS / BN; ++b) {
-        U factor = fast::exp(mp[simd_gid] - max_score);
-        for (int i = 0; i < elem_per_thread; i++) {
-            o[i] += factor * static_cast<U>(pp[i]);
-        }
-        mp += BN;
-        sp += BN;
-        pp += BN * D;
-    }
-
-    for (int i = 0; i < elem_per_thread; i++) {
-        outputs[simd_lid * BD + simd_gid] = o[i];
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-        o[i] = simd_sum(outputs[simd_gid * BD + simd_lid]);
-        o[i] = sum_exp_score == 0 ? o[i] : (o[i] / sum_exp_score);
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-    }
-
-    if (simd_lid == 0) {
-        const size_t base = (size_t)row * (H * D) + head * D + simd_gid * elem_per_thread;
-        for (int i = 0; i < elem_per_thread; i++) {
-@STORE@
-        }
-    }
-"""
-
-
-def _sdpa_source(template: str, *, masked: bool, gated: bool, chain_var: str = "", step: str = "") -> str:
-    """Specialize a chain/combine source: MLX's ``use_key = bmask[0]`` walk
-    (with its broadcast strides) when masked, and the gate multiply."""
-    if masked:
-        setup = (
-            "const int m_row = mask_shape[2] > 1 ? int(mask_strides[2]) : 0;\n"
-            "    const int m_key = mask_shape[3] > 1 ? int(mask_strides[3]) : 0;\n"
-            # Tiny masks arrive in the constant address space.
-            f"    auto mp = mask + row * m_row + {chain_var} * m_key;\n"
-            f"    const int m_step = {step} * m_key;"
-        )
-        use_key, advance = "mp[0]", "mp += m_step;"
-    else:
-        setup, use_key, advance = "", "true", ""
-    store = (
-        "out[base + i] = static_cast<T>(o[i]) * gate[base + i];"
-        if gated
-        else "out[base + i] = static_cast<T>(o[i]);"
-    )
-    source = template
-    if chain_var:
-        source = source.replace(f"@MASK_SETUP({chain_var}, {step})@", setup)
-    return (
-        source.replace("@USE_KEY@", use_key)
-        .replace("@MASK_ADVANCE@", advance)
-        .replace("@STORE@", store)
-    )
+# The vector SDPA chains and combines (``sdpa_vector.h``) are generated by the
+# window-attention technology: ``_VS.QWEN4_ROWS`` is this module's family
+# (cache-view key count, MLX's threadgroup row layout, broadcast bool mask,
+# optional gate store); the source text is byte-identical to the copy this
+# module carried (tests/test_technologies_window_attention_sources.py).
 
 
 def _kernel(name: str):
@@ -565,41 +296,10 @@ def _kernel(name: str):
             source=_PREP_SOURCE,
             ensure_row_contiguous=False,
         )
-    elif name.startswith("one_chains"):
+    elif name.startswith(_VS.STAGES):
+        stage = "_".join(name.split("_")[:2])
         kernel = mx.fast.metal_kernel(
-            name="mlx2_qwen4_attn_rows_sdpa1_chains" + ("_mask" if masked else ""),
-            input_names=["queries", "keys", "values", "scale"] + (["mask"] if masked else []),
-            output_names=["maxs", "sums", "outs"],
-            header=_KEY_STEP,
-            source=_sdpa_source(
-                _ONE_PASS_CHAINS, masked=masked, gated=False, chain_var="s", step="BN"
-            ),
-            ensure_row_contiguous=False,
-        )
-    elif name.startswith("two_chains"):
-        kernel = mx.fast.metal_kernel(
-            name="mlx2_qwen4_attn_rows_sdpa2_chains" + ("_mask" if masked else ""),
-            input_names=["queries", "keys", "values", "scale"] + (["mask"] if masked else []),
-            output_names=["partials", "sums", "maxs"],
-            header=_KEY_STEP,
-            source=_sdpa_source(
-                _TWO_PASS_CHAINS, masked=masked, gated=False, chain_var="block", step="BLOCKS"
-            ),
-            ensure_row_contiguous=False,
-        )
-    elif name.startswith("one_combine"):
-        kernel = mx.fast.metal_kernel(
-            name="mlx2_qwen4_attn_rows_sdpa1_combine" + ("_gate" if gated else ""),
-            input_names=["maxs", "sums", "outs"] + (["gate"] if gated else []),
-            output_names=["out"],
-            source=_sdpa_source(_ONE_PASS_COMBINE, masked=False, gated=gated),
-        )
-    elif name.startswith("two_combine"):
-        kernel = mx.fast.metal_kernel(
-            name="mlx2_qwen4_attn_rows_sdpa2_combine" + ("_gate" if gated else ""),
-            input_names=["partials", "sums", "maxs"] + (["gate"] if gated else []),
-            output_names=["out"],
-            source=_sdpa_source(_TWO_PASS_COMBINE, masked=False, gated=gated),
+            **_VS.kernel_kwargs(_VS.QWEN4_ROWS, stage, masked=masked, gated=gated)
         )
     else:  # pragma: no cover
         raise KeyError(name)
@@ -770,81 +470,24 @@ def sdpa_gate(
     ``gate`` (``[B, R, H * D]``, already the sigmoid) when given.  ``queries``
     are ``[1, H, R, D]`` with a unit-stride last axis; ``keys``/``values`` are cache
     views ``[1, KVH, N, D]`` with a unit-stride last axis."""
-    _, heads, rows, head_dim = queries.shape
-    kv_heads = keys.shape[1]
-    n_keys = keys.shape[2]
-    gqa = heads // kv_heads
-    dtype = queries.dtype
-    plan, blocks = sdpa_plan(n_keys, rows, heads, kv_heads, head_dim)
-    scale_array = _scalar(float(scale), mx.float32)
-    mask_inputs = []
-    if mask is not None:
-        # MLX broadcasts the mask to [B, H, R, N] and reads the row and key
-        # strides of the axes that are not singletons.
-        mask_inputs = [mask.reshape((1,) * (4 - mask.ndim) + tuple(mask.shape))]
-    gate_inputs = [] if gate is None else [gate.reshape(rows, heads * head_dim)]
-    gate_suffix = "" if gate is None else "_gate"
+    plan, blocks = sdpa_plan(keys.shape[2], queries.shape[2], queries.shape[1], keys.shape[1],
+                             queries.shape[3])
     mask_suffix = "_mask" if mask is not None else ""
-    if plan == 1:
-        hpt, sg = _ONE_PASS_HPT, _ONE_PASS_SG
-        chains = 32 * (gqa // hpt)
-        maxs, sums, outs = _kernel("one_chains" + mask_suffix)(
-            inputs=[queries, keys, values, scale_array] + mask_inputs,
-            template=[
-                ("T", dtype),
-                ("D", head_dim),
-                ("GQA", gqa),
-                ("HPT", hpt),
-                ("SG", sg),
-            ],
-            grid=(32 * chains, kv_heads, rows),
-            threadgroup=(32 * sg, 1, 1),
-            output_shapes=[
-                (rows * heads * 32,),
-                (rows * heads * 32,),
-                (rows * heads * head_dim * 32,),
-            ],
-            output_dtypes=[mx.float32] * 3,
-        )
-        out = _kernel("one_combine" + gate_suffix)(
-            inputs=[maxs, sums, outs] + gate_inputs,
-            template=[("T", dtype), ("D", head_dim)],
-            grid=(heads * 1024, rows, 1),
-            threadgroup=(1024, 1, 1),
-            output_shapes=[(rows, heads * head_dim)],
-            output_dtypes=[dtype],
-        )[0]
-        return out.reshape(1, rows, heads * head_dim)
-    partials, sums, maxs = _kernel("two_chains" + mask_suffix)(
-        inputs=[queries, keys, values, scale_array] + mask_inputs,
-        template=[
-            ("T", dtype),
-            ("D", head_dim),
-            ("GQA", gqa),
-            ("BLOCKS", blocks),
-        ],
-        grid=(32 * kv_heads, gqa, blocks * rows),
-        threadgroup=(32, gqa, rows),
-        output_shapes=[
-            (heads * rows * blocks * head_dim,),
-            (heads * rows * blocks,),
-            (heads * rows * blocks,),
-        ],
-        output_dtypes=[dtype, mx.float32, mx.float32],
+    gate_suffix = "" if gate is None else "_gate"
+    return _VL.run_rows(
+        lambda passes: _kernel(("one" if passes == 1 else "two") + "_chains" + mask_suffix),
+        lambda passes: _kernel(("one" if passes == 1 else "two") + "_combine" + gate_suffix),
+        queries,
+        keys,
+        values,
+        _scalar(float(scale), mx.float32),
+        plan=plan,
+        blocks=blocks,
+        hpt=_ONE_PASS_HPT,
+        sg=_ONE_PASS_SG,
+        mask=mask,
+        gate=gate,
     )
-    out = _kernel("two_combine" + gate_suffix)(
-        inputs=[partials, sums, maxs] + gate_inputs,
-        template=[
-            ("T", dtype),
-            ("D", head_dim),
-            ("BLOCKS", blocks),
-        ],
-        grid=(heads * 1024, rows, 1),
-        threadgroup=(1024, 1, 1),
-        output_shapes=[(rows, heads * head_dim)],
-        output_dtypes=[dtype],
-    )[0]
-    return out.reshape(1, rows, heads * head_dim)
 
 
 # --------------------------------------------------------------------------

@@ -117,6 +117,8 @@ IDENTITY_FILES = (
     "src/mlx2/runtime/generate.py",
     "src/mlx2/runtime/segmented_rotating_kv.py",
     "src/mlx2/runtime/models/cache.py",
+    "src/mlx2/runtime/technologies/window_attention/__init__.py", "src/mlx2/runtime/technologies/window_attention/vector_sources.py",
+    "src/mlx2/runtime/technologies/window_attention/vector_launch.py", "src/mlx2/runtime/technologies/dispatch.py",
     "src/mlx2/runtime/prompt_lookup.py",
     "src/mlx2/runtime/sample_utils.py",
     "src/mlx2/adapters/registry.py",

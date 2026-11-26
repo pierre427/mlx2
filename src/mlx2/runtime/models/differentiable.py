@@ -30,15 +30,17 @@ _ACTIVE: ContextVar[bool] = ContextVar("mlx2_differentiable_reference", default=
 
 # site -> what it routes; the receipt names these and counts which ones a forward reached.
 ROUTED_KERNELS = {
-    "gated_delta": "gated_delta.gated_delta_update: GatedDeltaNet recurrence Metal kernel, chunked prefill scan "
-                   "and MLX core scan -> gated_delta_ops",
-    "fused_gdn": "qwen38_fused_gdn.GatedDeltaNet._try_fused_decode: fused GDN decode / verify / catch-up / "
-                 "prefill-prework kernels -> GatedDeltaNet._recurrent_core",
+    "gated_delta": "technologies.linear_recurrence.recurrence (gated_delta.gated_delta_update and every KDA "
+                   "mixer: Kimi Linear, Raon RDA, Kimi K3.1, GLM-5.3): gated-delta step Metal kernel, chunked "
+                   "prefill scan and MLX core scan -> gated_delta_ops",
+    "fused_gdn": "qwen38_fused_gdn / qwen4_exp / qwen36_35b GatedDeltaNet._try_fused_decode: fused GDN decode / "
+                 "verify / catch-up / prefill-prework kernels -> GatedDeltaNet._recurrent_core",
     "sdpa": "base.scaled_dot_product_attention, plain (unquantized, unbucketed) cache only: opt-in FP verify "
             "(fp_verify_tensor) and FP decode (qsdpa_decode_metal) kernels -> mx.fast.scaled_dot_product_attention",
     "precise_sigmoid": "precise_ops.gate_sigmoid inside a precise span: precise sigmoid kernel -> mx.sigmoid",
     "kda_fused": "bailing_hybrid.KimiDeltaAttention.fused_decode: one-launch Ling KDA decode body "
-                 "(ling_kda_fused) -> the eager KimiDeltaAttention chain",
+                 "(ling_kda_fused) -> the eager KimiDeltaAttention chain; also the Ling/Kimi fused gated "
+                 "output norms and GLM-5.3's fused KDA gate and decode body -> their eager chains",
 }
 if __doc__:  # None under python -OO
     __doc__ += "".join(f"\n* ``{k}``: {v}" for k, v in ROUTED_KERNELS.items()) + "\n"

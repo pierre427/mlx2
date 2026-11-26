@@ -25,7 +25,14 @@ import math
 import mlx.core as mx
 from mlx import nn
 
+from ..technologies import sparse_selection as _sparse
 from .qsa_sidecar import BLOCK, _rope
+
+# The sidecar score law in a differentiable spelling (one head-axis sum).
+SCORE_SPEC = _sparse.SelectionSpec(
+    pooling="mean", score_layout="hld_sum", score_weighting="uniform",
+    score_scale_site="none", score_cast="none", visibility="pool_complete",
+)
 
 
 def block_valid(length: int) -> mx.array:
@@ -126,7 +133,7 @@ class TrainableIndexer(nn.Module):
         kb = k[: n_blocks * BLOCK].reshape(n_blocks, BLOCK, head_dim).mean(axis=1)
         kb = mx.fast.rms_norm(kb, 1.0 + self.k_block_norm, eps)
         kb = _rope(kb[None], dims=rope_dim, base=rope_base, offset=0, scale=float(BLOCK))[0]
-        return mx.maximum(q @ kb.T, 0.0).sum(axis=0)
+        return _sparse.score(SCORE_SPEC, q, kb)
 
     def export(self, prefix: str) -> dict:
         """Tensors under the names ``qsa_sidecar.QSASidecar`` loads."""

@@ -28,6 +28,8 @@ from .cache import ArraysCache, BatchKVCache, KVCache, decode_mask_mode
 from .ssm import ssm_update
 from . import moe_nax_gather as _moe_nax
 from .switch_layers import SwitchMLP
+from ..technologies.drafter_blocks import NEXTN_FUSION, fuse_mtp_module
+from ..technologies.moe_router import cached_spec, route as _route_reference
 
 NEMOTRON_ROUTED_EXACT_MAX_ROWS = 16
 # (hidden, routed experts, top-k, latent, expert width, shared width) of the
@@ -1321,28 +1323,13 @@ def group_expert_select(
     routed_scaling_factor,
     norm_topk_prob,
 ):
-
-    orig_scores = scores = mx.sigmoid(gates.astype(mx.float32))
-    scores = scores + e_score_correction_bias
-    if n_group > topk_group:
-        scores = mx.unflatten(scores, axis=-1, shape=(n_group, -1))
-        group_scores = mx.topk(scores, 2, axis=-1).sum(axis=-1, keepdims=True)
-        k = n_group - topk_group
-        group_idx = mx.argpartition(group_scores, kth=k - 1, axis=-2)[..., :k, :]
-        scores = mx.put_along_axis(
-            scores, mx.stop_gradient(group_idx), mx.array(-float("inf")), axis=-2
-        )
-        scores = mx.flatten(scores, -2, -1)
-
-    k = top_k
-    inds = mx.argpartition(-scores, kth=k - 1, axis=-1)[..., :k]
-    scores = mx.take_along_axis(orig_scores, inds, axis=-1)
-    if top_k > 1 and norm_topk_prob:
-        denominator = scores.sum(axis=-1, keepdims=True)
-        scores = scores / (denominator + 1e-20)
-    scores = scores * routed_scaling_factor
-
-    return inds, scores
+    spec = cached_spec(
+        top_k=top_k, score_func="sigmoid", score_dtype="float32", use_bias=True,
+        n_group=n_group, topk_group=topk_group, topk_method="argpartition_neg",
+        norm_topk_prob=bool(norm_topk_prob), norm_eps=1e-20, norm_min_top_k=2,
+        routed_scaling_factor=float(routed_scaling_factor),
+    )
+    return _route_reference(gates, spec, e_score_correction_bias)
 
 
 class MoEGate(nn.Module):
@@ -2215,12 +2202,9 @@ class Model(nn.Module):
         stats["windows"] += 1
         stats["windows_exact"] += int(record.exact)
         stats["rows"] += record.rows
-        for stage, routes in record.stages.items():
-            target = stats["stages"].setdefault(stage, {})
-            for route, count in routes.items():
-                target[route] = target.get(route, 0) + count
-        for reason, count in record.failures.items():
-            stats["failures"][reason] = stats["failures"].get(reason, 0) + count
+        from ..row_exact.spec import merge_window_routes
+
+        merge_window_routes(stats, record)
 
     def row_exact_status(self) -> dict:
         from .. import row_exact
@@ -3057,9 +3041,7 @@ class Model(nn.Module):
         attends within its own cache so the shift is harmless (NemotronH
         attention uses no rope)."""
         first = self.mtp.layers[0]
-        e = first.enorm(self.backbone.embeddings(tokens))
-        h = first.hnorm(hidden)
-        x = first.eh_proj(mx.concatenate([e, h], axis=-1))
+        x = fuse_mtp_module(NEXTN_FUSION, first, self.backbone.embeddings(tokens), hidden)
         # The shared executor may wrap KVCache in SegmentedBatchKVCache. Use
         # the cache ABI, not a concrete cache class, to obtain its prepared
         # causal/padding mask for a batched MTP verification step.

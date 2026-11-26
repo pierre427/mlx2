@@ -36,6 +36,7 @@ from ..inkling.language import (
     banded_additive_mask,
 )
 from ..switch_layers import SwitchGLU
+from ...technologies.moe_router import cached_spec, route as _route_reference
 from . import act_quant as _act_quant
 from . import capacity_state as _capacity
 from . import fuse as _fuse
@@ -93,14 +94,18 @@ def _fp32(module, name):
     return cached[1]
 
 
+def _route_spec(top_k, route_scale, renorm="linear"):
+    return cached_spec(
+        top_k=top_k, score_func="sigmoid", use_bias=True, topk_method="argpartition_neg",
+        norm_topk_prob=True, norm_eps=1e-20, renorm=renorm,
+        routed_scaling_factor=float(route_scale),
+    )
+
+
 def _route(x, weight, bias, top_k, route_scale):
     # ``weight`` is already FP32 (``_fp32``); the cast is a no-op then.
-    scores = mx.sigmoid(x.astype(mx.float32) @ weight.astype(mx.float32).T)
-    indices = mx.argpartition(-(scores + bias), top_k - 1, axis=-1)[..., :top_k]
-    indices = mx.stop_gradient(indices)
-    weights = mx.take_along_axis(scores, indices, axis=-1)
-    weights = weights / (weights.sum(axis=-1, keepdims=True) + 1e-20) * route_scale
-    return indices, weights
+    logits = x.astype(mx.float32) @ weight.astype(mx.float32).T
+    return _route_reference(logits, _route_spec(top_k, route_scale), bias)
 
 
 def _route_logdomain(x, weight, bias, top_k, route_scale):
@@ -114,15 +119,8 @@ def _route_logdomain(x, weight, bias, top_k, route_scale):
     ``log_sigmoid(z) = min(z, 0) - log1p(exp(-|z|))``.  Idea: SGLang #50525
     (rewritten).  Not bitwise equal to the default where both are finite."""
     logits = x.astype(mx.float32) @ weight.astype(mx.float32).T
-    scores = mx.sigmoid(logits)
-    indices = mx.argpartition(-(scores + bias), top_k - 1, axis=-1)[..., :top_k]
-    indices = mx.stop_gradient(indices)
-    picked = mx.take_along_axis(logits, indices, axis=-1)
-    log_weights = mx.minimum(picked, 0) - mx.log1p(mx.exp(-mx.abs(picked)))
-    log_weights = log_weights - log_weights.max(axis=-1, keepdims=True)
-    weights = mx.exp(log_weights)
-    weights = weights / weights.sum(axis=-1, keepdims=True) * route_scale
-    return indices, weights
+    spec = _route_spec(top_k, route_scale, renorm="logdomain")
+    return _route_reference(logits, spec, bias)
 
 
 @mx.compile

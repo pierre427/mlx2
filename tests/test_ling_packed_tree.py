@@ -11,6 +11,7 @@ from mlx.utils import tree_flatten
 
 from mlx2.runtime.hybrid_tree_executor import tree_forward
 from mlx2.runtime.ling_tree_executor import LingTreeExecutor
+from mlx2.runtime.technologies.tree_verify import TECHNOLOGY_SOURCES
 from mlx2.runtime.models.bailing_hybrid import Model, ModelArgs
 
 
@@ -245,11 +246,17 @@ def test_tree_hashes_only_bound_helpers_and_detects_exact_byte_changes(policy, h
     import os
 
     provider = LingTreeExecutor(optimizations=policy)
-    core = {'ling_tree_executor.py', 'ling_tree.py', 'bailing_hybrid.py', 'hybrid_tree_executor.py'}
+    core = {'ling_tree_executor.py', 'ling_tree.py', 'bailing_hybrid.py', 'hybrid_tree_executor.py',
+            # technologies/: the MLA reference, and linear_recurrence (Ling's
+            # q/k norm, conv, cohorts, recurrence).
+            'mla.py', 'drafter_blocks.py', 'linear_recurrence.py', 'dispatch.py', 'differentiable.py', 'gated_delta.py',
+            'gdn_state.py', 'precise_ops.py'} | {p.name for p in TECHNOLOGY_SOURCES}
     assert {p.name for p in provider._sources} == core | helpers
     copies = []
-    for source in provider._sources:
-        copied = tmp_path / source.name
+    for index, source in enumerate(provider._sources):
+        # Distinct directories: two bound sources may share a name (__init__.py).
+        copied = tmp_path / str(index) / source.name
+        copied.parent.mkdir()
         copied.write_bytes(source.read_bytes())
         copies.append(copied)
     provider._sources = tuple(copies)
@@ -301,7 +308,8 @@ def test_tree_reuses_ancestor_index_array_across_channels_and_layers(monkeypatch
                              source[[1, 2, 3, 5]], source[[2, 3, 5, 6]]])
         np.testing.assert_array_equal(np.asarray(windows), expected)
     assert len(made) == 1
-    assert tree._convolution_indices[4].shape == (4, 4)
+    assert tree.convolution_indices(4).shape == (4, 4)
+    assert len(made) == 1
 
 
 def test_tree_with_full_policy_kda_fused_bound_matches_serial_and_refuses_drift():
@@ -330,3 +338,57 @@ def test_tree_with_full_policy_kda_fused_bound_matches_serial_and_refuses_drift(
     kda[0].ling_kda_fused = False
     with pytest.raises(RuntimeError, match='optimization binding changed'):
         provider.forward(model, tokens, parents, copy.deepcopy(cache), [0, 1], cached=False)
+
+
+# The linear-recurrence closure a Ling KDA tree forward runs: the module that
+# owns the laws and selection, the shared dispatch, the gradient guard, the
+# step kernels' module, the state class and the precise sigmoid.
+LINEAR_RECURRENCE_CLOSURE = (
+    "technologies/linear_recurrence.py", "technologies/dispatch.py",
+    "models/differentiable.py", "models/gated_delta.py", "models/gdn_state.py",
+    "models/precise_ops.py", "models/ling_tree.py", "models/bailing_hybrid.py",
+)
+
+
+def test_tree_revision_binds_the_linear_recurrence_sources_it_executes():
+    """Ling counterpart of Kimi's binding test: every linear-recurrence source
+    with a Python frame during a CPU tree forward is in the revision, and the
+    Ling modules' package imports of the technology are bound."""
+    import ast
+    import sys
+    from pathlib import Path
+
+    from mlx2.runtime import ling_tree_executor as lte
+
+    runtime = Path(lte.__file__).parent
+    closure = {str(runtime / name) for name in LINEAR_RECURRENCE_CLOSURE}
+    bound = {str(path) for path in LingTreeExecutor()._sources}
+    assert closure <= bound
+    for name in ("models/ling_tree.py", "models/bailing_hybrid.py"):
+        path = runtime / name
+        for node in ast.walk(ast.parse(path.read_text())):
+            if isinstance(node, ast.ImportFrom) and node.level and node.module and (
+                    node.module.startswith("technologies") or node.module.endswith("technologies")):
+                targets = [node.module + "." + a.name if node.module == "technologies" else node.module
+                           for a in node.names]
+                for target in targets:
+                    file = runtime.joinpath(*target.split(".")).with_suffix(".py")
+                    assert str(file) in bound, (name, target)
+    model = tiny_model()
+    cache = model.make_cache()
+    mx.eval(model(mx.array([[9, 8, 7]]), cache))
+    provider = LingTreeExecutor.create()
+    executed = set()
+
+    def profile(frame, event, arg):
+        if event == "call" and frame.f_code.co_filename in closure:
+            executed.add(frame.f_code.co_filename)
+
+    sys.setprofile(profile)
+    try:
+        logits, taps, _ = provider.forward(model, [1, 2, 3], [-1, 0, 0], cache, [0], cached=False)
+        mx.eval(logits, taps)
+    finally:
+        sys.setprofile(None)
+    assert str(runtime / "technologies/linear_recurrence.py") in executed
+    assert not sorted(executed - bound)

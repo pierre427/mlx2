@@ -295,9 +295,9 @@ _DT = {"U32": np.uint32, "F16": np.float16, "BF16": np.uint16, "F32": np.float32
 
 
 def read_header(path):
-    with open(path, "rb") as f:
-        n = struct.unpack("<Q", f.read(8))[0]
-        return json.loads(f.read(n)), 8 + n
+    from ..technologies.embedding_tables import read_safetensors_header_file
+
+    return read_safetensors_header_file(path)
 
 
 def read_tensor(path, name, header=None):

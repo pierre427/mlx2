@@ -6,7 +6,6 @@ Recurrent siblings share a depth call; requests retain independent caches.
 
 from __future__ import annotations
 
-import hashlib
 from pathlib import Path
 
 import mlx.core as mx
@@ -14,6 +13,7 @@ import mlx.core as mx
 from .hybrid_tree_executor import HybridTreeExecutor
 from .models.ling_tree import LingTree
 from .target_tree_executor import TargetTreeDispatchMetrics
+from .technologies.tree_verify import TECHNOLOGY_SOURCES, TreeLaneTransaction, revision_token
 
 PROTOCOL = "ling_layerwise_packed_tree_v1"
 _OPTIMIZATION_FLAGS = {
@@ -45,39 +45,18 @@ _DECODE_ONLY_FLAGS = {
 }
 
 
-class LingTreeTransaction:
-    executor_cached = False
-    physical_packed = False  # no physical cross-request packing
+class LingTreeTransaction(TreeLaneTransaction):
+    protocol = PROTOCOL
+    count_error = "Ling tree commit lane count mismatch or closed transaction"
 
     def __init__(self, trees, token):
-        self.trees = trees
-        self.closed = False
-        self.provider_protocol = PROTOCOL
-        self.provider_revision_token = token
-
-    def commit_paths(self, paths):
-        if self.closed or len(paths) != len(self.trees):
-            raise RuntimeError("Ling tree commit lane count mismatch or closed transaction")
-        for tree, path in zip(self.trees, paths, strict=True):
-            tree.validate_path(path)
-        try:
-            prepared = []
-            for tree, path in zip(self.trees, paths, strict=True):
-                prepared.extend(tree.prepare_commit(path))
-            LingTree.publish(prepared)
-            return [tree.live for tree in self.trees]
-        finally:
-            self.closed = True
-
-    def commit(self, *, accepted_lengths):
-        return self.commit_paths([list(range(int(length))) for length in accepted_lengths])
-
-    def abort(self):
-        self.closed = True
+        super().__init__(trees, token, publish=LingTree.publish)
 
 
 class LingTreeExecutor(HybridTreeExecutor):
     protocol = PROTOCOL
+    _identity_style = "name"
+    _revision_error = "Ling packed tree source changed"
 
     def __init__(self, *, optimizations=None):
         selected = dict(optimizations or {})
@@ -91,8 +70,18 @@ class LingTreeExecutor(HybridTreeExecutor):
             (key, selected.get(key, False)) for key in _DECODE_ONLY_FLAGS
         )
         root = Path(__file__).parent
-        self._sources = (Path(__file__), root / "models/ling_tree.py",
-                         root / "models/bailing_hybrid.py", root / "hybrid_tree_executor.py")
+        self._sources = tuple(dict.fromkeys((Path(__file__), root / "models/ling_tree.py",
+                         root / "models/bailing_hybrid.py", root / "hybrid_tree_executor.py",
+                         # The MLA reference, and Ling's q/k norm, short conv,
+                         # tree cohorts and the recurrence it dispatches through.
+                         root / "technologies/mla.py",
+                         # bailing_hybrid imports the MTP fusion block.
+                         root / "technologies/drafter_blocks.py",
+                         root / "technologies/linear_recurrence.py",
+                         root / "technologies/dispatch.py", root / "models/differentiable.py",
+                         root / "models/gated_delta.py", root / "models/gdn_state.py",
+                         root / "models/precise_ops.py",
+                         *TECHNOLOGY_SOURCES)))
         if selected.get("fused_norm", False):
             self._sources += (root / "models/ling_fused.py",
                               root / "models/qwen4_fused_gdn_prefill.py", root / "models/served_exp.py")
@@ -102,19 +91,12 @@ class LingTreeExecutor(HybridTreeExecutor):
             if enabled:
                 self._sources += tuple(root / path for path in _DECODE_ONLY_FLAGS[key][1]
                                        if root / path not in self._sources)
-        self.source_identity = tuple(
-            (path.name, hashlib.sha256(path.read_bytes()).hexdigest()) for path in self._sources
+        self._bind_sources(self._sources)
+        self.source_revision_token = revision_token(
+            (self.source_identity, self._optimization_binding, self._decode_only_binding)
         )
-        self.source_revision_token = hashlib.sha256(
-            repr((self.source_identity, self._optimization_binding, self._decode_only_binding)).encode()
-        ).hexdigest()
         self.dispatches = 0
         self.projection_rows = 0
-
-    def validate_revision(self):
-        current = tuple((path.name, hashlib.sha256(path.read_bytes()).hexdigest()) for path in self._sources)
-        if current != self.source_identity:
-            raise RuntimeError("Ling packed tree source changed")
 
     def forward(self, model, inputs, parents, cache, layers, *, cached):
         logits, features, transaction = self.forward_many(

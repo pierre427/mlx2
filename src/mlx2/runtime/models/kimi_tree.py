@@ -27,6 +27,7 @@ import mlx.core as mx
 from mlx import nn
 
 from .ling_tree import LingTree
+from ..technologies.linear_recurrence import cohort_tree_recurrence
 
 
 class KimiTree(LingTree):
@@ -38,12 +39,8 @@ class KimiTree(LingTree):
             history = mx.zeros((1, count, 3 * p), dtype=raw.dtype)
         else:
             history = mx.concatenate(list(cache)[:3], axis=-1)
-        indices = []
-        for path in self.paths:
-            window = [*range(count), *(count + row for row in path)]
-            indices.append(window[-module.conv_kernel:])
         source = mx.concatenate([history, raw], axis=1)
-        windows = mx.take(source, mx.array(indices, dtype=mx.int32), axis=1)[0]
+        windows = mx.take(source, self.convolution_indices(module.conv_kernel), axis=1)[0]
         values = nn.silu(mx.conv1d(windows, module._conv, groups=3 * p))
         tails = mx.contiguous(windows[:, 1:])
         return mx.split(values, 3, axis=-1), mx.split(tails, 3, axis=-1)
@@ -74,20 +71,12 @@ class KimiTree(LingTree):
         initial = cache[3]
         if initial is None:
             initial = mx.zeros((1, h, d, d), dtype=mx.float32)
-        outputs, states = [None] * width, [None] * width
-        for level in self.levels:
-            indices = mx.array(level, dtype=mx.int32)
-            parent_states = mx.concatenate([
-                initial if self.parents[row] < 0 else states[self.parents[row]]
-                for row in level
-            ])
-            output, state = module._recurrence(
-                *(mx.take(value, indices, axis=0) for value in (q, k, v, decay, beta)),
-                parent_states, None,
-            )
-            for index, row in enumerate(level):
-                outputs[row], states[row] = output[index:index + 1], state[index:index + 1]
+        def step(q, k, v, decay, beta, parent_states):
             module.calls["tree_levels"] += 1
+            return module._recurrence(q, k, v, decay, beta, parent_states, None)
+
+        outputs, states = cohort_tree_recurrence(
+            self.parents, self.levels, initial, (q, k, v, decay, beta), step)
         self.recurrent[id(cache)] = (qs, ks, vs, states)
         output = mx.concatenate(outputs, axis=1)
         out = module.norm_gate(output, gate, x.dtype)

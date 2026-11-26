@@ -216,6 +216,8 @@ def implementation_identity():
     # File hashing is outside hot consumers and owns no device arrays.
     root = Path(__file__).resolve().parents[1]
     paths = (Path(__file__), root/"runtime/models/deepseek_v41.py",
+             root/"runtime/technologies/window_attention/__init__.py", root/"runtime/technologies/dispatch.py",
              root/"adapters/deepseek_v41_source_weights.py",
-             root/"runtime/models/deepseek_v41_quant.py", root/"runtime/gguf/source_dense.py")
+             root/"runtime/models/deepseek_v41_quant.py", root/"runtime/gguf/source_dense.py",
+             root/"runtime/technologies/sparse_selection.py", root/"runtime/technologies/hyper_connections.py", root/"runtime/technologies/dispatch.py")
     return hashlib.sha256(b"".join(hashlib.sha256(p.read_bytes()).digest() for p in paths)).hexdigest()

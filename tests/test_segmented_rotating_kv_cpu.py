@@ -37,6 +37,11 @@ def load_cpu():
     namespace = dict(mx=mx, copy=copy, Integral=Integral, deque=deque,
                      _BaseCache=object, _state_checkpoint_max=lambda: 0)
     nodes = [ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0)]
+    # create_causal_mask and the ring masks delegate to the window-attention
+    # technology's masks.
+    window_masks = ("window_keep", "causal_window_mask", "sink_prefix_window_mask", "ring_decode_window_mask")
+    nodes.extend(n for n in ast.parse((ROOT / "technologies/window_attention/__init__.py").read_text()).body
+                 if isinstance(n, ast.FunctionDef) and n.name in window_masks)
     nodes.extend(n for n in ast.parse((ROOT / "models/base.py").read_text()).body
                  if isinstance(n, ast.FunctionDef) and n.name == "create_causal_mask")
     nodes.extend(n for n in ast.parse((ROOT / "models/cache.py").read_text()).body
@@ -46,6 +51,7 @@ def load_cpu():
                  if isinstance(n, (ast.FunctionDef, ast.ClassDef)))
     exec(compile(ast.fix_missing_locations(ast.Module(body=nodes, type_ignores=[])),
                  "production-segmented-ring-cpu", "exec"), namespace)
+    namespace["_window_attention"] = SimpleNamespace(**{n: namespace[n] for n in window_masks})
     return namespace
 
 

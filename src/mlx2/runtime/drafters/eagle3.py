@@ -38,6 +38,13 @@ import mlx.core as mx
 import numpy as np
 from mlx import nn
 
+from ..technologies.drafter_blocks import (
+    DraftAttention,
+    DraftAttentionSpec,
+    GatedMLP,
+    GatedMLPSpec,
+    chain_attend_rows,
+)
 from .cohere_eagle import EagleWindowKVCache, _Rows
 
 ARCHITECTURE = "Eagle3Speculator"
@@ -245,54 +252,20 @@ def draft_to_target_ids(d2t, t2d, *, vocab_size: int) -> np.ndarray:
     return targets
 
 
-class Eagle3Attention(nn.Module):
+class Eagle3Attention(DraftAttention):
+    """q/k/v read ``2 * hidden`` (``cat(embed, feature)``), no q/k norm,
+    Llama rotary embedding (rotate_half / NeoX pairing), full causal chain
+    attention.  Math: technologies.drafter_blocks."""
+
     def __init__(self, config: Eagle3Config):
-        super().__init__()
-        dim = config.hidden_size
-        self.n_heads = config.num_attention_heads
-        self.n_kv_heads = config.num_key_value_heads
-        self.head_dim = config.head_dim
-        self.scale = self.head_dim ** -0.5
-        self.q_proj = nn.Linear(2 * dim, self.n_heads * self.head_dim, bias=False)
-        self.k_proj = nn.Linear(2 * dim, self.n_kv_heads * self.head_dim, bias=False)
-        self.v_proj = nn.Linear(2 * dim, self.n_kv_heads * self.head_dim, bias=False)
-        self.o_proj = nn.Linear(self.n_heads * self.head_dim, dim, bias=False)
-        # Llama rotary embedding (rotate_half / NeoX pairing).
-        self.rope = nn.RoPE(self.head_dim, traditional=False, base=config.rope_theta)
-
-    def project(self, x):
-        batch, length, _ = x.shape
-        q = self.q_proj(x).reshape(batch, length, self.n_heads, self.head_dim)
-        k = self.k_proj(x).reshape(batch, length, self.n_kv_heads, self.head_dim)
-        v = self.v_proj(x).reshape(batch, length, self.n_kv_heads, self.head_dim)
-        return q.transpose(0, 2, 1, 3), k.transpose(0, 2, 1, 3), v.transpose(0, 2, 1, 3)
-
-    def attend(self, q, k, v, *, position, prior_k, prior_v):
-        """One row, full causal attention over ``prior`` + the new positions."""
-        length = q.shape[2]
-        q = self.rope(q, offset=position)
-        k = self.rope(k, offset=position)
-        keys = mx.concatenate([prior_k, k.astype(prior_k.dtype)], axis=2) if prior_k.shape[2] else k
-        values = mx.concatenate([prior_v, v.astype(prior_v.dtype)], axis=2) if prior_v.shape[2] else v
-        start = position - prior_k.shape[2]
-        key_pos = mx.arange(start, position + length)
-        query_pos = mx.arange(position, position + length)
-        mask = key_pos[None, :] <= query_pos[:, None]
-        out = mx.fast.scaled_dot_product_attention(
-            q, keys.astype(q.dtype), values.astype(q.dtype), scale=self.scale, mask=mask
-        )
-        return out, k
+        super().__init__(DraftAttentionSpec.from_config(
+            config, input_width_factor=2, qk_norm=False, mask_law="causal",
+        ))
 
 
-class Eagle3MLP(nn.Module):
+class Eagle3MLP(GatedMLP):
     def __init__(self, dim, hidden):
-        super().__init__()
-        self.gate_proj = nn.Linear(dim, hidden, bias=False)
-        self.up_proj = nn.Linear(dim, hidden, bias=False)
-        self.down_proj = nn.Linear(hidden, dim, bias=False)
-
-    def __call__(self, x):
-        return self.down_proj(nn.silu(self.gate_proj(x)) * self.up_proj(x))
+        super().__init__(dim, hidden, GatedMLPSpec())
 
 
 class Eagle3Layer(nn.Module):
@@ -429,31 +402,12 @@ class Eagle3DraftModel(nn.Module):
         attn = layer.self_attn
         q, k, v = attn.project(x)
         batch, length, _ = x.shape
-        outputs = []
-        for row, caches in enumerate(rows):
-            cache = caches[0]
-            prior_k, prior_v = cache.keys_and_values()
-            local = None if commit else chain[row]
-            if local is not None and local[0] is not None:
-                prior_k = mx.concatenate([prior_k, local[0]], axis=2) if prior_k.shape[2] else local[0]
-                prior_v = mx.concatenate([prior_v, local[1]], axis=2) if prior_v.shape[2] else local[1]
-            position = cache.offset + (0 if local is None or local[0] is None else local[0].shape[2])
-            out, rotated = attn.attend(
-                q[row:row + 1], k[row:row + 1], v[row:row + 1],
-                position=position, prior_k=prior_k, prior_v=prior_v,
-            )
-            outputs.append(out)
-            if commit:
-                cache.append(rotated, v[row:row + 1])
-            elif chain[row][0] is None:
-                chain[row] = (rotated, v[row:row + 1])
-            else:
-                old = chain[row]
-                chain[row] = (
-                    mx.concatenate([old[0], rotated], axis=2),
-                    mx.concatenate([old[1], v[row:row + 1]], axis=2),
-                )
-        o = mx.concatenate(outputs, axis=0).transpose(0, 2, 1, 3).reshape(batch, length, -1)
+        o, new_locals = chain_attend_rows(
+            attn, q, k, v, [caches[0] for caches in rows], chain, commit=commit
+        )
+        if not commit:
+            chain[:] = new_locals
+        o = o.transpose(0, 2, 1, 3).reshape(batch, length, -1)
         hidden = residual + attn.o_proj(o)
         prenorm = hidden + layer.mlp(layer.post_attention_layernorm(hidden))
         return self.norm(prenorm), prenorm

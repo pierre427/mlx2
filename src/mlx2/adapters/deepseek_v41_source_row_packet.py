@@ -32,7 +32,10 @@ def implementation_identity():
              'adapters/deepseek_v41_source_math.py',
              'adapters/deepseek_v41_source_weights.py',
              'runtime/gguf/source_gate_up_prefill.py',
-             'runtime/models/deepseek_v41.py')
+             'runtime/models/deepseek_v41.py',
+             'runtime/technologies/sparse_selection.py', 'runtime/technologies/hyper_connections.py',
+             'runtime/technologies/dispatch.py', 'runtime/technologies/window_attention/__init__.py',
+             'runtime/technologies/window_attention/vector_sources.py', 'runtime/technologies/window_attention/vector_launch.py')
     records = '\n'.join(path + ':' + hashlib.sha256((root / path).read_bytes()).hexdigest()
                         for path in paths)
     return hashlib.sha256((POLICY + '\n' + records).encode()).hexdigest()

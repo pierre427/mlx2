@@ -24,19 +24,10 @@ def ints(values: Sequence[int]) -> mx.array:
 def tree_paths(parents: Sequence[int]) -> tuple[list[int], list[list[int]]]:
     """Validate parent-first topology and return depths plus root paths."""
 
-    depths: list[int] = []
-    paths: list[list[int]] = []
-    for row, parent in enumerate(parents):
-        parent = int(parent)
-        if parent < 0:
-            path = [row]
-        else:
-            if parent >= row:
-                raise ValueError("parents must come before their children")
-            path = paths[parent] + [row]
-        paths.append(path)
-        depths.append(len(path) - 1)
-    return depths, paths
+    from ..technologies.tree_verify import TreeTopology, legacy_topology
+
+    topology = TreeTopology(parents, legacy_topology("qwen_tree_gdn_paths"))
+    return list(topology.depths), topology.path_lists()
 
 
 _COUNTERS = {

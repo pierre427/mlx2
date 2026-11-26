@@ -1438,7 +1438,8 @@ class Inkling2Adapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
     def execution_numerics_contract(self):
         root = Path(__file__).parents[1] / "runtime/models"
         names = ("inkling2/language.py", "inkling2/config.py", "inkling/cache.py",
-                 "inkling/language.py", "switch_layers.py", "../nvfp4_linear.py")
+                 "inkling/language.py", "switch_layers.py", "../nvfp4_linear.py",
+                 "../technologies/moe_router.py", "../technologies/dispatch.py")
         policy = getattr(self, "kernel_policy", {})
         if policy.get("moe_fused"):
             names += ("inkling2/moe_fast.py",)

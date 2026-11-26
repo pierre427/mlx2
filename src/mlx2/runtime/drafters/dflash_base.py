@@ -27,6 +27,7 @@ def initialize_rope(*, dims, base, traditional, scaling_config):
         raise ValueError("DFlash2 supports default RoPE only")
     return nn.RoPE(dims, traditional=traditional, base=base)
 from .base_config import DFlashConfig
+from ..technologies.drafter_blocks import GatedMLP, GatedMLPSpec
 
 
 def _build_rope(config: DFlashConfig):
@@ -234,17 +235,12 @@ class DFlashAttention(nn.Module):
         return self.o_proj(o.transpose(0, 2, 1, 3).reshape(B, L, -1))
 
 
-class Qwen3MLP(nn.Module):
-    """Qwen3-style gated MLP (matches mlx_lm.models.qwen3.MLP weights)."""
+class Qwen3MLP(GatedMLP):
+    """Qwen3-style gated MLP (matches mlx_lm.models.qwen3.MLP weights); the
+    plain ``swiglu`` law, math in technologies.drafter_blocks."""
 
     def __init__(self, dim, hidden_dim):
-        super().__init__()
-        self.gate_proj = nn.Linear(dim, hidden_dim, bias=False)
-        self.down_proj = nn.Linear(hidden_dim, dim, bias=False)
-        self.up_proj = nn.Linear(dim, hidden_dim, bias=False)
-
-    def __call__(self, x) -> mx.array:
-        return self.down_proj(swiglu(self.gate_proj(x), self.up_proj(x)))
+        super().__init__(dim, hidden_dim, GatedMLPSpec())
 
 
 class DFlashDecoderLayer(nn.Module):

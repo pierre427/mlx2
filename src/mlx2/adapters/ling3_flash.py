@@ -527,7 +527,20 @@ class Ling3FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
                 ling_rowwise.bind_dense([self.model.model.norm, self.model.lm_head])
         if any(self.optimizations.values()):
             root = Path(__file__).parents[1] / "runtime" / "models"
-            sources = ["bailing_hybrid.py", "ling_tree.py"]
+            # Path-shaped keys (src/mlx2/...) resolve from the repository root.
+            repo = Path(__file__).parents[3]
+            sources = ["bailing_hybrid.py", "ling_tree.py",
+                       # The MLA reference and Ling's q/k norm, short conv, tree
+                       # cohorts and recurrence selection (technologies/).
+                       "src/mlx2/runtime/technologies/mla.py",
+                       "src/mlx2/runtime/technologies/drafter_blocks.py",
+                       "src/mlx2/runtime/technologies/linear_recurrence.py",
+                       "src/mlx2/runtime/technologies/dispatch.py",
+                       "differentiable.py", "gated_delta.py", "gdn_state.py", "precise_ops.py"]
+            # ling_tree imports the tree-verify technology; bind every
+            # technology module (runtime/technologies/**).
+            from ..runtime.technologies.tree_verify import TECHNOLOGY_SOURCE_PATHS
+            sources += [name for name in TECHNOLOGY_SOURCE_PATHS if name not in sources]
             if self.rowwise_components():
                 sources += ["ling_rowwise.py"]
             if self.optimizations["fused_norm"]:
@@ -543,8 +556,9 @@ class Ling3FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             if self.optimizations["routed_moe_decode"]:
                 sources += ["ling_routed_decode.py", "deepseek_v41_routed_decode.py",
                             "qwen4_routed_decode.py", "switch_layers.py"]
-            self.optimization_sources = {name: hashlib.sha256((root/name).read_bytes()).hexdigest()
-                                         for name in sources}
+            self.optimization_sources = {
+                name: hashlib.sha256(((repo if name.startswith("src/") else root)/name).read_bytes()).hexdigest()
+                for name in sources}
             digest = hashlib.sha256((self.identity["fingerprint"] + ":ling-kimi-ops-v1:"
                                      + json.dumps({"policy": self.optimizations,
                                                    "sources": self.optimization_sources},
@@ -749,16 +763,18 @@ class Ling3FlashAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
         })
         if adaptive is not None:
             kwargs.setdefault("ast_adaptive_rows", adaptive)
-        provider = (
-            HybridTreeExecutor if self.external_policy.get("ast_target_executor", "packed") == "serial"
-            else LingTreeExecutor
+        from ..runtime.hybrid_tree_executor import TOPOLOGY as SERIAL_TOPOLOGY
+        from ..runtime.technologies.tree_verify import (
+            build_tree_executor, check_serial_rows, tree_executor_choice,
         )
-        if provider is HybridTreeExecutor and rows > 16:
-            raise ValueError("Ling serial reference supports at most 16 tile rows")
+
+        choice = tree_executor_choice(self.external_policy)
+        check_serial_rows(choice, rows, serial_max_rows=SERIAL_TOPOLOGY.max_rows,
+                          error="Ling serial reference supports at most 16 tile rows")
         if "target_tree_executor_provider" not in kwargs:
-            kwargs["target_tree_executor_provider"] = (
-                provider.create() if provider is HybridTreeExecutor
-                else provider(optimizations=getattr(self, "optimizations", None))
+            kwargs["target_tree_executor_provider"] = build_tree_executor(
+                choice, serial=HybridTreeExecutor.create,
+                packed=lambda: LingTreeExecutor(optimizations=getattr(self, "optimizations", None)),
             )
         return super().create_external_batch(**kwargs)
 

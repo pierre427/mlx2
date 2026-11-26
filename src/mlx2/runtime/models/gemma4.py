@@ -47,6 +47,7 @@ from ..prefill_tail_skip import STATS as _TAIL_STATS
 from .base import BaseModelArgs, create_causal_mask, scaled_dot_product_attention
 from .rope_utils import ProportionalRoPE
 from .switch_layers import SwitchGLU
+from ..technologies.moe_router import cached_spec, route as _route_reference
 
 SOURCE_REVISION = "67599f2e8ec31bf35cbb7b02794114f20844f0bb"
 
@@ -265,10 +266,10 @@ class Router(nn.Module):
 
     def __call__(self, x):
         x = mx.fast.rms_norm(x, self.scale * self._root_size, self.eps)
-        scores = self.proj(x)
-        indices = mx.argpartition(scores, kth=-self.top_k, axis=-1)[..., -self.top_k :]
-        weights = mx.softmax(mx.take_along_axis(scores, indices, axis=-1), axis=-1)
-        return indices, weights * self.per_expert_scale[indices]
+        spec = cached_spec(
+            top_k=self.top_k, softmax_position="after_topk", softmax_precise=False
+        )
+        return _route_reference(self.proj(x), spec, expert_scale=self.per_expert_scale)
 
 
 class GeGLU(nn.Module):

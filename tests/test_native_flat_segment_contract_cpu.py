@@ -70,6 +70,8 @@ OWNER_NATIVE_SOURCE_PATHS = (
     "src/mlx2/runtime/hybrid_speculative.py",
     "src/mlx2/runtime/cache_operations.py",
     "src/mlx2/runtime/models/cache.py",
+    "src/mlx2/runtime/technologies/window_attention/__init__.py", "src/mlx2/runtime/technologies/window_attention/vector_sources.py",
+    "src/mlx2/runtime/technologies/window_attention/vector_launch.py", "src/mlx2/runtime/technologies/dispatch.py",
 )
 HARD_LIMITS = {"max_lanes": 4, "max_segment_rows": 4, "max_total_rows": 10}
 STATE_FINGERPRINTS = (

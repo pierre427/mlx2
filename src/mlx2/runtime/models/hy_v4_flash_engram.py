@@ -66,6 +66,8 @@ from concurrent.futures import TimeoutError as FutureTimeout
 
 from ..io_ownership import CloseAction, ReadPool, ReadTimeout, call_io, storage_owner
 from ..read_advise import ReadAdvisor
+from ..technologies.embedding_tables import (Affine4RowSpec, decode_packed_affine4, pread_exact,
+                                             read_safetensors_header_file, scale_bytes_to_f32)
 
 # PLE offload sizing (qwen4_ple_nvme): decode/prefill worker pools, deadline.
 DECODE_WORKERS = 16
@@ -129,10 +131,7 @@ def packed_row_bytes(table_format: str, dim: int, scale_dtype: str) -> int:
 
 def _as_f32(raw: np.ndarray, dtype: str) -> np.ndarray:
     """Little-endian scale/bias bytes ``[..., k*width]`` -> fp32 ``[..., k]``."""
-    raw = np.ascontiguousarray(raw)
-    if dtype == "BF16":
-        return (raw.view("<u2").astype(np.uint32) << 16).view(np.float32)
-    return raw.view("<f4" if dtype == "F32" else "<f2").astype(np.float32)
+    return scale_bytes_to_f32(raw, dtype)
 
 
 def decode_fp8_row(raw: np.ndarray, dim: int, scale_dtype: str) -> np.ndarray:
@@ -168,18 +167,9 @@ def decode_affine4_row(raw: np.ndarray, dim: int, scale_dtype: str) -> np.ndarra
     raw = np.asarray(raw, np.uint8)
     if raw.ndim != 2 or raw.shape[1] != packed_row_bytes(AFFINE4, dim, scale_dtype):
         raise ValueError("affine4_g32 rows have the wrong width")
-    n, groups, width = raw.shape[0], dim // AFFINE4_GROUP, _SCALE_BYTES[scale_dtype]
-    words = np.ascontiguousarray(raw[:, : dim // 2]).view("<u4")
-    shifts = np.arange(0, 32, 4, dtype=np.uint32)
-    q = ((words[:, :, None] >> shifts) & np.uint32(15)).reshape(n, groups, AFFINE4_GROUP).astype(np.float32)
-    at = dim // 2
-    scales = _as_f32(raw[:, at: at + groups * width], scale_dtype)
-    biases = _as_f32(raw[:, at + groups * width:], scale_dtype)
-    with np.errstate(over="ignore", invalid="ignore"):
-        values = (q * scales[:, :, None] + biases[:, :, None]).reshape(n, dim)
-    if not np.isfinite(values).all():
-        raise ValueError("nonfinite decoded Engram row")
-    return values.astype(np.float32, copy=False)
+    spec = Affine4RowSpec(dim=dim, group_size=AFFINE4_GROUP, scale_dtype=scale_dtype,
+                          rounding="none", nonfinite="refuse", output="f32")
+    return decode_packed_affine4(spec, raw)
 
 
 def decode_iq4nl_row(raw: np.ndarray, dim: int) -> np.ndarray:
@@ -355,12 +345,9 @@ def table_layout(path, name) -> dict:
 
 
 def safetensors_header(path) -> dict:
-    with open(path, "rb") as handle:
-        (size,) = struct.unpack("<Q", handle.read(8))
-        if not 2 <= size <= 1 << 28:
-            raise ValueError("implausible safetensors header")
-        header = json.loads(handle.read(size))
-    header["__header_bytes__"] = 8 + size
+    header, data_offset = read_safetensors_header_file(
+        path, length_bounds=(2, 1 << 28), bound_message="implausible safetensors header")
+    header["__header_bytes__"] = data_offset
     return header
 
 
@@ -462,14 +449,7 @@ class EngramTableRows:
             raise
 
     def _read_row(self, fd, row):
-        offset = self.start + int(row) * self.row_bytes
-        data = bytearray()
-        while len(data) < self.row_bytes:
-            block = os.pread(fd, self.row_bytes - len(data), offset + len(data))
-            if not block:
-                raise OSError("short Engram row read")
-            data.extend(block)
-        return bytes(data)
+        return pread_exact(fd, self.row_bytes, self.start + int(row) * self.row_bytes)
 
     def _read_chunk(self, fd, rows):
         size, base, pread = self.row_bytes, self.start, os.pread

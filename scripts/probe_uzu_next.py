@@ -76,6 +76,7 @@ def main():
         "scripts/uzu_next_kernels.py",
         "src/mlx2/runtime/models/qsdpa_verify_metal.py",
         "src/mlx2/runtime/models/qwen38_tree_gdn.py",
+        "src/mlx2/runtime/technologies/tree_verify.py",
         "src/mlx2/runtime/models/qwen4_moe_window.py",
         "src/mlx2/runtime/models/qwen4_routed_decode.py",
         "src/mlx2/runtime/models/qwen3_next.py",

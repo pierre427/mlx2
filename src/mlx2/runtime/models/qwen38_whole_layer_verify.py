@@ -18,14 +18,20 @@ import mlx.core as mx
 
 from .. import row_exact_verify as REV
 from ..flat_segmented_ast import FlatSegmentDescriptor
+from ..row_exact import recipes
 from ..row_exact.canary import probe_policy
+from ..row_exact.spec import RowExactSpec, row_mask, serial_attention_rows
 from . import qwen38_27b as qwen38
-from .base import create_attention_mask
 from .cache import ArraysCache, KVCache
 from .moe_nax_gather import prefill_scope
 from .qwen_hybrid_row_exact import _scratch, ordinary_one_token_step
 
 EXECUTOR_PROTOCOL = "qwen38-whole-layer-ragged-v1"
+# Rows attend with the private B1 ``KVCache``'s own decode mask (``None`` for
+# a one-token forward), not the explicit all-valid mask the Qwen-hybrid
+# route's serial attention uses; see docs/technologies/row_exact.md.  The
+# executor never noted per-block routes, so the shared loop notes none.
+ROW_EXACT_SPEC = RowExactSpec(mask_law="cache_make_mask", route_note="none")
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,7 +176,6 @@ def execute_qwen38_whole_layer_flat(
         raise ValueError("whole-layer Qwen3.8 row-exact binding differs")
 
     hidden = trunk.embed_tokens(mx.array([tokens], dtype=mx.int32))
-    taps = []
     attention_segments = 0
     recurrent_segments = 0
     with (
@@ -178,55 +183,65 @@ def execute_qwen38_whole_layer_flat(
         prefill_scope(False),
         probe_policy(allow=allow_numerical_canaries),
     ):
-        for layer_index, layer in enumerate(trunk.layers):
-            normalized = layer.input_layernorm(hidden)
-            if layer.is_linear:
-                gdn = layer.linear_attn
-                projected = gdn._input_projections(normalized)
-                mixed = _execute_gdn_flat(
-                    gdn,
-                    projected,
-                    descriptor,
-                    tuple(rows[lane][layer_index] for lane in range(len(rows))),
-                    normalized.dtype,
-                    record,
-                )
-                recurrent_segments += descriptor.lane_count
-            else:
-                attention = layer.self_attn
-                q_all = attention.q_proj(normalized)
-                k_all = attention.k_proj(normalized)
-                v_all = attention.v_proj(normalized)
-                lane_outputs = []
-                for lane, length in enumerate(descriptor.query_lengths):
-                    start = descriptor.cu_query_lengths[lane]
-                    cache = rows[lane][layer_index]
-                    pieces = []
-                    for position in range(length):
-                        row = slice(start + position, start + position + 1)
-                        mask = create_attention_mask(normalized[:, row], cache)
-                        pieces.append(
-                            attention._attend(
-                                q_all[:, row],
-                                k_all[:, row],
-                                v_all[:, row],
-                                1,
-                                1,
-                                mask,
-                                cache,
-                            )
-                        )
-                    lane_outputs.append(mx.concatenate(pieces, axis=1))
-                    attention_segments += 1
-                mixed = attention.o_proj(mx.concatenate(lane_outputs, axis=1))
-                record.note(
-                    "attention", "whole_layer_private_b1s1", descriptor.logical_rows
-                )
-                record.note("attention_layers", "whole_layer_private_b1s1")
+        spec = ROW_EXACT_SPEC
+
+        def finish(layer, hidden, mixed):
             residual = hidden + mixed
-            hidden = residual + layer.mlp(layer.post_attention_layernorm(residual))
-            if layer_index in captures:
-                taps.append(hidden)
+            return residual + layer.mlp(layer.post_attention_layernorm(residual))
+
+        def gdn_block(layer, hidden, lane_caches):
+            nonlocal recurrent_segments
+            normalized = layer.input_layernorm(hidden)
+            gdn = layer.linear_attn
+            projected = gdn._input_projections(normalized)
+            mixed = _execute_gdn_flat(
+                gdn, projected, descriptor, lane_caches, normalized.dtype, record
+            )
+            recurrent_segments += descriptor.lane_count
+            return finish(layer, hidden, mixed)
+
+        def attention_block(layer, hidden, lane_caches):
+            nonlocal attention_segments
+            normalized = layer.input_layernorm(hidden)
+            attention = layer.self_attn
+            q_all = attention.q_proj(normalized)
+            k_all = attention.k_proj(normalized)
+            v_all = attention.v_proj(normalized)
+            lane_outputs = []
+            for lane, length in enumerate(descriptor.query_lengths):
+                cache = lane_caches[lane]
+                pieces = serial_attention_rows(
+                    attention._attend,
+                    q_all,
+                    k_all,
+                    v_all,
+                    cache,
+                    lambda row, cache=cache: row_mask(normalized[:, row], cache, spec),
+                    start=descriptor.cu_query_lengths[lane],
+                    length=length,
+                )
+                lane_outputs.append(mx.concatenate(pieces, axis=1))
+                attention_segments += 1
+            mixed = attention.o_proj(mx.concatenate(lane_outputs, axis=1))
+            record.note(
+                "attention", "whole_layer_private_b1s1", descriptor.logical_rows
+            )
+            record.note("attention_layers", "whole_layer_private_b1s1")
+            return finish(layer, hidden, mixed)
+
+        gdn_recipe = recipes.Recipe("whole_layer_gdn", gdn_block)
+        attention_recipe = recipes.Recipe("whole_layer_attention", attention_block)
+        hidden, taps = recipes.run_layerwise(
+            trunk.layers,
+            lambda layer: gdn_recipe if layer.is_linear else attention_recipe,
+            hidden,
+            [
+                tuple(rows[lane][layer_index] for lane in range(len(rows)))
+                for layer_index in range(len(trunk.layers))
+            ],
+            captures,
+            route_note=spec.route_note,
+        )
 
         if len(taps) != len(captures):
             raise RuntimeError("whole-layer Qwen3.8 tap count differs")

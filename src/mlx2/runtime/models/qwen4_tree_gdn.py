@@ -48,15 +48,9 @@ _SUFFIX = r"""
 
 
 def ancestry(parents):
-    parents = tuple(parents)
-    if (not 1 <= len(parents) <= 16 or type(parents[0]) is not int
-        or parents[0] != -1 or any(type(p) is not int or not 0 <= p < i
-                                  for i, p in enumerate(parents[1:], 1))):
-        raise ValueError("Flash tree requires one parent-first root and 1..16 rows")
-    paths = []
-    for row, parent in enumerate(parents):
-        paths.append((row,) if parent < 0 else (*paths[parent], row))
-    return tuple(paths)
+    from ..technologies.tree_verify import TreeTopology, legacy_topology
+
+    return TreeTopology(parents, legacy_topology("flash_tree_ancestry")).paths
 
 
 @lru_cache(maxsize=4)

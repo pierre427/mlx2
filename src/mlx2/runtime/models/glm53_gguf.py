@@ -18,8 +18,9 @@ from ..prefill_checkpoint_rows import select_checkpoint_rows
 from . import glm53_gguf_indexer as indexer
 from . import glm53_kv_append as kv_store
 from . import glm53_sparse_attention as sparse_attention
+from ..technologies import mla as _mla
 from .cache import CacheList, KVCache, _BaseCache, _cache_class_token, register_cache_class
-from .gated_delta import gated_delta_kernel, gated_delta_ops
+from ..technologies import linear_recurrence as _lr
 from .glm53_gguf_indexer import (
     SCORE_LAWS,
     TOPK,
@@ -30,6 +31,9 @@ from .glm53_gguf_indexer import (
     select_from_rows,
 )
 from .precise_ops import gate_sigmoid
+from functools import lru_cache as _lru_cache
+from ..technologies import hyper_connections as _hc
+from ..technologies.moe_router import cached_spec, route as _route_reference
 
 # Sparse DSA execution policies (docs/design/glm53-sparse-dsa.md section 12).
 # The first value of each is today's law and the default; every other value
@@ -363,6 +367,14 @@ def _latent_q8_attention(q, keys, scale, mask):
     return out.reshape(b, heads, length, width)
 
 
+# GLM-5.3 MLA: NoPE, 64 heads, the absorbed q (k_b folded) attends the 512-wide
+# latent as key and value; v_b unabsorbs. Scale 256**-0.5 (qk head dim 256).
+MLA_SPEC = _mla.MLASpec(
+    n_heads=64, kv_lora_rank=512, qk_nope_head_dim=256, qk_rope_head_dim=0, v_head_dim=256,
+    position="nope", absorbed_rule="always", pe_form="fused_buffer",
+)
+
+
 class Glm53MLACache(CacheList):
     """One exact latent/indexer checkpoint, with an explicit APCv2 ABI."""
 
@@ -499,34 +511,45 @@ class Glm53MLACache(CacheList):
 register_cache_class(Glm53MLACache)
 
 
+# GLM-5.3 KDA laws (GGML/FLA): l2 q/k with the epsilon flooring the norm, in
+# the activation dtype; decay exp(-5 * sigmoid((a + dt_bias) * A_stored)) with
+# the precise-span sigmoid; one merged q/k/v depthwise conv.  The fused decode
+# body (glm53_kda_fused) spells exp as precise::exp.
+GLM53_KDA = _lr.LinearRecurrenceSpec(
+    num_k_heads=64, num_v_heads=64, head_k_dim=128, head_v_dim=128, gate_kind="vector",
+    decay_law="stored_a_sigmoid", lower_bound=-5, beta_law="gate_sigmoid_input",
+    qk_norm="l2_clamp", conv_layout="separate_qkv", core_scan=False, exp_spelling="precise",
+)
+
+
 def rms(x, weight, eps):
     return mx.fast.rms_norm(x.astype(mx.float32), weight, eps)
+
+
+# GLM-5.3 mHC law: the DS4 Sinkhorn at HC4 / 20 iterations / 1e-6 (fixed
+# here, not read from the GGUF), span-aware sigmoid gates, and no dtype casts.
+HC_SPEC = _hc.HCSpec(
+    hc_mult=4, sinkhorn_iters=20, eps=1e-6, gate_activation="span_aware_sigmoid",
+    upcast_fp32=False,
+)
+
+
+@_lru_cache(maxsize=16)
+def _hc_spec(norm_eps):
+    return _hc.derive(HC_SPEC, norm_eps=norm_eps)
 
 
 def hc_collapse(x, weights, prefix, eps, *, fused):
     from .deepseek_v4_hc import split_sinkhorn, weighted_sum
 
-    z = rms(x.reshape(*x.shape[:-2], -1), None, eps)
-    mixes = weights.linear(prefix + "_fn")(z)
+    spec = _hc_spec(eps)
+    mixes = _hc.hc_mixes(spec, x.reshape(*x.shape[:-2], -1), project=weights.linear(prefix + "_fn"))
     scale, base = weights.array(prefix + "_scale"), weights.array(prefix + "_base")
     if fused:
         pre, post, comb = split_sinkhorn(mixes, scale, base, iterations=20, eps=1e-6)
         return weighted_sum(x, pre), post, comb
-    pre = gate_sigmoid(mixes[..., :4] * scale[0] + base[:4]) + 1e-6
-    post = 2 * gate_sigmoid(mixes[..., 4:8] * scale[1] + base[4:8])
-    comb = (
-        mx.softmax(
-            (mixes[..., 8:] * scale[2] + base[8:]).reshape(*mixes.shape[:-1], 4, 4),
-            axis=-1,
-            precise=True,
-        )
-        + 1e-6
-    )
-    comb = comb / (comb.sum(-2, keepdims=True) + 1e-6)
-    for _ in range(19):
-        comb = comb / (comb.sum(-1, keepdims=True) + 1e-6)
-        comb = comb / (comb.sum(-2, keepdims=True) + 1e-6)
-    return (x * pre[..., None]).sum(-2), post, comb
+    pre, post, comb = _hc.hc_coefficients(HC_SPEC, mixes, scale, base)
+    return _hc.hc_collapse(HC_SPEC, x, pre), post, comb
 
 
 def hc_expand(branch, residual, post, comb, *, fused):
@@ -534,7 +557,7 @@ def hc_expand(branch, residual, post, comb, *, fused):
         from .deepseek_v4_hc import expand
 
         return expand(branch, residual, post, comb)
-    return branch[..., None, :] * post[..., None] + comb.swapaxes(-1, -2) @ residual
+    return _hc.hc_expand(HC_SPEC, branch, residual, post, comb)
 
 
 class Glm53GGUFModel:
@@ -723,8 +746,7 @@ class Glm53GGUFModel:
         out = nn.silu(mx.conv1d(conv_input, filters, groups=3 * inner))
         q, k, v = [a.reshape(b, length, heads, dim) for a in mx.split(out, 3, axis=-1)]
         # GGML/FLA L2 norm: epsilon floors the norm itself.
-        q = q / mx.maximum(mx.sqrt((q * q).sum(-1, keepdims=True)), 1e-6) * dim**-0.5
-        k = k / mx.maximum(mx.sqrt((k * k).sum(-1, keepdims=True)), 1e-6)
+        q, k = _lr.normalize_qk(GLM53_KDA, q, k)
         a = (
             project(project(x, "ssm_f_a.weight"), "ssm_f_b.weight")
             if _projected is None
@@ -744,7 +766,8 @@ class Glm53GGUFModel:
             ).reshape(b, length, heads, dim)
             flat_a = a.reshape(b, length, heads * dim)
             flat_gate = gate.reshape(b, length, heads * dim)
-            if kda_gate_admits(flat_a, dt_bias, stored_a, beta, flat_gate, heads=heads, dim=dim):
+            if not _lr.kernel_refused("kda_fused") and kda_gate_admits(
+                    flat_a, dt_bias, stored_a, beta, flat_gate, heads=heads, dim=dim):
                 self.calls["kda_small_fused"] += 1
                 decay, beta, gated = fused_kda_gate(
                     flat_a, dt_bias, stored_a, beta, flat_gate, heads=heads, dim=dim
@@ -755,16 +778,14 @@ class Glm53GGUFModel:
                 self.calls["kda_small_fused_declined"] += 1
                 _projected = {**(_projected or {}), "gate": gate}
         if gated is None:
-            a = a + static.dt_bias_hd
-            decay = mx.exp(-5 * gate_sigmoid(a * static.stored_a_h1))
-            beta = gate_sigmoid(beta)
+            decay, beta = _lr.gates(GLM53_KDA, a, beta, static.stored_a_h1, static.dt_bias_hd)[:2]
         state = cache.recurrent
         if state is None:
             state = mx.zeros((b, heads, dim, dim), dtype=mx.float32)
-        use_kernel = self.math_policy == "ordinary" and mx.default_device() == mx.gpu
-        function = gated_delta_kernel if use_kernel else gated_delta_ops
-        self.calls["kda_kernel" if use_kernel else "kda_reference"] += 1
-        out, cache.recurrent = function(q, k, v, decay, beta, state)
+        out, cache.recurrent, receipt = _lr.recurrence(
+            q, k, v, decay, beta, state, use_kernel=self.math_policy == "ordinary",
+            allow_core=False, with_receipt=True)
+        self.calls["kda_kernel" if receipt.selected == "step_kernel" else "kda_reference"] += 1
         cache.offset += length
         if gated is None:
             gate = (
@@ -807,7 +828,7 @@ class Glm53GGUFModel:
         state = cache.recurrent
         admitted = (
             b == 1 and length == 1 and self.math_policy == "ordinary"
-            and mx.default_device() == mx.gpu
+            and mx.default_device() == mx.gpu and not _lr.kernel_refused("kda_fused")
         )
         if admitted:
             projected = dict(projected or {})
@@ -1143,9 +1164,7 @@ class Glm53GGUFModel:
             pieces.append(
                 _latent_q8_attention(q_piece, keys, 256**-0.5, mask)
                 if q8
-                else mx.fast.scaled_dot_product_attention(
-                    q_piece, keys, keys, scale=256**-0.5, mask=mask
-                )
+                else _mla.latent_attention(q_piece, keys, mask, scale=MLA_SPEC.softmax_scale)
             )
         if selected is not None:
             self.calls["sparse_attention_mask"] += 1
@@ -1520,12 +1539,12 @@ class Glm53GGUFModel:
                 self.calls["router_fused"] += 1
                 return fused_router(logits, bias, topk=self.routed_topk, scale=2.5)
             self.calls["router_fused_declined"] += 1
-        scores = gate_sigmoid(logits)
-        choice = scores + bias
-        ids = mx.argsort(-choice, axis=-1)[..., :self.routed_topk].astype(mx.uint32)
-        selected = mx.take_along_axis(scores, ids, axis=-1)
-        selected = selected / selected.sum(-1, keepdims=True) * 2.5
-        return ids, selected
+        spec = cached_spec(
+            top_k=self.routed_topk, score_func="sigmoid", sigmoid_impl="gate_sigmoid",
+            use_bias=True, topk_method="argsort_neg", norm_topk_prob=True,
+            routed_scaling_factor=2.5, index_dtype="uint32",
+        )
+        return _route_reference(logits, spec, bias)
 
     def __call__(
         self, inputs, cache=None, *, logits_to_keep=None, _taps=None, _body_only=False

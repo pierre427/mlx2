@@ -830,6 +830,10 @@ class InklingAdapter(ExternalDraftAdapterMixin):
                     "mtp.py",
                     "../qwen36_moe_grouped.py",
                     "../qwen4_routed_decode.py",
+                    # Technology modules the tree and MTP head now call.
+                    "../../technologies/tree_verify.py",
+                    "../../technologies/drafter_blocks.py",
+                    "../../technologies/dispatch.py",
                 )
             },
             "qualification": "unqualified",
@@ -871,12 +875,13 @@ class InklingAdapter(ExternalDraftAdapterMixin):
     def create_external_batch(self, **kwargs):
         from ..runtime.hybrid_tree_executor import HybridTreeExecutor
         from ..runtime.inkling_tree_executor import InklingTreeExecutor
+        from ..runtime.technologies.tree_verify import build_tree_executor, tree_executor_choice
         from .qwen38_27b import _tile_node_budgets
 
-        provider = (
-            InklingTreeExecutor
-            if self.kernel_policy.get("inkling_tree_executor") == "packed"
-            else HybridTreeExecutor
+        # Inkling defaults to the serial reference: only an explicit
+        # "packed" selects its packed provider.
+        choice = tree_executor_choice(
+            self.kernel_policy, key="inkling_tree_executor", default=None, explicit="packed"
         )
         kwargs.setdefault("dynamic_singleton_tree", True)
         kwargs.setdefault("dynamic_tree_max_width", 4)
@@ -888,7 +893,8 @@ class InklingAdapter(ExternalDraftAdapterMixin):
             "tensorfold_cohort_limit",
             self.external_policy.get("tensorfold_cohort_limit", 4),
         )
-        kwargs.setdefault("target_tree_executor_provider", provider.create())
+        kwargs.setdefault("target_tree_executor_provider", build_tree_executor(
+            choice, serial=HybridTreeExecutor.create, packed=InklingTreeExecutor.create))
         for key in ("ast_topology", "ast_adaptive_rows", "pairwise_selection"):
             if key in self.external_policy:
                 kwargs.setdefault(key, self.external_policy[key])

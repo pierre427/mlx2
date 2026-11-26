@@ -161,6 +161,10 @@ def test_metal_attention_kernels_stand_down_inside_the_reference_path(monkeypatc
     def no_vjp_kernel(*a, **kw):
         raise AssertionError("Metal FP verify attention selected inside the reference path")
 
+    # The window-attention registry consults the opt-in float kernels only
+    # when one is selected by its environment variable (as use_kernel itself
+    # requires); select it so the stubbed admission is reached.
+    monkeypatch.setenv("MLX2_FP_VERIFY_KERNEL", "1")
     monkeypatch.setattr(fp_verify_tensor, "use_kernel", lambda *a, **kw: True)
     monkeypatch.setattr(fp_verify_tensor, "attention", no_vjp_kernel)
     q = mx.random.normal((1, 2, 4, 8))

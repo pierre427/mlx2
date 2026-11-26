@@ -483,11 +483,13 @@ class Ling32AirAdapter(ling3_flash.Ling3FlashAdapter):
         })
         if adaptive is not None:
             kwargs.setdefault("ast_adaptive_rows", adaptive)
-        serial = self.external_policy.get("ast_target_executor", "packed") == "serial"
+        from ..runtime.technologies.tree_verify import build_tree_executor, tree_executor_choice
+
+        choice = tree_executor_choice(self.external_policy)
         if "target_tree_executor_provider" not in kwargs:
-            kwargs["target_tree_executor_provider"] = (
-                HybridTreeExecutor.create() if serial
-                else LingTreeExecutor(optimizations=getattr(self, "optimizations", None))
+            kwargs["target_tree_executor_provider"] = build_tree_executor(
+                choice, serial=HybridTreeExecutor.create,
+                packed=lambda: LingTreeExecutor(optimizations=getattr(self, "optimizations", None)),
             )
         # Skip Ling3Flash's UBTree-only guard; the shared mixin builds the batch.
         return super(ling3_flash.Ling3FlashAdapter, self).create_external_batch(**kwargs)

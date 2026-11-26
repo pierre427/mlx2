@@ -80,6 +80,28 @@ class MoeRoutingContract:
             return f"row consumer {consumer!r} is not allowed by {self.owner}"
         return None
 
+    def router_spec(self):
+        """The eager routing law as a ``technologies.moe_router.RouterSpec``.
+
+        ``precise_softmax_argpartition`` with ``stable_ascending_expert`` ties
+        is the reference softmax-before-top-k law (``SOFTMAX_TOPK_LAW``).
+        """
+        from ..technologies.moe_router import SOFTMAX_TOPK_LAW, RouterSpec
+
+        law = dict(SOFTMAX_TOPK_LAW, norm_topk_prob=self.normalize_topk)
+        return RouterSpec(top_k=self.top_k, **law)
+
+    def spec_refusal(self, spec) -> str | None:
+        """Refusal reason when ``spec`` is not this contract's routing law."""
+        want = self.router_spec()
+        if spec != want:
+            diff = sorted(
+                name for name in want.__dataclass_fields__
+                if getattr(spec, name, None) != getattr(want, name)
+            )
+            return f"router spec differs from {self.owner} in {diff}"
+        return None
+
 
 def __getattr__(name):
     """Compatibility export while definitions remain model-owned."""

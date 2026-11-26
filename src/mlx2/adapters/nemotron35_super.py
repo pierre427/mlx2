@@ -1417,10 +1417,11 @@ class Nemotron35SuperAdapter(ExternalDraftAdapterMixin, Nemotron3SuperAdapter):
         if getattr(self, "tree_route", False):
             from ..runtime.hybrid_tree_executor import HybridTreeExecutor
             from ..runtime.nemotron_tree_executor import NemotronTreeExecutor
+            from ..runtime.technologies.tree_verify import build_tree_executor, tree_executor_choice
 
             if not callable(getattr(self.draft_model, "propose_tree", None)):
                 raise ValueError("Super VL tree verify needs a drafter with propose_tree")
-            serial = self.external_policy.get("ast_target_executor", "packed") == "serial"
+            choice = tree_executor_choice(self.external_policy)
             kwargs.setdefault("dynamic_singleton_tree", True)
             kwargs.setdefault("dynamic_tree_max_width", 1)
             kwargs.setdefault("dynamic_tree_overflow", "chain")
@@ -1451,9 +1452,9 @@ class Nemotron35SuperAdapter(ExternalDraftAdapterMixin, Nemotron3SuperAdapter):
                 ),
             }
             if "target_tree_executor_provider" not in kwargs:
-                kwargs["target_tree_executor_provider"] = (
-                    HybridTreeExecutor.create() if serial
-                    else NemotronTreeExecutor.create(selected=True)
+                kwargs["target_tree_executor_provider"] = build_tree_executor(
+                    choice, serial=HybridTreeExecutor.create,
+                    packed=lambda: NemotronTreeExecutor.create(selected=True),
                 )
             self._tree_provider = kwargs["target_tree_executor_provider"]
             kwargs.setdefault("tree_node_budget_by_lanes", self._tree_node_budgets())

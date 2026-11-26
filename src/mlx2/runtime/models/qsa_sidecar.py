@@ -41,6 +41,15 @@ from typing import Optional
 
 import mlx.core as mx
 
+from ..technologies import sparse_selection as _sparse
+
+# Sidecar indexer score law (sparse_selection spec): uniform head sum of
+# relu(q . block) with no scale, heads accumulated in order h = 0, 1, ...
+SCORE_SPEC = _sparse.SelectionSpec(
+    pooling="mean", score_layout="hld_head_loop", score_weighting="uniform",
+    score_scale_site="none", score_cast="none", visibility="pool_complete",
+)
+
 BLOCK = 4
 KEY_BLOCKS_MIN_CAPACITY = 256  # pooled-key rows first allocated per layer
 MODES = ("dense", "selfdense", "window", "quest", "mask", "nax", "gather")
@@ -157,12 +166,8 @@ class LayerIndexer:
         kb = self.blocks
         out = []
         for start in range(0, q.shape[1], q_chunk):
-            part = q[:, start:start + q_chunk]
-            acc = None
-            for h in range(self.heads):
-                s = mx.maximum(part[h] @ kb.T, 0.0)
-                acc = s if acc is None else acc + s
-            out.append(acc)
+            part = q[: self.heads, start:start + q_chunk]
+            out.append(_sparse.score(SCORE_SPEC, part, kb))
         return out[0] if len(out) == 1 else mx.concatenate(out, axis=0)
 
 

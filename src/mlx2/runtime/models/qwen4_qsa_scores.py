@@ -48,6 +48,7 @@ from collections import Counter
 import mlx.core as mx
 
 from .import_env import snapshot as _import_env_snapshot
+from ..technologies import sparse_selection as _sparse
 
 _import_env_snapshot(__name__)
 
@@ -284,8 +285,8 @@ def stock_scores(
     q: mx.array, pooled: mx.array, valid_blocks: mx.array, head_dim: int
 ) -> mx.array:
     """The MLX chain ``block_scores`` reproduces (reference and fallback)."""
-    scores = mx.einsum(
-        "blhd,bnd->blnh", q.astype(mx.float32), pooled.astype(mx.float32)
+    spec = _sparse.SelectionSpec(
+        head_dim=head_dim, score_layout="blhd_einsum", score_weighting="uniform",
+        score_scale_site="divide", score_cast="float32",
     )
-    scores = mx.sum(mx.maximum(scores, 0), axis=-1) / math.sqrt(head_dim)
-    return mx.where(valid_blocks, scores, -mx.inf)
+    return mx.where(valid_blocks, _sparse.score(spec, q, pooled), -mx.inf)
