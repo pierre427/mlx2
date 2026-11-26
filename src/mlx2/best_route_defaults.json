@@ -1120,6 +1120,37 @@
    }
   },
   {
+   "checkpoint": "Maxwell-V1-Flash-oQ8e@sha256:da677814b3fc23d865bc87231ca1cd3a791e8cc87080677237543eafed6b991b",
+   "fingerprint": "da677814b3fc23d865bc87231ca1cd3a791e8cc87080677237543eafed6b991b",
+   "adapter": "MaxwellMoeAdapter",
+   "status": "selected_unqualified",
+   "default": {
+    "name": "native_mtp",
+    "kind": "native_mtp",
+    "max_lanes": 1,
+    "execution_policy": {
+     "num_draft": 2,
+     "index_kernel": true,
+     "sparse_prefill": "masked"
+    }
+   },
+   "fallback": [
+    {
+     "name": "adapter_default",
+     "kind": "adapter_default"
+    }
+   ],
+   "reason": "decision row from another lane: Operator decision: Pierre 2026-11-26 (\"Yes, set default\"): single-lane oQ8e serving defaults to native MTP depth 2 + index kernel + masked prefill, no fused QKV, no NAX gather (it never engaged on oQ8e); --max-lanes > 1 keeps the ordinary adapter default; an operator route flag, policy or env var still wins. Evidence: ABBA width 1 near ties in all cells, A-vs-A exact, decode 1.17-1.29x, aggregate 1.03-1.32x (bf895b37e); GSM8K50 0.88 vs 0.88, decode 1.74x, MAL 2.25 (47328c293). Unqualified. Route: native_mtp adapter=MaxwellMoeAdapter Max-lanes: 1 Execution-policy: {\"num_draft\": 2, \"index_kernel",
+   "evidence": {
+    "files": [
+     "qualification/runs/maxwell-oq8e-ab-bf895b37e",
+     "qualification/runs/maxwell-oq8e-gsm-47328c293"
+    ],
+    "source_revision": "bf895b37ef3b16b5e8ef7834d10ff2bfcd291abd;47328c29354e78df33383463008d2af51aeddda7",
+    "decision_row": true
+   }
+  },
+  {
    "checkpoint": "Ling-3.2-air-mlx2-e4r8@sha256:12d9f57b5300b88d8e48d84b5800757425f55798e9ddee60339136fba0b9fe2a",
    "fingerprint": "12d9f57b5300b88d8e48d84b5800757425f55798e9ddee60339136fba0b9fe2a",
    "adapter": "Ling32AirAdapter",

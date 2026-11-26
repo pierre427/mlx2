@@ -805,22 +805,25 @@ def test_draft_policy_refusal_names_the_flags_to_pass():
 # ------------------------------------------- width-keyed (Maxwell, 2026-11-24) --
 
 MAXWELL_FP = "6618b91785140c136ba618a910e4e1a439f2ef9f61622a1d3140bb0683a0a294"
+# Maxwell-V1-Flash-oQ8e: same width-keyed default (Pierre 2026-11-26).
+MAXWELL_OQ8E_FP = "da677814b3fc23d865bc87231ca1cd3a791e8cc87080677237543eafed6b991b"
 
 
-def _maxwell_resolution():
+def _maxwell_resolution(fingerprint=MAXWELL_FP):
     from mlx2.adapters.maxwell_moe import MaxwellMoeAdapter, descriptor_for
     return AdapterResolution(MaxwellMoeAdapter, descriptor_for(has_mtp=True),
-                             {"identity": {"fingerprint": MAXWELL_FP}, "has_mtp": True})
+                             {"identity": {"fingerprint": fingerprint}, "has_mtp": True})
 
 
+@pytest.mark.parametrize("fingerprint", [MAXWELL_FP, MAXWELL_OQ8E_FP], ids=["bf16", "oq8e"])
 @pytest.mark.parametrize("lanes", [1, 4])
-def test_maxwell_single_lane_default_is_keyed_on_serving_width(lanes, monkeypatch):
+def test_maxwell_single_lane_default_is_keyed_on_serving_width(lanes, fingerprint, monkeypatch):
     monkeypatch.delenv("MLX2_MAXWELL_INDEX_KERNEL", raising=False)
     monkeypatch.delenv("MLX2_MAXWELL_SPARSE_PREFILL", raising=False)
     # Pierre 2026-11-24: the candidate (native MTP d2 + index kernel + masked
     # prefill, no fused QKV) is the no-flag default only at --max-lanes 1.
     args = _args(max_lanes=lanes)
-    record = apply_best_route_default(args, _maxwell_resolution(), table=brd.load_table())
+    record = apply_best_route_default(args, _maxwell_resolution(fingerprint), table=brd.load_table())
     policy = brd.finish_best_route_default(args, None)
     assert record["qualification"] == "unqualified"
     if lanes == 1:
@@ -829,13 +832,13 @@ def test_maxwell_single_lane_default_is_keyed_on_serving_width(lanes, monkeypatc
         assert record["route"]["max_lanes"] == 1
         assert args.native_mtp
         assert policy == {"num_draft": 2, "index_kernel": True, "sparse_prefill": "masked"}
-        assert resolve_route_selection(args, policy, _maxwell_resolution()).route == "native_mtp"
+        assert resolve_route_selection(args, policy, _maxwell_resolution(fingerprint)).route == "native_mtp"
     else:
         assert record["status"] == "width_keyed_adapter_default" and not record["applied"]
         assert "--max-lanes 4 exceeds" in record["reason"]
         assert "--max-lanes 4 exceeds" in brd.receipt_view(record)["reason"]
         assert not args.native_mtp and policy is None
-        selection = resolve_route_selection(args, policy, _maxwell_resolution())
+        selection = resolve_route_selection(args, policy, _maxwell_resolution(fingerprint))
         assert selection.route == "ordinary" and selection.source == "adapter_default"
 
 
