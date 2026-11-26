@@ -74,6 +74,20 @@ and only with the probe on:
   the cap. Recorded rounds are slower (capture and a
   drain); they are booked under ``recorded_rounds`` and left out of the GPU
   attribution, but stay in the host counters.
+* ``MLX2_ROUND_PROBE_SUBSTITUTE=N`` (P4, needs recording) replays every
+  dispatch of the first N recordings with ``step_replay.substitution_check``
+  right after the drained recording, on the executor thread with MLX idle: the
+  recorded ``setBytes`` payloads against the same payloads bound from a
+  constants buffer, directly and through a one-command indirect command buffer,
+  compared bit for bit on private copies of the written buffers, once per
+  alignment in ``MLX2_ROUND_PROBE_SUBSTITUTE_ALIGN`` (default ``256,4``).
+  Results go to ``substitution-<pid>-<n>.json`` beside the recordings. It takes
+  seconds per recording, inside the request that hosts the recorded round.
+  Side-effect isolation: ``MLX2_ROUND_PROBE_SUBSTITUTE_ARMS`` picks the arms
+  (``A,A2,B,C``, default all; ``none`` makes the copies only, no GPU work;
+  partial runs compare nothing), and ``MLX2_ROUND_PROBE_SUBSTITUTE_CHECKSUM=1``
+  hashes every host-visible recorded buffer before and after the pass and
+  lists the ones that changed, with the dispatches that bind them.
 """
 
 from __future__ import annotations
@@ -95,6 +109,19 @@ RECORD_ENV = "MLX2_ROUND_PROBE_RECORD"
 RECORD_DIR_ENV = "MLX2_ROUND_PROBE_RECORD_DIR"
 RECORD_GAP_ENV = "MLX2_ROUND_PROBE_RECORD_GAP_S"
 RECORD_MAX_ENV = "MLX2_ROUND_PROBE_RECORD_MAX"
+SUBSTITUTE_ENV = "MLX2_ROUND_PROBE_SUBSTITUTE"
+SUBSTITUTE_ALIGN_ENV = "MLX2_ROUND_PROBE_SUBSTITUTE_ALIGN"
+SUBSTITUTE_ARMS_ENV = "MLX2_ROUND_PROBE_SUBSTITUTE_ARMS"
+SUBSTITUTE_CHECKSUM_ENV = "MLX2_ROUND_PROBE_SUBSTITUTE_CHECKSUM"
+_ARM_BITS = {"A": 1, "A2": 2, "B": 4, "C": 8}
+
+
+def _arms_mask(value):
+    if value is None or value.strip() == "":
+        return 15
+    if value.strip().lower() == "none":
+        return 0
+    return sum(_ARM_BITS[name.strip()] for name in value.split(",") if name.strip())
 GPU_KEYS = (
     "gpu_rounds", "gpu_wall_ns", "gpu_busy_ns", "gpu_eval_ns", "gpu_eval_busy_ns",
     "gpu_eval_tail_ns", "gpu_command_buffers", "recorded_rounds",
@@ -130,6 +157,7 @@ _iv = []  # (start, end, commit), same order
 _iv_max = 0.0  # longest interval seen, for the window lookup
 _timeline_counts = {"intervals": 0, "errored": 0, "unattributed_rounds_dropped": 0}
 _record = {"per_gap": 0, "dir": None, "gap_s": 0.5, "max": 4, "written": 0,
+           "substitute": 0, "substitute_align": (256, 4),
            "errors": [], "left": 0, "last_round_end": None, "skip": False}
 
 
@@ -364,8 +392,14 @@ def _install_native():
             try:
                 _record["gap_s"] = float(os.environ.get(RECORD_GAP_ENV, "0.5"))
                 _record["max"] = int(os.environ.get(RECORD_MAX_ENV, "4"))
+                _record["substitute"] = int(os.environ.get(SUBSTITUTE_ENV, "0") or 0)
+                _record["substitute_align"] = tuple(
+                    int(v) for v in os.environ.get(SUBSTITUTE_ALIGN_ENV, "256,4").split(",") if v)
             except ValueError:
                 pass
+            if _record["substitute"] and "substitution_check" not in module.CAPABILITIES:
+                _record["errors"].append("module has no substitution_check; P4 off")
+                _record["substitute"] = 0
     _native = module
 
 
@@ -466,9 +500,78 @@ def _write_recording(route, handle, started):
         tmp.write_text(json.dumps(document))
         tmp.replace(path)
         _record["written"] = index + 1
+        if index < _record["substitute"]:
+            _substitution_pass(route, handle, index, summary)
     except Exception as error:
         if len(_record["errors"]) < 16:
             _record["errors"].append(f"{type(error).__name__}: {error}")
+
+
+def _substitution_pass(route, handle, index, summary):
+    """P4: every dispatch of one recording, once per alignment (module docstring)."""
+    kernels = summary.get("kernels") or []
+    started = time.perf_counter()
+    passes = []
+    arms = _arms_mask(os.environ.get(SUBSTITUTE_ARMS_ENV))
+    checksum = _env_on(os.environ.get(SUBSTITUTE_CHECKSUM_ENV))
+    before = _native.buffer_checksums(handle) if checksum else None
+    checksum_s = time.perf_counter() - started
+    for align in _record["substitute_align"]:
+        rows = []
+        for i in range(summary.get("dispatches", 0)):
+            try:
+                rows.append(_native.substitution_check(handle, i, align=align, icb=True, arms=arms))
+            except Exception as error:
+                rows.append({"index": i, "status": "exception", "errors": f"{type(error).__name__}: {error}"})
+        statuses = Counter(row.get("status") for row in rows)
+        by_kernel = {}
+        for row in rows:
+            entry = by_kernel.setdefault(row.get("kernel", "?"), Counter())
+            entry[row.get("status")] += 1
+        passes.append({
+            "align": align, "dispatches": len(rows), "statuses": dict(statuses),
+            "with_bytes": sum(1 for row in rows if row.get("bytes_slots")),
+            "wrote": sum(1 for row in rows if row.get("wrote")),
+            "icb_ran": sum(1 for row in rows if row.get("icb_ran")),
+            "kernels": {k: dict(v) for k, v in sorted(by_kernel.items())},
+            "not_equal": [row for row in rows if row.get("status") not in ("equal", "partial")][:64],
+            "copy_bytes_total": sum(row.get("copy_bytes_total") or 0 for row in rows),
+            "largest_copies": sorted(
+                ({"index": row["index"], "kernel": row.get("kernel"), "bytes": row.get("copy_bytes_total")}
+                 for row in rows if row.get("copy_bytes_total")),
+                key=lambda e: -e["bytes"])[:16],
+        })
+    changed = None
+    if checksum:
+        after = _native.buffer_checksums(handle)
+        changed = []
+        table = handle.dispatch_table()
+        reflection = {p.get("function"): {s[0]: s[2] for s in p.get("slots", []) if s[1] == "buffer"}
+                      for p in _native.pipelines()}
+        for (i, length, h0), (_, _, h1) in zip(before, after):
+            if h0 != h1:
+                users = []
+                for d_index, d in enumerate(table):
+                    for slot in d["slots"]:
+                        if slot[1] == "buffer" and slot[2] == i:
+                            name = kernels[d["pipeline"]] if d["pipeline"] < len(kernels) else "?"
+                            users.append({"dispatch": d_index, "kernel": name, "slot": slot[0],
+                                          "reflected_writes": reflection.get(name, {}).get(slot[0])})
+                changed.append({"buffer": i, "length": length, "private": h0 is None,
+                                "users": users[:12], "user_count": len(users)})
+    document = {
+        "schema": "mlx2.round-probe.substitution.v1", "probe": "P4", "route": route,
+        "recording_index": index, "distinct_kernels": len(set(kernels)),
+        "seconds": round(time.perf_counter() - started, 3), "passes": passes,
+        "arms_mask": arms, "checksum": checksum, "checksum_seconds": round(checksum_s, 3),
+        "buffers_changed_by_pass": changed,
+        "buffers_checked": None if before is None else len(before),
+        "private_buffers": None if before is None else sum(1 for b in before if b[2] is None),
+    }
+    path = Path(_record["dir"]) / f"substitution-{os.getpid()}-{index:04d}.json"
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(document))
+    tmp.replace(path)
 
 
 def uninstall() -> None:
