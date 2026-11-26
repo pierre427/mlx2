@@ -2091,7 +2091,7 @@ class Model(nn.Module):
                           prefill_mask_bf16_budget=False, prefill_mask_with_sink=False,
                           head_kernel_wide=False, prefill_tiled_attention=False,
                           attn_decode_kernel=False, verify_deferred_commit=False,
-                          visit_length_check=False, moe_panel_kernel=False,
+                          visit_length_check=False, moe_panel_kernel=False, moe_rows_kernel=False,
                           moe_nax_mxfp8=False, prefill_handover=False, pass_messages=False,
                           stage_a_kernel=False, gate_merge=False, attn_output_kernel=False,
                           embed_kernel=False, prefill_onelaunch_attention=False,
@@ -2116,7 +2116,12 @@ class Model(nn.Module):
             raise ValueError("Inkling 2 moe_decode_kernel requires moe_fused")
         if moe_panel_kernel and not moe_fused:
             raise ValueError("Inkling 2 moe_panel_kernel requires moe_fused")
-        if moe_logdomain_renorm and (moe_decode_kernel or moe_panel_kernel or native_replay):
+        if moe_rows_kernel and not moe_fused:
+            raise ValueError("Inkling 2 moe_rows_kernel requires moe_fused")
+        if moe_rows_kernel and moe_panel_kernel:
+            raise ValueError("Inkling 2 moe_rows_kernel and moe_panel_kernel are alternatives")
+        if moe_logdomain_renorm and (moe_decode_kernel or moe_panel_kernel or moe_rows_kernel
+                                     or native_replay):
             # The Metal decode/panel epilogues and the native replay keep the
             # reference renormalization; refuse rather than mix the two rules.
             raise ValueError("Inkling 2 moe_logdomain_renorm is not combined with "
@@ -2237,6 +2242,8 @@ class Model(nn.Module):
             object.__setattr__(layer.mlp, "_moe_decode_kernel", bool(moe_decode_kernel))
             # inkling2_moe_panel_kernel (moe_panel_kernel.py; hook in moe_fast).
             object.__setattr__(layer.mlp, "_moe_panel_kernel", bool(moe_panel_kernel))
+            # inkling2_moe_rows_kernel (moe_rows_kernel.py; hook in moe_fast).
+            object.__setattr__(layer.mlp, "_moe_rows_kernel", bool(moe_rows_kernel))
             # inkling2_moe_logdomain_renorm (_route_logdomain; default off).
             object.__setattr__(layer.mlp, "_logdomain_renorm", bool(moe_logdomain_renorm))
             # inkling2_moe_nax_mxfp8: the MXFP8 expert tables (layers 20-23)
@@ -2268,6 +2275,7 @@ class Model(nn.Module):
              "compile_decode_blocks": bool(compile_decode_blocks),
              "moe_decode_kernel": bool(moe_decode_kernel),
              "moe_panel_kernel": bool(moe_panel_kernel),
+             "moe_rows_kernel": bool(moe_rows_kernel),
              "moe_logdomain_renorm": bool(moe_logdomain_renorm),
              "moe_nax_mxfp8": bool(moe_nax_mxfp8) and nax_mxfp8_decline is None,
              "head_softcap_compiled": bool(head_softcap_compiled), "kv_q8": bool(kv_q8),
@@ -2356,6 +2364,12 @@ class Model(nn.Module):
                "moe_panel_kernel_declines": {
                    key.split(":", 1)[1]: moe.pop(key) for key in sorted(moe)
                    if key.startswith("panel_kernel_declined:")},
+               # inkling2_moe_rows_kernel calls (also in moe_fused_calls) and
+               # declines by reason.
+               "moe_rows_kernel_calls": moe.pop("rows_kernel", 0),
+               "moe_rows_kernel_declines": {
+                   key.split(":", 1)[1]: moe.pop(key) for key in sorted(moe)
+                   if key.startswith("rows_kernel_declined:")},
                "moe_fast_declines": moe,
                "moe_fused_layers": sum(1 for b in built if b is not None and b[0] is not None),
                "moe_fused_refusals": sorted({b[1] for b in built if b is not None and b[1]})}

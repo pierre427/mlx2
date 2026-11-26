@@ -374,7 +374,8 @@ def test_policy_parsing():
          "fuse_gather_lhs": False, "fuse_norm_fp32": False, "fuse_shared_tau": False,
          "fuse_dconv_kernel": False, "fuse_message_kernel": False,
          "compile_decode_blocks": False, "head_softcap_compiled": False,
-         "moe_decode_kernel": True, "moe_panel_kernel": False, "moe_nax_mxfp8": False,
+         "moe_decode_kernel": True, "moe_panel_kernel": False, "moe_rows_kernel": False,
+         "moe_nax_mxfp8": False,
          "moe_act_quant": False, "kv_q8": False,
          "prefill_mask_bf16_budget": False,
          "prefill_mask_with_sink": False, "head_kernel_wide": False,
@@ -409,7 +410,7 @@ def test_fused_projection_toggle_round_trip():
                                    "fuse_gather_lhs": False, "fuse_norm_fp32": False, "fuse_shared_tau": False,
                                    "fuse_dconv_kernel": False, "fuse_message_kernel": False,
                                    "compile_decode_blocks": False, "head_softcap_compiled": False,
-                                   "moe_decode_kernel": False, "moe_panel_kernel": False,
+                                   "moe_decode_kernel": False, "moe_panel_kernel": False, "moe_rows_kernel": False,
                                    "moe_logdomain_renorm": False,
                                    "moe_nax_mxfp8": False,
                                    "kv_q8": False,
@@ -962,3 +963,19 @@ def test_validate_policy_configures_the_model_through_model_kernel_options(_cpu)
     params = set(inspect.signature(model.configure_kernels).parameters)
     assert set(options) <= params, sorted(set(options) - params)
     model.configure_kernels(**{**options, "moe_nax_gather": False})
+
+
+def test_split_fixed256_switch_only_changes_direct_split_counts(monkeypatch):
+    from mlx2.runtime.models.inkling2 import splitk
+
+    base = [(n, t, d, splitk._splits(n, t, direct=d))
+            for n in (100, 2048, 8192, 32768, 131072) for t in (8, 64) for d in (True, False)]
+    assert splitk.SPLIT_FIXED256 is False
+    monkeypatch.setattr(splitk, "SPLIT_FIXED256", True)
+    for n, t, d, ns in base:
+        got = splitk._splits(n, t, direct=d)
+        if d:
+            assert got == (1 if n <= 256 else min(1024, (n + 255) // 256))
+        else:
+            assert got == ns
+    assert splitk._splits(32768, 8, direct=True) == 128

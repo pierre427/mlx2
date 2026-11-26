@@ -411,6 +411,15 @@ KERNEL_OPTIONS = {
     # 0.0440 s at 2 rows (+13%) and 0.0572 -> 0.0734 s at 8 rows (+28%).
     # Leave off; pending the overnight A/B.
     "inkling2_moe_panel_kernel": "moe_panel_kernel",
+    # Row-exact multi-row experts in pair order (runtime/models/inkling2/
+    # moe_rows_kernel.py; implemented 2026-11-26 from the oMLX #5572/#5617/
+    # #5638 mechanism, Apache-2.0, no code copied; default off, needs
+    # inkling2_moe_fused, GPU pending). 2-16 row MoE calls (DFlash2/DSpark
+    # verify blocks, short prefill chunks): moe_decode_kernel's per-pair
+    # threadgroups, launched with every pair of an output tile back to back so
+    # experts shared by several rows are read from cache; each row keeps its
+    # one-token arithmetic. Not with inkling2_moe_panel_kernel (alternatives).
+    "inkling2_moe_rows_kernel": "moe_rows_kernel",
     # MXFP8 expert tables (layers 20-23) on the NAX sorted gather (M5 tensor
     # units, prefill only; implemented 2026-11-23, MTPLX sweep candidate 10,
     # default off, needs inkling2_moe_nax_gather, GPU pending). A MXFP8
@@ -894,13 +903,18 @@ def validate_policy(value):
         raise ValueError("Inkling 2 inkling2_moe_decode_kernel requires inkling2_moe_fused")
     if kernels["moe_panel_kernel"] and not kernels["moe_fused"]:
         raise ValueError("Inkling 2 inkling2_moe_panel_kernel requires inkling2_moe_fused")
+    if kernels["moe_rows_kernel"] and not kernels["moe_fused"]:
+        raise ValueError("Inkling 2 inkling2_moe_rows_kernel requires inkling2_moe_fused")
+    if kernels["moe_rows_kernel"] and kernels["moe_panel_kernel"]:
+        raise ValueError("Inkling 2 inkling2_moe_rows_kernel and inkling2_moe_panel_kernel "
+                         "are alternatives")
     if kernels["moe_nax_mxfp8"] and kernels["moe_nax_gather"] is False:
         # Unset moe_nax_gather is resolved at load (configure_kernels
         # refuses moe_nax_mxfp8 when it resolves off).
         raise ValueError("Inkling 2 inkling2_moe_nax_mxfp8 requires inkling2_moe_nax_gather")
     if kernels["moe_weighted_sum"] and not kernels["moe_fused"]:
         raise ValueError("Inkling 2 inkling2_moe_weighted_sum requires inkling2_moe_fused")
-    for other in ("moe_decode_kernel", "moe_panel_kernel", "native_replay"):
+    for other in ("moe_decode_kernel", "moe_panel_kernel", "moe_rows_kernel", "native_replay"):
         if kernels["moe_logdomain_renorm"] and kernels[other]:
             raise ValueError(f"Inkling 2 inkling2_moe_logdomain_renorm is not combined with "
                              f"inkling2_{other}")
@@ -1304,14 +1318,42 @@ class Inkling2Adapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
         self.dflash2_embed_norm = True
         draft = external.get("draft_model")
         embed_norm = external.pop(inkling2_dflash2.EMBED_NORM_OPTION, None)
+        lane_cap = external.pop(inkling2_dflash2.MULTILANE_DRAFT_CAP_OPTION, None)
+        self.dflash2_multilane_draft_cap = None
+        drain = external.pop(inkling2_dflash2.READY_DRAIN_OPTION, None)
+        self.dflash2_ready_drain = None
         selected = (isinstance(draft, str) and draft not in DSPARK_DRAFT_NAMES
                     and inkling2_dflash2.is_dflash2_artifact(draft))
         if embed_norm is not None and not selected:
             self._dflash2_refusal("embed_norm_without_route")
             raise ValueError(f"Inkling 2 {inkling2_dflash2.EMBED_NORM_OPTION} requires the "
                              "DFlash2 route")
+        if drain is not None and not selected:
+            self._dflash2_refusal("ready_drain_without_route")
+            raise ValueError(f"Inkling 2 {inkling2_dflash2.READY_DRAIN_OPTION} requires the "
+                             "DFlash2 route")
+        if drain is not None and drain not in ("one", "all"):
+            self._dflash2_refusal("ready_drain_value")
+            raise ValueError(f"Inkling 2 {inkling2_dflash2.READY_DRAIN_OPTION} must be 'one' "
+                             "or 'all'")
+        self.dflash2_ready_drain = drain
+        if lane_cap is not None and not selected:
+            self._dflash2_refusal("multilane_cap_without_route")
+            raise ValueError(f"Inkling 2 {inkling2_dflash2.MULTILANE_DRAFT_CAP_OPTION} requires "
+                             "the DFlash2 route")
         if not selected:
             return False
+        if lane_cap is not None:
+            from ..runtime.drafters.dflash2 import DFlash2DraftModel
+
+            depth = external.get("num_draft", 7)
+            floor = DFlash2DraftModel.minimum_proposal_length
+            if (type(lane_cap) is not int or type(depth) is not int
+                    or not floor <= lane_cap <= depth):
+                self._dflash2_refusal("multilane_cap_value")
+                raise ValueError(f"Inkling 2 {inkling2_dflash2.MULTILANE_DRAFT_CAP_OPTION} must be "
+                                 f"an integer from {floor} (the drafter's minimum) to num_draft")
+            self.dflash2_multilane_draft_cap = lane_cap
         if embed_norm is not None and type(embed_norm) is not bool:
             self._dflash2_refusal("embed_norm_type")
             raise TypeError(f"Inkling 2 {inkling2_dflash2.EMBED_NORM_OPTION} must be a boolean")
@@ -1461,6 +1503,11 @@ class Inkling2Adapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
         if policy.get("moe_panel_kernel"):
             # It reuses moe_decode_kernel's router and contract switches.
             names += ("inkling2/moe_panel_kernel.py", "inkling2/moe_decode_kernel.py")
+        if policy.get("moe_rows_kernel"):
+            # It reuses moe_decode_kernel's arithmetic and moe_panel_kernel's
+            # shipped-route rules.
+            names += ("inkling2/moe_rows_kernel.py", "inkling2/moe_decode_kernel.py",
+                      "inkling2/moe_panel_kernel.py")
         if policy.get("moe_weighted_sum"):
             names += ("qwen4_moe_weighted_sum.py",)
         if policy.get("moe_nax_gather"):
@@ -1576,6 +1623,17 @@ class Inkling2Adapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             kwargs.setdefault("predraft", True)
         if getattr(self, "dspark_cost_depth", None) is not None:
             kwargs.setdefault("adaptive_verification", self.dspark_cost_depth)
+        if getattr(self, "dflash2_route", False) and int(kwargs.get("completion_batch_size") or 1) > 1:
+            # Multi-lane DFlash2: emit a verify's accepted tokens at once so
+            # lanes verify together (inkling2_dflash2.READY_DRAIN_OPTION).
+            from . import inkling2_dflash2
+
+            kwargs.setdefault("ready_drain", getattr(self, "dflash2_ready_drain", None)
+                              or inkling2_dflash2.READY_DRAIN_MULTILANE)
+        if getattr(self, "dflash2_multilane_draft_cap", None) is not None:
+            # inkling2_dflash2_multilane_draft_cap: shallower rounds while
+            # several lanes are active (receipt: external_multilane_draft_cap_*).
+            kwargs.setdefault("multilane_draft_cap", self.dflash2_multilane_draft_cap)
         return super().create_external_batch(**kwargs)
 
     def prefill_step_default(self):
@@ -1851,6 +1909,9 @@ def _dflash2_receipt(adapter):
                    drafter=getattr(backend, "inkling2_dflash2_receipt", None),
                    settings=getattr(draft, "receipt_settings", None),
                    embed_norm=bool(getattr(adapter, "dflash2_embed_norm", True)),
+                   multilane_draft_cap=getattr(adapter, "dflash2_multilane_draft_cap", None),
+                   ready_drain_multilane=(getattr(adapter, "dflash2_ready_drain", None)
+                                          or inkling2_dflash2.READY_DRAIN_MULTILANE),
                    prefill_reclaim=bool(getattr(adapter, "dspark_prefill_reclaim", False)))
     return out
 

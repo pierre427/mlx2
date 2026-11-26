@@ -535,8 +535,20 @@ def decline_reason(q, k, v, *, n_heads, n_kv, head_dim, device=None):
     return None
 
 
+# Module switch (default off, A/B only; oMLX #5620's mechanism, Apache-2.0,
+# from its description): one-token direct calls split the keys in fixed
+# 256-key blocks instead of capping the split count at 32, so long contexts
+# get more threadgroups (32K keys: 128 splits of 256 instead of 32 of 1024).
+# The merge loops over any number of partials. Near-exact: the order of the
+# key reduction changes with the split boundaries.
+SPLIT_FIXED256 = False
+_FIXED256_MAX_SPLITS = 1024
+
+
 def _splits(n_keys, base_tgs, *, direct):
     # omlx's split-count heuristics, unchanged.
+    if direct and SPLIT_FIXED256:
+        return 1 if n_keys <= 256 else min(_FIXED256_MAX_SPLITS, (n_keys + 255) // 256)
     if direct:
         ns = 1 if n_keys <= 256 else min(32, max(1, (n_keys + 255) // 256))
         if n_keys >= 2048 and ns < 16 and base_tgs <= 16:

@@ -54,6 +54,20 @@ ALLOWED_POLICY_KEYS = frozenset({
     "draft_model", "num_draft", "adaptive_verification", "proposal_composition",
 })
 EMBED_NORM_OPTION = "inkling2_dflash2_embed_norm"
+# Draft depth (3..num_draft) while more than one lane is active (opt-in, 2026-11-26): the
+# generator's multilane_draft_cap. One lane keeps num_draft. Implemented, not
+# qualified; the GPU sweep at 15bdbb21c found depth 7 losing to ordinary
+# batched decode at 4 and 16 clients (each lane verifies 8 rows).
+MULTILANE_DRAFT_CAP_OPTION = "inkling2_dflash2_multilane_draft_cap"
+# How a lane hands out the tokens one verify accepted when the server has more
+# than one lane (2026-11-26): "all" (the route's behaviour) emits them at once
+# so the lanes stay in lockstep and verify together; "one" (the engine's
+# default) emits one per poll, and a lane that accepted several sits out the
+# next verifies while it drains, which split the 16-lane sweep at 98cbaa341
+# into one-lane rounds (936 of 1,525 rounds, 9,889 lane skips). The committed
+# tokens are the same. One lane is unaffected (the drain never splits a cohort).
+READY_DRAIN_OPTION = "inkling2_dflash2_ready_drain"
+READY_DRAIN_MULTILANE = "all"
 # Fail-closed admission refusals of this route, by reason, process-wide.
 # The adapter keeps its own per-instance count (diagnostics()["dflash2"]).
 REFUSALS = Counter()

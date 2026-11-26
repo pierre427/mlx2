@@ -1097,3 +1097,119 @@ def test_tiny_inkling2_engine_sampled_lanes_complete():
         assert _lane_visits(target) > 0
     finally:
         batch.close()
+
+
+def test_multilane_draft_cap_option(tmp_path, monkeypatch):
+    from mlx2.adapters import inkling2_dflash2 as d2
+    from mlx2.adapters.external_draft_policy import ExternalDraftAdapterMixin
+    from mlx2.adapters.inkling2 import Inkling2Adapter
+
+    path = tmp_path / "draft"
+    path.mkdir()
+    (path / "config.json").write_text(json.dumps({"architectures": ["DFlash2DraftModel"]}))
+    adapter = object.__new__(Inkling2Adapter)
+    external = {"draft_model": str(path), "num_draft": 7, d2.MULTILANE_DRAFT_CAP_OPTION: 3}
+    assert adapter._select_dflash2_route(external)
+    assert adapter.dflash2_multilane_draft_cap == 3
+    assert d2.MULTILANE_DRAFT_CAP_OPTION not in external
+    seen = {}
+    monkeypatch.setattr(ExternalDraftAdapterMixin, "create_external_batch",
+                        lambda self, **kwargs: seen.update(kwargs))
+    adapter.create_external_batch(completion_batch_size=4)
+    assert seen["multilane_draft_cap"] == 3
+    unset = object.__new__(Inkling2Adapter)
+    assert unset._select_dflash2_route({"draft_model": str(path), "num_draft": 7})
+    seen.clear()
+    unset.create_external_batch()
+    assert "multilane_draft_cap" not in seen
+    for bad in (0, 2, 8, 3.0, True):  # the DFlash2 drafter proposes at least 3
+        with pytest.raises((ValueError, TypeError)):
+            object.__new__(Inkling2Adapter)._select_dflash2_route(
+                {"draft_model": str(path), "num_draft": 7, d2.MULTILANE_DRAFT_CAP_OPTION: bad})
+    with pytest.raises(ValueError, match="requires the DFlash2 route"):
+        object.__new__(Inkling2Adapter)._select_dflash2_route(
+            {"draft_model": "embedded_dspark", d2.MULTILANE_DRAFT_CAP_OPTION: 2})
+
+
+def test_tiny_engine_multilane_cap_keeps_greedy_exact_and_caps_rounds():
+    from mlx2.runtime.external_speculative import ExternalDraftBatchGenerator
+
+    target, draft, _ = _tiny_inkling_pair()
+    mx.random.seed(7)
+    prompts = [[int(t) for t in mx.random.randint(1, 400, (n,)).tolist()] for n in (24, 9, 17)]
+    count = 14
+    expect = [_greedy_ordinary(target, p, count) for p in prompts]
+    batch = ExternalDraftBatchGenerator(target, draft_model=draft, binding="inkling2-dflash2-test",
+                                        num_draft=7, prefill_step_size=16,
+                                        completion_batch_size=4, multilane_draft_cap=3)
+    try:
+        uids = list(batch.insert(prompts, max_tokens=[count] * len(prompts)))
+        got = {}
+        for _ in range(800):
+            _, responses = batch.next()
+            for r in responses:
+                got.setdefault(r.uid, []).append(r.token)
+            if not batch.lanes:
+                break
+        assert [got[u] for u in uids] == expect
+        assert batch.scheduler_stats.get("external_multilane_draft_cap_rounds", 0) > 0
+    finally:
+        batch.close()
+
+
+def test_multilane_dflash2_keeps_lanes_in_lockstep(tmp_path, monkeypatch):
+    from mlx2.adapters import inkling2_dflash2 as d2
+    from mlx2.adapters.external_draft_policy import ExternalDraftAdapterMixin
+    from mlx2.adapters.inkling2 import Inkling2Adapter
+
+    path = tmp_path / "draft"
+    path.mkdir()
+    (path / "config.json").write_text(json.dumps({"architectures": ["DFlash2DraftModel"]}))
+    seen = {}
+    monkeypatch.setattr(ExternalDraftAdapterMixin, "create_external_batch",
+                        lambda self, **kwargs: seen.update(kwargs))
+    adapter = object.__new__(Inkling2Adapter)
+    assert adapter._select_dflash2_route({"draft_model": str(path), "num_draft": 7})
+    adapter.create_external_batch(completion_batch_size=16)
+    assert seen["ready_drain"] == "all"
+    seen.clear()
+    adapter.create_external_batch(completion_batch_size=1)  # the one-lane default: engine's own
+    assert "ready_drain" not in seen
+    opted = object.__new__(Inkling2Adapter)
+    assert opted._select_dflash2_route({"draft_model": str(path), "num_draft": 7,
+                                        d2.READY_DRAIN_OPTION: "one"})
+    seen.clear()
+    opted.create_external_batch(completion_batch_size=16)
+    assert seen["ready_drain"] == "one"
+    with pytest.raises(ValueError, match="'one' or 'all'"):
+        object.__new__(Inkling2Adapter)._select_dflash2_route(
+            {"draft_model": str(path), d2.READY_DRAIN_OPTION: "some"})
+    with pytest.raises(ValueError, match="requires the DFlash2 route"):
+        object.__new__(Inkling2Adapter)._select_dflash2_route(
+            {"draft_model": "embedded_dspark", d2.READY_DRAIN_OPTION: "all"})
+
+
+def test_tiny_engine_ready_drain_all_keeps_full_cohorts_greedy_exact():
+    from mlx2.runtime.external_speculative import ExternalDraftBatchGenerator
+
+    target, draft, _ = _tiny_inkling_pair()
+    mx.random.seed(7)
+    prompts = [[int(t) for t in mx.random.randint(1, 400, (n,)).tolist()] for n in (24, 9, 17, 30)]
+    count = 14
+    expect = [_greedy_ordinary(target, p, count) for p in prompts]
+    batch = ExternalDraftBatchGenerator(target, draft_model=draft, binding="inkling2-dflash2-test",
+                                        num_draft=7, prefill_step_size=16,
+                                        completion_batch_size=4, ready_drain="all")
+    try:
+        uids = list(batch.insert(prompts, max_tokens=[count] * len(prompts)))
+        got = {}
+        for _ in range(800):
+            _, responses = batch.next()
+            for r in responses:
+                got.setdefault(r.uid, []).append(r.token)
+            if not batch.lanes:
+                break
+        assert [got[u] for u in uids] == expect
+        assert batch.scheduler_stats.get("external_decode_draining_lanes_skipped", 0) == 0
+    finally:
+        batch.close()

@@ -96,7 +96,9 @@ def memory():
 
 IO_SWITCHES = {"io:sink_slot_spare": ("language", "SINK_SLOT_SPARE"),
                "io:ring_direct": ("splitk", "RING_DIRECT"),
-               "io:vector_loads": ("splitk", "VECTOR_LOADS")}
+               "io:vector_loads": ("splitk", "VECTOR_LOADS"),
+               # Near-exact, not bit-identical (oMLX #5620 split count A/B).
+               "io:split_fixed256": ("splitk", "SPLIT_FIXED256")}
 
 
 class Toggle:
