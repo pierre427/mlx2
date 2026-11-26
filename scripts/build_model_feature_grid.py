@@ -117,6 +117,8 @@ FEATURES = (
     "inkling2_command_buffers_ops100_v1", "inkling2_composed_ordinary", "inkling2_composed_dspark",
     # Inkling 2 community DFlash2 drafter (opt-in, 2026-11-25).
     "inkling2_external_dflash2", "inkling2_dflash2_embed_norm",
+    # Inkling 2 DFlash2 over several lanes (batched ring verify, 2026-11-26).
+    "inkling2_external_dflash2_multilane",
     # mlx #4957 (open) built onto 0.32.4: command buffers billed by new output/temp bytes (2026-11-24).
     "mlx_pr4957_cmdbuf_output_bytes",
     "inkling2_moe_fused", "inkling2_moe_weighted_sum", "inkling2_moe_nax_gather",
