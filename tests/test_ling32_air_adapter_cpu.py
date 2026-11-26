@@ -173,3 +173,50 @@ def test_adapter_binds_the_row_cap_on_the_model():
     adapter._bind_prefill_row_cap()
     assert adapter.model.recommended_prefill_rows(2048, context_tokens=33430) == 512
     assert adapter.cache_budget(mtp=True).prefill_score_budget_bytes == 4 << 30
+
+
+def test_row_cap_is_part_of_the_idle_plan():
+    """The cap reads only the prompt length, so the idle plan applies it too:
+    a long prompt's executed slices equal the planned ones and its state stays
+    publishable (release smoke dc22dbd7f: 35.5K and 70.9K repeats missed with
+    apcv2_store_skipped_slice_schedule)."""
+    from types import SimpleNamespace
+
+    from mlx2.runtime.generate import BatchGenerator
+    from mlx2.runtime.prefill_slice_schedule import PrefillSliceSchedule
+
+    adapter = ling32_air.Ling32AirAdapter.__new__(ling32_air.Ling32AirAdapter)
+    adapter.config, adapter.model = _air_config(), SimpleNamespace()
+    adapter._bind_prefill_row_cap()
+
+    class _Generator:
+        PREFILL_DEPTH_FLOOR = 128
+
+        def __init__(self, model):
+            for name in ("_model_rows_at", "_depth_bounded_step", "_planned_prefill_rows",
+                         "_prompt_prefill_step", "_planned_prompt_prefill_step"):
+                setattr(self, name, getattr(BatchGenerator, name).__get__(self))
+            self.model, self.prefill_step_size = model, 8192
+            self.prefill_step_autoscale = True
+            self.prefill_depth_budget = None
+            self.scheduler_stats = {}
+            self._generation_batch = []
+
+    def walk(gen, total):
+        schedule, covered = PrefillSliceSchedule(0), 0
+        while covered < total:
+            executed = min(total - covered, gen._depth_bounded_step(gen._prompt_prefill_step(total), covered))
+            planned = gen._planned_prefill_rows(gen._planned_prompt_prefill_step(total), covered, total - covered)
+            schedule.record(covered, executed, planned)
+            covered += executed
+        return schedule.receipt()
+
+    gen = _Generator(adapter.model)
+    for total, rows in ((4468, 512), (17700, 512), (35516, 512), (70905, 256)):
+        assert gen._planned_prompt_prefill_step(total) == rows
+        assert walk(gen, total)["planned"], total
+    # Without the declaration the cap stays a live (off-plan) cap: the long
+    # prompts read as load-shortened, as they did on the release.
+    del adapter.model.prefill_row_cap_planned
+    assert walk(gen, 17700)["planned"]
+    assert not walk(gen, 35516)["planned"] and not walk(gen, 70905)["planned"]

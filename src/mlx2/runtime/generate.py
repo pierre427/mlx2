@@ -123,6 +123,26 @@ def _declared_model_callback(model, name):
     return callback
 
 
+def _planned_row_cap(model, step: int, total_tokens: int) -> int:
+    """Apply a row cap the model declares a pure function of prompt length.
+
+    ``recommended_prefill_rows`` is normally a live memory cap and stays
+    off the plan.  A model whose cap reads nothing but ``context_tokens``
+    (Ling's MLA score budget) declares ``prefill_row_cap_planned = True``:
+    an idle server applies the same cap to the same prompt, so it belongs
+    to the planned grid, and long prompts stay publishable instead of
+    reading as load-shortened.
+    """
+    try:
+        planned = inspect.getattr_static(model, "prefill_row_cap_planned")
+    except AttributeError:
+        return step
+    if planned is not True or _declared_model_callback(model, "recommended_prefill_rows") is None:
+        return step
+    from .demand_stream_memory import recommended_prefill_rows
+    return recommended_prefill_rows(model, step, context_tokens=int(total_tokens))
+
+
 def prefill_model_forward(model):
     """The forward a prompt prefill chunk runs through.
 
@@ -8215,10 +8235,10 @@ class BatchGenerator:
         model = getattr(self, "model", None)
         planner = _declared_model_callback(model, "_mlx2_prefill_plan")
         if planner is None:
-            return (
+            return _planned_row_cap(model, (
                 prompt_length_prefill_step(int(total_tokens), maximum=self.prefill_step_size)
                 if self.prefill_step_autoscale else self.prefill_step_size
-            )
+            ), total_tokens)
         step = planner(
             total_tokens=int(total_tokens),
             active_decode_lanes=0,
@@ -8226,7 +8246,7 @@ class BatchGenerator:
         )
         if type(step) is not int or not 1 <= step <= self.prefill_step_size:
             raise ValueError("adapter prefill plan must fit the configured positive maximum")
-        return step
+        return _planned_row_cap(model, step, total_tokens)
 
     def _planned_prefill_rows(self, step: int, covered: int, available: int,
                               next_checkpoint=None) -> int:

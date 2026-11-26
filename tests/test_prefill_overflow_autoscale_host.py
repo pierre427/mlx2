@@ -83,6 +83,7 @@ def _batch_generator_harness():
         "depth_bounded_prefill_rows": depth_bounded_prefill_rows,
         "prompt_length_prefill_step": prompt_length_prefill_step,
         "_declared_model_callback": lambda model, name: None,
+        "_planned_row_cap": lambda model, step, total_tokens: step,
         "_record_slice": record_slice,
         "planned_prompt_rows": planned_prompt_rows,
         "planned_growth_enabled": planned_growth_enabled,

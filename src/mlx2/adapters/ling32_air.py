@@ -421,9 +421,15 @@ class Ling32AirAdapter(ling3_flash.Ling3FlashAdapter):
         # recommended_prefill_rows (generate.BatchGenerator._prompt_prefill_step),
         # the same bound admission prices: rows x context stays in the score
         # budget, so long prompts run narrower chunks instead of a 429.
+        # The cap reads only the prompt length, so it is part of the idle
+        # plan (generate._planned_row_cap): without the declaration every
+        # prompt whose cap is below the autoscale step (above 32K here) was
+        # recorded as load-shortened and APCv2 refused its state
+        # (apcv2_store_skipped_slice_schedule; release smoke dc22dbd7f).
         budget = self.cache_budget(mtp=False)
         if budget is not None:
             self.model.recommended_prefill_rows = budget.recommended_prefill_rows
+            self.model.prefill_row_cap_planned = True
 
     def _inspect_external_drafter(self, model_path):
         from .qwen38_27b import _names_target
