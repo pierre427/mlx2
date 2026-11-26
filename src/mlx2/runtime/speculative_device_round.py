@@ -55,6 +55,12 @@ calls into this module.  Switches (``device_round`` policy object):
     (or for any other processor kind) such lanes keep the host path
     (counted ``logits_processors`` decline).
 
+``submit_drafts`` (needs ``lazy_draft``; slice 1a-4 prototype)
+    ``mx.async_eval`` each lane's lazy drafts as soon as they are built, so
+    the device drafts while the host builds the verify graph.  The same
+    graph and no host read; a gain exists only where the device overlaps
+    host work (the GPU), not on the CPU device.
+
 ``prompt_copy_round`` (separate policy object, ``prompt_copy_round.py``)
     replaces a round's drafter proposals with a long copy from the prompt.
 
@@ -71,7 +77,7 @@ import numpy as np
 
 VERSION = "speculative-device-round-v1"
 POLICY_KEY = "device_round"
-_SWITCHES = ("lazy_draft", "decide", "sampled_drafts", "nucleus", "processors")
+_SWITCHES = ("lazy_draft", "decide", "sampled_drafts", "nucleus", "processors", "submit_drafts")
 _SEED_SCALE = float(1 << 53)
 
 # Present in ``scheduler_stats`` only when the option is configured.
@@ -97,6 +103,7 @@ class DeviceRoundPolicy:
     sampled_drafts: bool = False
     nucleus: bool = False
     processors: bool = False
+    submit_drafts: bool = False
 
     @classmethod
     def from_value(cls, value):
@@ -116,6 +123,8 @@ class DeviceRoundPolicy:
             raise ValueError(f"{POLICY_KEY}.sampled_drafts requires lazy_draft and decide")
         if policy.nucleus and not policy.decide:
             raise ValueError(f"{POLICY_KEY}.nucleus requires decide")
+        if policy.submit_drafts and not policy.lazy_draft:
+            raise ValueError(f"{POLICY_KEY}.submit_drafts requires lazy_draft")
         if policy.processors and not (policy.lazy_draft or policy.decide):
             raise ValueError(f"{POLICY_KEY}.processors requires lazy_draft or decide")
         if not any(getattr(policy, key) for key in _SWITCHES):
@@ -467,6 +476,10 @@ class DeviceRound:
                         error.failed_uids = (lane.uid,)
                     raise
                 drafts = drafts.reshape(-1).astype(mx.int32)
+                if self.policy is not None and self.policy.submit_drafts:
+                    # Start the drafter on the device while the host builds
+                    # the verify graph (no host read; the same graph).
+                    mx.async_eval(drafts)
                 q = None
                 if ratio:
                     q = mx.concatenate(recorded, axis=0)

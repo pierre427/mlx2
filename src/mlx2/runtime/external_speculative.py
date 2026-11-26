@@ -2582,6 +2582,12 @@ class ExternalDraftBatchGenerator:
         # (``_batched_greedy_target_laws``; Phase 0 found about 6 blocking
         # syncs per Raon DFlash2 round there).  Same normalizers, argmaxes,
         # response rows and refusals as ``_target_law``.
+        # GPU A/B 2026-11-26 @8835a3a6e (Raon-1-mini NVFP4 DFlash2, one lane,
+        # no thermal hold): GSM8K100 token-exact vs off; syncs/round 43.9 ->
+        # 26.9 but blocking 28.8 -> 24.1 and wall unchanged (quiet 1K/13K
+        # 45.2/35.6 vs 43.7/36.3 tok/s): the removed reads overlapped GPU
+        # work.  Neutral, so it stays off (qualification/runs/
+        # specround-hostsync-20261126/raon).
         self.batched_greedy_laws = (
             os.environ.get("MLX2_SPEC_BATCHED_GREEDY_LAWS", "0") == "1"
         )

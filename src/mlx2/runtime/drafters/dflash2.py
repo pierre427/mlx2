@@ -541,6 +541,10 @@ def _draft_distributions(
     # each position costs one read of the selector scores plus those rows.
     # Position j still needs the token chosen at j-1, so the reads cannot
     # leave the loop.
+    # GPU A/B 2026-11-26 @8835a3a6e (Raon-1-mini NVFP4, one lane, no thermal
+    # hold): GSM8K100 token-exact vs off; blocking syncs/round 28.8 -> 13.0;
+    # quiet 1K/13K 50.1/37.1 vs 43.7/36.3 tok/s, GSM8K decode median 88.4 vs
+    # 84.6 (qualification/runs/specround-hostsync-20261126/raon).
     batched_reads = (
         os.environ.get("MLX2_DFLASH2_BATCHED_SELECTOR_READS", "0") == "1"
         and proposal_length > 0

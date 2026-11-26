@@ -392,3 +392,14 @@ def test_prompt_copy_rounds_never_bypass_composition():
     assert on == off and on_state == off_state
     assert stats[DECLINE_REASONS].get("proposal_composition", 0) > 0
     assert stats.get("external_composed_prompt_copy_rounds", 0) == 0
+
+
+def test_submit_drafts_is_exact_and_needs_lazy_draft():
+    from mlx2.runtime.speculative_device_round import DeviceRoundPolicy
+
+    with pytest.raises(ValueError, match="submit_drafts requires lazy_draft"):
+        DeviceRoundPolicy.from_value({"decide": True, "submit_drafts": True})
+    off, off_rng, _ = _decode_processed()
+    on, on_rng, stats = _decode_processed(device_round={**PROC, "submit_drafts": True})
+    assert on == off and on_rng == off_rng
+    assert stats["external_device_round_rounds"] > 0

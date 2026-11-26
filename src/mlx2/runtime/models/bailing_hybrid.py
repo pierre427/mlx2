@@ -131,6 +131,11 @@ class ClampedSwiGLU(nn.Module):
 # that layer's own ``update_and_fetch``, after its read, so the value at the
 # forward's start is the value at the visit.  An entry is consumed on use, so
 # a cache visited twice in one forward reads the live offset the second time.
+# GPU A/B 2026-11-26 @8835a3a6e (Ling-3.2-air e4r8, MTP d2, one lane, no
+# thermal hold): GSM8K100 token-exact vs off (acc 0.96 both); syncs/round
+# 11.6 -> 5.8 (blocking 2.0 -> 3.0: the one tolist waits where the item()s
+# overlapped); quiet 1.1K/17.7K 48.5/26.3 vs 43.5/24.7 tok/s, GSM8K decode
+# median 58.3 vs 55.1 (qualification/runs/specround-hostsync-20261126/ling).
 _PREFETCH_OFFSETS_ENV = "MLX2_LING_PREFETCH_CACHE_OFFSETS"
 _offset_table = threading.local()
 # Engagement counters (process-wide): forwards that prefetched, offsets read.
