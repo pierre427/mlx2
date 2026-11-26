@@ -49,6 +49,10 @@ Options (``Model.configure_kernels`` keyword, adapter ``inkling2_fuse_*``):
   tests, and checkpoint decode and last-prefill logits at 1K/16K).
 - ``fuse_residual_kernel`` (near-exact, GPU): one Metal kernel per one-row
   attention-residual mix (norms, scores, softmax, weighted sum).
+- ``fuse_loop_bf16`` (near-exact, GPU; needs ``fuse_controllers``): the
+  q/k/v and MLP loop-message controllers of every call (decode, verify,
+  batches, prefill) as two row-independent kernels that read the BF16
+  weights directly, so a row's values never depend on the call's width.
 """
 
 from __future__ import annotations
@@ -65,7 +69,10 @@ NEAR_EXACT = ("fuse_sconv_kernel", "fuse_residual_kernel")
 # loop-message mix). All default off pending the GPU A/B.
 EXACT_2 = ("fuse_gather_lhs", "fuse_norm_fp32", "fuse_shared_tau")
 NEAR_EXACT_2 = ("fuse_dconv_kernel", "fuse_message_kernel")
-OPTIONS = EXACT + NEAR_EXACT + EXACT_2 + NEAR_EXACT_2
+# Added 2026-11-26 from omlx#5586 (reimplemented): BF16-weight loop
+# controllers, row-independent, near-exact (``fuse_kernels.loop_controllers``).
+NEAR_EXACT_3 = ("fuse_loop_bf16",)
+OPTIONS = EXACT + NEAR_EXACT + EXACT_2 + NEAR_EXACT_2 + NEAR_EXACT_3
 NONE = frozenset()
 
 
@@ -426,6 +433,11 @@ def qkv_controllers(layer, mixed, messages, message_norms):
 
     mixed: [1, 1, nq, D] FP32 (nq = 1 or 3); messages: [1, 1, 4, D].
     Returns the blended inputs [1, 1, 3, D] FP32."""
+    if on(layer, "fuse_loop_bf16"):
+        out = loop_qkv(layer, mixed, messages, message_norms)
+        if out is not None:
+            count(layer, "controllers_batched")
+            return out
     down, forget, gain = controller_stack(layer)
     ctrl = layer.controllers["attn"]
     width = mixed.shape[-1]
@@ -449,12 +461,71 @@ def qkv_controllers(layer, mixed, messages, message_norms):
     return blend(f, g, mixed, messages[..., :3, :])
 
 
+def loop_bf16_stack(layer):
+    """``(forget [3, D, r], gain [3, D, r])`` BF16 stacks of the attn/k/v
+    controllers for ``fuse_loop_bf16`` (2 x 3 x D x r BF16 per layer;
+    ``down`` reuses ``controller_stack``).  Keyed on the parameter objects."""
+    ctrls = [layer.controllers[n] for n in ("attn", "k", "v")]
+    key = tuple(c[w] for c in ctrls for w in ("forget_weight", "gain_weight"))
+    held = layer.__dict__.get("_fuse_loop_bf16")
+    if held is not None and all(a is b for a, b in zip(held[0], key)):
+        return held[1]
+    stacks = tuple(mx.stack([c[w] for c in ctrls]) for w in ("forget_weight", "gain_weight"))
+    mx.eval(*stacks)
+    object.__setattr__(layer, "_fuse_loop_bf16", (key, stacks))
+    return stacks
+
+
+def loop_qkv(layer, mixed, messages, message_norms=None):
+    """``fuse_loop_bf16`` attn/k/v controllers over any rows: mixed
+    [..., nq, D] (nq 1 or 3), messages [..., 4, D] -> [..., 3, D] FP32, or
+    ``None`` (counted decline) for the reference ops."""
+    from . import fuse_kernels
+
+    if any(layer.controllers[n].forget_weight.dtype != mx.bfloat16 for n in ("attn", "k", "v")):
+        return fuse_kernels._decline(layer, "loop_bf16_weights")
+    eps = layer.controllers["attn"].eps
+    lead, width = mixed.shape[:-2], mixed.shape[-1]
+    rows = math.prod(lead)
+    x = mixed.reshape(rows, mixed.shape[-2], width)
+    msg = messages[..., :3, :].reshape(rows, 3, width)
+    msg_norm = (mx.fast.rms_norm(msg, None, eps) if message_norms is None
+                else message_norms[..., :3, :].reshape(rows, 3, width))
+    down = controller_stack(layer)[0]
+    forget, gain = loop_bf16_stack(layer)
+    out = fuse_kernels.loop_controllers(layer, x, msg, mx.fast.rms_norm(x, None, eps),
+                                        msg_norm, down, forget, gain)
+    return None if out is None else out.reshape(*lead, 3, width)
+
+
+def loop_one(owner, ctrl, x, message, x_norm=None, message_norm=None):
+    """``fuse_loop_bf16`` for one controller (the MLP one): x, message
+    [..., D] -> [..., D] FP32, or ``None``."""
+    from . import fuse_kernels
+
+    lead, width = x.shape[:-1], x.shape[-1]
+    rows = math.prod(lead)
+    xr = x.reshape(rows, 1, width)
+    mr = message.reshape(rows, 1, width)
+    xn = (mx.fast.rms_norm(xr, None, ctrl.eps) if x_norm is None
+          else x_norm.reshape(rows, 1, width))
+    mn = (mx.fast.rms_norm(mr, None, ctrl.eps) if message_norm is None
+          else message_norm.reshape(rows, 1, width))
+    out = fuse_kernels.loop_controllers(owner, xr, mr, xn, mn, ctrl.down_weight[None],
+                                        ctrl.forget_weight[None], ctrl.gain_weight[None])
+    return None if out is None else out.reshape(*lead, width)
+
+
 def one_controller(ctrl, x, message, x_norm=None, message_norm=None, owner=None):
     """Reference ``MessageController`` with optional precomputed norms and
     the blend compiled; ``owner`` (the decoder layer) carries the fuse set
     for ``fuse_message_kernel`` on one-row calls."""
     from .language import _fp32
 
+    if owner is not None and on(owner, "fuse_loop_bf16"):
+        out = loop_one(owner, ctrl, x, message, x_norm, message_norm)
+        if out is not None:
+            return out
     nx = mx.fast.rms_norm(x, None, ctrl.eps) if x_norm is None else x_norm
     nm = mx.fast.rms_norm(message, None, ctrl.eps) if message_norm is None else message_norm
     pair = mx.concatenate([nx, nm], axis=-1)

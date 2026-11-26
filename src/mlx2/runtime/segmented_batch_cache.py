@@ -55,6 +55,19 @@ def _slice_row_tree(values, row: int):
     ]
 
 
+def _view_row_tree(values, row: int):
+    """Row views of a batched pre-forward snapshot, no copy.
+
+    For rollback records only: a snapshot is only read back (an abort
+    restores it), never written in place. While every lane's record lives,
+    the views pin exactly the one batched snapshot their contiguous copies
+    would add up to; a record that outlives the others (one lane retires
+    first, or an exported ``latest_exact_rollback_boundary``) keeps the whole
+    batched snapshot alive until it goes. Saves one copy op per state per
+    lane per recorded visit."""
+    return [None if value is None else value[row : row + 1] for value in values]
+
+
 class SegmentedBatchQSAKVCache(BatchQSAKVCache):
     """QSA batch ABI backed by independent, unquantized B1 QSA caches."""
 
@@ -941,7 +954,7 @@ class SegmentedBatchArraysCache(Qwen4ArraysCache):
                 stage(
                     num_tokens,
                     self._row_closure(fn, index),
-                    _slice_row_tree(snapshot, index),
+                    _view_row_tree(snapshot, index),
                 )
 
     def record_rollback(self, num_tokens, fn, snapshot, *, per_row_fn=None, **_kwargs):
@@ -951,7 +964,7 @@ class SegmentedBatchArraysCache(Qwen4ArraysCache):
             row.record_rollback(
                 num_tokens,
                 self._row_closure(fn, index),
-                _slice_row_tree(snapshot, index),
+                _view_row_tree(snapshot, index),
             )
 
     def supports_ragged_trim(self):

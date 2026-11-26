@@ -333,3 +333,23 @@ def test_shared_tau_engages_with_attention_fusion_off():
     model.configure_kernels(fuse_shared_tau=True)
     assert mx.array_equal(model(tokens), baseline)
     assert model.kernel_receipt()["fuse_counts"]["tau_shared_hits"] > 0
+
+
+def test_loop_bf16_declines_on_cpu_and_refuses_bad_combinations():
+    """``fuse_loop_bf16`` is GPU only: on the CPU every controller call
+    declines (counted) and the reference path runs, bit-identically."""
+    model = _model()
+    tokens = mx.random.randint(0, 500, (1, 40))
+    model.configure_kernels(**ALL)
+    base = _run(model, tokens, PLAN)
+    model.configure_kernels(**ALL, fuse_loop_bf16=True)
+    got = _run(model, tokens, PLAN)
+    counts = model.kernel_receipt()["fuse_counts"]
+    model.configure_kernels()
+    assert mx.array_equal(got, base)
+    declined = sum(v for k, v in counts.items() if k.startswith("kernel_declined:loop_bf16"))
+    assert declined > 0 and "loop_bf16_kernel" not in counts
+    with pytest.raises(ValueError, match="fuse_loop_bf16 requires"):
+        model.configure_kernels(fuse_loop_bf16=True)
+    with pytest.raises(ValueError, match="alternatives"):
+        model.configure_kernels(**ALL, fuse_loop_bf16=True, fuse_message_kernel=True)

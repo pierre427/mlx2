@@ -1332,15 +1332,29 @@ class Attention(nn.Module):
         Padded rows get zeros."""
         lengths = list(kv._step_lengths)
         width = max(lengths)
-        hist = [self._lane_history(row) for row in kv.rows]
+        hist = [None] * len(kv.rows)
 
         def append(index, row, valid):
             ki, vi = k[index : index + 1, :, :valid], v[index : index + 1, :, :valid]
-            if self._deferred_update(row, ki, vi) is None:
+            lane = index
+            dview = self._deferred_update(row, ki, vi)
+            if dview is None:
+                hist[lane] = self._lane_history(row)
                 row.update_and_fetch(ki, vi)
+            elif dview[0].shape[2] > valid:
+                # A deferred ring wrote nothing: its chronological view is the
+                # pre-append window followed by these rows (the bytes
+                # ``_lane_history`` would concatenate again), so slice it.
+                # Equal because no lane holds pending rows on entry (the
+                # caller's ``deferred_rows`` gate), so ``row.keys`` held all
+                # of the history ``_lane_history`` reads.
+                hist[lane] = (dview[0][..., :-valid, :], dview[1][..., :-valid, :])
             return mx.zeros((1, valid, 1), dtype=x.dtype)
 
         kv.row_attention(append, axis=1)
+        for lane, row in enumerate(kv.rows):
+            if hist[lane] is None and lengths[lane] == 0:
+                hist[lane] = self._lane_history(row)
         sizes = [0 if h is None else int(h[0].shape[2]) for h in hist]
         longest = max(sizes)
         view = BatchKVCache([longest - n for n in sizes])
@@ -1832,7 +1846,12 @@ class DecoderLayer(nn.Module):
                                   cache=cache, conv_mask=mask)
         else:
             parts = [mixed[..., min(i, mixed.shape[-2] - 1), :] for i in range(3)]
-            if messages is not None and fused_ctrl:
+            looped = (_fuse.loop_qkv(self, mixed, messages)
+                      if messages is not None and _fuse.on(self, "fuse_loop_bf16") else None)
+            if looped is not None:
+                parts = [looped[..., i, :] for i in range(3)]
+                _fuse.count(self, "controllers_unbatched")
+            elif messages is not None and fused_ctrl:
                 # Local layers feed one x to all three controllers: norm it once.
                 shared = (mx.fast.rms_norm(parts[0], None, self.controllers["attn"].eps)
                           if self.is_sliding else None)
@@ -2164,7 +2183,7 @@ class Model(nn.Module):
                           fuse_residual_kernel=False, verify_splitk=False, moe_act_quant=False,
                           fuse_gather_lhs=False, fuse_norm_fp32=False, fuse_shared_tau=False,
                           fuse_dconv_kernel=False, fuse_message_kernel=False,
-                          compile_decode_blocks=False, head_softcap_compiled=False,
+                          fuse_loop_bf16=False, compile_decode_blocks=False, head_softcap_compiled=False,
                           kv_q8=False, moe_decode_kernel=False,
                           prefill_mask_bf16_budget=False, prefill_mask_with_sink=False,
                           head_kernel_wide=False, prefill_tiled_attention=False,
@@ -2223,6 +2242,10 @@ class Model(nn.Module):
                              "flash_prefill are alternatives")
         if fuse_message_kernel and not fuse_controllers:
             raise ValueError("Inkling 2 fuse_message_kernel requires fuse_controllers")
+        if fuse_loop_bf16 and not fuse_controllers:
+            raise ValueError("Inkling 2 fuse_loop_bf16 requires fuse_controllers")
+        if fuse_loop_bf16 and fuse_message_kernel:
+            raise ValueError("Inkling 2 fuse_loop_bf16 and fuse_message_kernel are alternatives")
         if attn_decode_kernel and not verify_splitk:
             raise ValueError("Inkling 2 attn_decode_kernel requires verify_splitk")
         if gate_merge and not verify_splitk:
@@ -2251,7 +2274,7 @@ class Model(nn.Module):
                  "fuse_residual_kernel": fuse_residual_kernel,
                  "fuse_gather_lhs": fuse_gather_lhs, "fuse_norm_fp32": fuse_norm_fp32,
                  "fuse_shared_tau": fuse_shared_tau, "fuse_dconv_kernel": fuse_dconv_kernel,
-                 "fuse_message_kernel": fuse_message_kernel}
+                 "fuse_message_kernel": fuse_message_kernel, "fuse_loop_bf16": fuse_loop_bf16}
         enabled = frozenset(name for name, value in flags.items() if value)
         holder = self.model.__dict__.get("_fuse_holder") or {"memo": None}
         object.__setattr__(self.model, "_fuse_holder", holder if enabled else None)

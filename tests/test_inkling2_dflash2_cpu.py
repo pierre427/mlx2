@@ -1262,3 +1262,20 @@ def test_tiny_engine_reversible_handoff_lanes_greedy_exact():
         assert stats.get("external_cost_park_events", 0) > 0  # the random drafter loses: parks
     finally:
         batch.close()
+
+
+def test_dflash2_route_defaults_deferred_ring_commits():
+    """Deferred ring commits default on for the DFlash2 route only (Pierre
+    2026-11-26); an explicit false keeps the rollback route."""
+    from mlx2.adapters.inkling2 import DEFERRED_COMMIT_OPTION, Inkling2Adapter, validate_policy
+
+    for policy, route, want in (
+        ({"draft_model": "x"}, True, True),
+        ({"draft_model": "x", DEFERRED_COMMIT_OPTION: False}, True, False),
+        ({"draft_model": "embedded_dspark"}, False, False),
+        (None, False, False),
+        ({DEFERRED_COMMIT_OPTION: True}, False, True),
+    ):
+        kernels, _ = validate_policy(policy)
+        Inkling2Adapter._dflash2_kernel_defaults(kernels, policy, route)
+        assert kernels["verify_deferred_commit"] is want, (policy, route)

@@ -219,6 +219,7 @@ def inspect_artifact(model_path) -> dict:
 
 
 # Opt-in execution switches; every one defaults off and is unqualified.
+DEFERRED_COMMIT_OPTION = "inkling2_verify_deferred_commit"
 KERNEL_OPTIONS = {
     # Row-stacked q/r/gate/sink(/k/v) input projection, one GEMV when a
     # visit's q/k/v inputs coincide (implemented 2026-11-20; A/B pending).
@@ -355,6 +356,14 @@ KERNEL_OPTIONS = {
     # the loop-message forget/gain GEMVs + tanh + blend in one launch for
     # one-row calls (needs inkling2_fuse_controllers),
     "inkling2_fuse_message_kernel": "fuse_message_kernel",
+    # BF16-weight loop controllers, row-independent at any width (needs
+    # inkling2_fuse_controllers; omlx#5586 reimplemented; near-exact, GPU).
+    # Not helpful here, left off (unit @0153d628d, MLX 0.32.5, M5 Max): B1
+    # decode 3-6% slower in 5 of 6 blocks at 1K/16K and the one-lane DFlash2
+    # verify flat (GSM8K 20 q 57.4 vs 58.5 tok/s, 19/20 both). Our down
+    # projection was already BF16 and the FP32 forget/gain GEMVs it replaces
+    # are cheap; the saving is ~57 MB a token, under what the two launches cost.
+    "inkling2_fuse_loop_bf16": "fuse_loop_bf16",
     # the one-token fused MoE forward compiled per shape (needs moe_fused),
     # GPU only. The first GPU try failed "[compile] ... uncaptured inputs":
     # the state was passed as fresh parameters() dictionaries while the
@@ -572,7 +581,13 @@ KERNEL_OPTIONS = {
     # slicing instead of the masked gather. Bitwise against the rollback path
     # (tokens and committed state; tests/test_inkling2_deferred_commit_cpu.py).
     # Counters: kernel_counters["verify_deferred_commit"].
-    "inkling2_verify_deferred_commit": "verify_deferred_commit",
+    # GPU (unit @d21594ddb, MLX 0.32.5, DFlash2 on 16-lane servers): engaged on
+    # every ring visit, answers identical to the rollback route, aggregate
+    # tok/s 1 client 50.0 -> 53.0, 16 clients 96.3 -> 113.2. DEFAULT on the
+    # DFlash2 route (Pierre, 2026-11-26; resolved in _initialize), off
+    # elsewhere. With inkling2_batched_lane_attention on top it is slower
+    # (46.5 / 106.1).
+    DEFERRED_COMMIT_OPTION: "verify_deferred_commit",
     # Multi-lane verify attention in one launch per visit (2026-11-26, Pierre:
     # "batched attention, then width gating"; default off, unqualified). With
     # several lanes in one verify (HybridVerifyRows batched_rings), each lane's
@@ -890,6 +905,11 @@ def validate_policy(value):
         raise ValueError("Inkling 2 inkling2_fuse_dconv_kernel requires inkling2_fuse_sconv")
     if kernels["fuse_message_kernel"] and not kernels["fuse_controllers"]:
         raise ValueError("Inkling 2 inkling2_fuse_message_kernel requires inkling2_fuse_controllers")
+    if kernels["fuse_loop_bf16"] and not kernels["fuse_controllers"]:
+        raise ValueError("Inkling 2 inkling2_fuse_loop_bf16 requires inkling2_fuse_controllers")
+    if kernels["fuse_loop_bf16"] and kernels["fuse_message_kernel"]:
+        raise ValueError("Inkling 2 inkling2_fuse_loop_bf16 and inkling2_fuse_message_kernel "
+                         "are alternatives")
     if kernels["prefill_onelaunch_attention"] and (kernels["prefill_tiled_attention"]
                                                    or kernels["flash_prefill"]):
         raise ValueError("Inkling 2 inkling2_prefill_onelaunch_attention, "
@@ -1133,6 +1153,7 @@ class Inkling2Adapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
         # Opt-in community DFlash2 route (adapters/inkling2_dflash2.py):
         # selected only by a draft_model path holding a DFlash2 artifact.
         dflash2_route = self._select_dflash2_route(external)
+        self._dflash2_kernel_defaults(self.kernel_policy, execution_policy, dflash2_route)
         self.dspark_options = dspark_options(external)
         if dflash2_route and self.dspark_options:
             self._dflash2_refusal("dspark_option")
@@ -1314,6 +1335,18 @@ class Inkling2Adapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
         """An explicit composition with ``prompt_lookup_max_span`` (opt-in)."""
         value = (getattr(self, "external_policy", None) or {}).get("proposal_composition")
         return isinstance(value, dict) and int(value.get("prompt_lookup_max_span", 0) or 0) > 0
+
+    @staticmethod
+    def _dflash2_kernel_defaults(kernel_policy, execution_policy, dflash2_route):
+        """Kernel defaults the DFlash2 route sets where the policy is silent.
+
+        ``verify_deferred_commit`` (Pierre, 2026-11-26), one lane and
+        several: unit @d21594ddb, answers identical to the rollback route,
+        1 client 50.0 -> 53.0 tok/s, 16 clients 96.3 -> 113.2. An explicit
+        false keeps the rollback route; DSpark and ordinary are unchanged."""
+        explicit = isinstance(execution_policy, dict) and DEFERRED_COMMIT_OPTION in execution_policy
+        if dflash2_route and not explicit:
+            kernel_policy["verify_deferred_commit"] = True
 
     def _select_dflash2_route(self, external):
         """Whether ``external`` selects the community DFlash2 drafter (opt-in).
@@ -1529,7 +1562,8 @@ class Inkling2Adapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
                                        "fuse_attention", "fuse_norm_fp32", "fuse_shared_tau")):
             names += ("inkling2/fuse.py",)
         if any(policy.get(k) for k in ("fuse_sconv_kernel", "fuse_residual_kernel",
-                                       "fuse_dconv_kernel", "fuse_message_kernel")):
+                                       "fuse_dconv_kernel", "fuse_message_kernel",
+                                       "fuse_loop_bf16")):
             names += ("inkling2/fuse_kernels.py",)
         if policy.get("fuse_gather_lhs"):
             names += ("gather_lhs.py",)

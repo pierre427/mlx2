@@ -148,6 +148,7 @@ FEATURES = (
     "inkling2_verify_deferred_commit", "inkling2_visit_length_check",
     "inkling2_moe_panel_kernel", "inkling2_moe_nax_mxfp8", "inkling2_moe_logdomain_renorm",
     "inkling2_moe_rows_kernel",
+    "inkling2_fuse_loop_bf16",
     # Inkling 2 multi-lane DFlash2 and the oMLX v0.8.4 follow-ups (2026-11-26).
     "inkling2_dflash2_ready_drain", "inkling2_dflash2_multilane_draft_cap", "inkling2_split_fixed256",
     "inkling2_batched_lane_attention", "inkling2_dflash2_cost_handoff",

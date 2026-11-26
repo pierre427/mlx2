@@ -396,3 +396,117 @@ def message_mix(module, hidden, forget, gain, x, message):
     )
     _fuse.count(module, "message_mix_kernel")
     return out
+
+
+# ----- BF16 loop-message controllers, row-independent (fuse_loop_bf16) -----
+#
+# ``inkling2_fuse_loop_bf16`` (original mlx2 code, 2026-11-26; the idea is
+# from omlx#5586 "fused BF16 loop-controller matmuls", reimplemented): the
+# controllers' published BF16 ``down``/``forget``/``gain`` weights are read
+# directly and widened in registers, instead of reading the FP32 copies
+# ``_fp32`` caches (half the controller weight bytes per visit).  Widening
+# BF16 to FP32 is exact, so the products are the reference's products; the
+# reductions run in this kernel's own order (near-exact against the MLX
+# GEMMs).  Every output row is computed on its own (one simdgroup per
+# ``down`` output, one thread per gate channel), so a row's values do not
+# depend on how many rows share the call: verify rows equal one-row decode.
+#
+# down: hidden[row, r] = bf16(sum_k bf16(pair[row, k]) * down[c, r, k]) with
+# pair = [rms(x), rms(m)] -- the reference casts the pair to BF16, runs a
+# BF16 GEMM (FP32 accumulation, one BF16 round) and widens the result.
+_LOOP_DOWN_SOURCE = r"""
+    const uint lane = thread_index_in_simdgroup;
+    const uint r = thread_position_in_grid.y;
+    const uint row = thread_position_in_grid.z;
+    if (r >= R) return;
+    const uint n = row / C;
+    const uint c = row % C;
+    const device float* xr = nx + ((size_t)n * CX + (CX == 1 ? 0 : c)) * W;
+    const device float* mr = nm + (size_t)row * W;
+    const device bfloat16_t* dr = down + ((size_t)c * R + r) * (2 * W);
+    float s = 0.0f;
+    for (uint k = lane; k < W; k += 32) {
+        s += float(bfloat16_t(xr[k])) * float(dr[k]);
+    }
+    for (uint k = lane; k < W; k += 32) {
+        s += float(bfloat16_t(mr[k])) * float(dr[W + k]);
+    }
+    s = simd_sum(s);
+    if (lane == 0) hidden[(size_t)row * R + r] = float(bfloat16_t(s));
+"""
+# gates + blend: ``_MIX_SOURCE``'s arithmetic with BF16 weight loads, per
+# (channel, controller, row); bitwise with ``message_mix`` on the FP32 copies.
+_LOOP_GATES_SOURCE = r"""
+    const uint w = thread_position_in_grid.x;
+    const uint c = thread_position_in_grid.y;
+    const uint n = thread_position_in_grid.z;
+    if (w >= W) return;
+    const uint row = n * C + c;
+    const device float* hrow = hidden + (size_t)row * R;
+    const device bfloat16_t* frow = forget + ((size_t)c * W + w) * R;
+    const device bfloat16_t* grow = gain + ((size_t)c * W + w) * R;
+    float fs = 0.0f;
+    float gs = 0.0f;
+    for (int r = 0; r < R; ++r) {
+        fs += hrow[r] * float(frow[r]);
+        gs += hrow[r] * float(grow[r]);
+    }
+    const float f = metal::precise::tanh(fs);
+    const float g = metal::precise::tanh(gs);
+    const float xv = x[((size_t)n * CX + (CX == 1 ? 0 : c)) * W + w];
+    const float mv = message[(size_t)row * W + w];
+    out[(size_t)row * W + w] = (1.0f - f) * xv + g * mv;
+"""
+# No row cap: the kernels compute every row on its own, so a call of any
+# size gives each row the arithmetic of a one-row call (a cap on the call
+# size would make a lane's numerics depend on how many lanes share the
+# forward, and cold prefill differ from a short warm suffix).
+_loop_kernels = {}
+
+
+def _loop_kernel(name, source, inputs, outputs):
+    key = (name, SAFE_MATH)
+    kernel = _loop_kernels.get(key)
+    if kernel is None:
+        kernel = _loop_kernels[key] = mx.fast.metal_kernel(
+            name=f"inkling2_{name}{'_safe' if SAFE_MATH else ''}",
+            input_names=inputs, output_names=outputs, source=source, header=_header())
+    return kernel
+
+
+def loop_controllers(module, x, message, x_norm, message_norm, down, forget, gain):
+    """``C`` loop-message controllers over any ``N`` rows, or ``None`` (counted
+    decline) to run the reference ops.
+
+    x / x_norm: [N, CX, W] FP32 (CX 1 = one input shared by all C);
+    message / message_norm: [N, C, W]; down [C, R, 2W], forget / gain
+    [C, W, R], all BF16.  Returns the blended inputs [N, C, W] FP32."""
+    if mx.default_device() != mx.gpu:
+        return _decline(module, "loop_bf16_not_gpu")
+    if any(w.dtype != mx.bfloat16 for w in (down, forget, gain)):
+        return _decline(module, "loop_bf16_weights")
+    n, c, width = message.shape
+    rank = down.shape[1]
+    cx = x.shape[1]
+    f32 = mx.float32
+    template = [("W", width), ("R", rank), ("C", c), ("CX", cx)]
+    (hidden,) = _loop_kernel("loop_down_bf16", _LOOP_DOWN_SOURCE, ["nx", "nm", "down"],
+                             ["hidden"])(
+        inputs=[x_norm.astype(f32), message_norm.astype(f32), down],
+        template=template,
+        grid=(32, rank, n * c),
+        threadgroup=(32, min(8, rank), 1),
+        output_shapes=[(n * c, rank)],
+        output_dtypes=[f32],
+    )
+    (out,) = _loop_kernel("loop_gates_bf16", _LOOP_GATES_SOURCE,
+                          ["hidden", "forget", "gain", "x", "message"], ["out"])(
+        inputs=[hidden, forget, gain, x.astype(f32), message.astype(f32)],
+        template=template,
+        grid=(width, c, n),
+        threadgroup=(min(256, width), 1, 1),
+        output_shapes=[(n, c, width)],
+        output_dtypes=[f32],
+    )
+    _fuse.count(module, "loop_bf16_kernel", n * c)
+    return out
