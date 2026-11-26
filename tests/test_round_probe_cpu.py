@@ -482,3 +482,240 @@ def test_contention_decision_uses_round_period_and_adequate_comparable_cells(
     contended = {**_cell("contended", contended_tps, 10, 0.1, 0.1, tokens=tokens), "rounds": rounds}
     result = harness.summarize({"rounds_target": 200, "cells": [quiet, contended]})
     assert result["rows"][0]["phase1_go"] is verdict
+
+
+# ------------------------------------------------ 2026-11-26 rerun options --
+
+def test_size_max_tokens_parse_and_lookup():
+    assert harness.parse_size_max_tokens("") == {}
+    assert harness.parse_size_max_tokens("65536=32, 16384=128") == {65536: 32, 16384: 128}
+    for bad in ("65536", "65536=0", "x=3"):
+        with pytest.raises(ValueError):
+            harness.parse_size_max_tokens(bad)
+    args = SimpleNamespace(max_tokens=256, rounds=200, size_max_tokens={65536: 32}, contended_rounds=60)
+    assert harness.max_tokens_for(args, 65536) == 32 and harness.max_tokens_for(args, 1024) == 256
+    assert harness.rounds_target(args, "contended") == 60 and harness.rounds_target(args, "quiet") == 200
+    plain = SimpleNamespace(max_tokens=256, rounds=200)  # Phase 0 defaults are unchanged
+    assert harness.max_tokens_for(plain, 65536) == 256 and harness.rounds_target(plain, "contended") == 200
+
+
+def test_mtp_transition_summarises_fallback_and_handoff():
+    fallback = {"mtp": {"route": "ordinary_after_mtp_fallback", "num_draft": 2,
+                        "observed_compute_widths": [1], "ordinary_compute_widths": [],
+                        "mtp_plain_fallback": {"transition": "fallback", "reason": "admission_plain",
+                                               "committed_tokens_before_fallback": 0}}}
+    got = harness.mtp_transition(fallback)
+    assert got["transition"] == "fallback" and got["reason"] == "admission_plain"
+    assert got["committed_tokens_before"] == 0
+    handoff = {"mtp": {"route": "ordinary_after_mtp_handoff", "mtp_ordinary_handoff": {
+        "reason": "static_width_threshold", "committed_tokens_before_handoff": 5, "projected_width": 2}}}
+    got = harness.mtp_transition(handoff)
+    assert got["transition"] == "handoff" and got["projected_width"] == 2
+    assert harness.mtp_transition({"mtp": {"route": "native_mtp"}}) == {
+        "route": "native_mtp", "num_draft": None, "observed_compute_widths": None,
+        "ordinary_compute_widths": None}
+    assert harness.mtp_transition({"mtp": None}) is None and harness.mtp_transition(None) is None
+
+
+def test_counter_delta_keeps_changed_numeric_leaves():
+    before = harness.counter_snapshot({"scheduler": {"a": 1, "b": 2, "flag": True},
+                                       "apcv2": {"hits": {"disk": 0}}, "other": {"x": 1}})
+    after = harness.counter_snapshot({"scheduler": {"a": 1, "b": 5, "c": 1, "flag": False},
+                                      "apcv2": {"hits": {"disk": 1}}, "other": {"x": 9}})
+    assert harness.counter_delta(after, before) == {
+        "apcv2.hits.disk": 1, "scheduler.b": 3, "scheduler.c": 1}
+
+
+def test_mismatched_request_lengths_leave_the_pair_incomplete():
+    quiet = {**_cell("quiet", 100, 10, 0.1, 0.1), "rounds": 200, "max_tokens": 256}
+    contended = {**_cell("contended", 50, 10, 0.1, 0.1), "rounds": 200, "max_tokens": 32}
+    result = harness.summarize({"rounds_target": 200, "cells": [quiet, contended]})
+    assert result["rows"][0]["contended_period_increase"] == pytest.approx(1.0)
+    assert not any("contended" in reason for reason in result["rows"][0]["go_reasons"])
+
+
+def test_rerun_options_end_to_end_against_a_fake_server(tmp_path):
+    """Per-size max_tokens in both conditions, a lower contended round target,
+    receipts and counter deltas per request, and a complete 64K-style pair."""
+    import json
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    state = {"rounds": 0, "order": [], "fallbacks": 0, "collections": 0}
+    lock = threading.Lock()
+
+    def block():
+        r = state["rounds"]
+        return {"enabled": True, "routes": {"generate:MTPGenerationBatch": {
+            "rounds": r, "tokens": 2 * r, "wall_ns": 10_000_000 * r,
+            "encode_submit_ns": 1_000_000 * r, "wait_ns": 8_000_000 * r,
+            "host_python_ns": 1_000_000 * r, "syncs": 3 * r}}}
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def _send(self, payload):
+            body = json.dumps(payload).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):
+            with lock:
+                state["collections"] += 1  # each read sees a newer worker snapshot
+                self._send({"model": "Fake", "round_probe": block(),
+                            "host_snapshot_timing": {"collections": state["collections"]},
+                            "scheduler": {"mtp_plain_fallback_events": state["fallbacks"]}})
+
+        def do_POST(self):
+            payload = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            if self.path.endswith("/apc/clear"):
+                return self._send({"cleared": True})
+            tokens = payload["max_tokens"]
+            with lock:
+                state["order"].append(tokens)
+                state["rounds"] += 0 if tokens == 8 else tokens // 2
+                fallback = tokens != 8 and len(state["order"]) == 3  # second 1K quiet request
+                state["fallbacks"] += fallback
+                probe_block = block()
+            mtp = ({"route": "ordinary_after_mtp_fallback", "num_draft": 2,
+                    "mtp_plain_fallback": {"transition": "fallback", "reason": "admission_plain"}}
+                   if fallback else {"route": "native_mtp"})
+            self._send({"usage": {"prompt_tokens": 100, "completion_tokens": tokens},
+                        "choices": [{"finish_reason": "length", "message": {"content": "x"}}],
+                        "mlx2": {"route": "native_mtp", "timing": {"ttft_seconds": 0.0001},
+                                 "mtp": mtp, "round_probe": probe_block}})
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    token = tmp_path / "token"
+    token.write_text("t")
+    out = tmp_path / "out"
+    try:
+        harness.main(["run", "--base-url", f"http://127.0.0.1:{server.server_port}",
+                      "--admin-token", str(token), "--checkpoint", "Fake@sha256:f", "--arm", "mtp",
+                      "--source-revision", "abc", "--sizes", "256,512", "--rounds", "64",
+                      "--contended-rounds", "16", "--size-max-tokens", "512=16",
+                      "--load-workers", "1", "--load-ramp-s", "0", "--cooldown-s", "0",
+                      "--max-tokens", "64", "--scheduler-deltas", "--output", str(out)])
+    finally:
+        server.shutdown()
+    document = json.loads((out / "phase0.json").read_text())
+    assert document["size_max_tokens"] == {"512": 16} and document["rounds_target_contended"] == 16
+    measured = [t for t in state["order"] if t != 8]
+    # quiet 256: 2x64 tok (32 rounds each); quiet 512: 8x16 (8 rounds each);
+    # contended 256: 1x64; contended 512: 2x16.
+    assert measured == [64, 64] + [16] * 8 + [64] + [16, 16]
+    by = {(c["size"], c["condition"]): c for c in document["cells"]}
+    assert by[(512, "quiet")]["max_tokens"] == 16 and by[(256, "quiet")]["max_tokens"] == 64
+    assert by[(256, "contended")]["rounds_target"] == 16 and by[(256, "quiet")]["rounds_target"] == 64
+    first = by[(256, "quiet")]
+    assert first["route_transitions"] == [{"request": 1, "route": "ordinary_after_mtp_fallback",
+                                           "num_draft": 2, "observed_compute_widths": None,
+                                           "ordinary_compute_widths": None, "transition": "fallback",
+                                           "reason": "admission_plain", "committed_tokens_before": None,
+                                           "projected_width": None, "decision": None}]
+    deltas = [{k: v for k, v in r["counter_deltas"].items()} for r in first["requests"]]
+    assert deltas == [{}, {"scheduler.mtp_plain_fallback_events": 1}]
+    assert all(r["counter_read"]["fresh"] for r in first["requests"])
+    assert "mlx2_receipt" not in first["requests"][0] and "mlx2_receipt" not in first["warmup"]
+    lines = (out / "receipts-256-quiet.jsonl").read_text().splitlines()
+    assert [json.loads(line)["request"] for line in lines] == [0, 1]
+    assert "round_probe" not in json.loads(lines[0])["receipt"]
+    rows = {r["size"]: r for r in harness.summarize(document)["rows"]}
+    assert rows[512]["quiet"]["route_transitions"] == 0
+    assert rows[256]["quiet"]["route_transitions"] == 1
+    assert rows[512]["phase1_go"] is not None  # complete pair at matched length
+    assert first["cold_requests"] == 0  # no cached_tokens reported: unknown, never counted cold
+
+
+def test_cold_requests_count_only_measured_misses(monkeypatch, tmp_path):
+    rows = iter([({"prompt_tokens": 100, "cached_tokens": 99, "decode_s": 1.0, "decode_tok_s": 9.0},
+                  {"enabled": True, "routes": {"a": {"rounds": 5}}}),
+                 ({"prompt_tokens": 100, "cached_tokens": 0, "decode_s": 1.0, "decode_tok_s": 9.0},
+                  {"enabled": True, "routes": {"a": {"rounds": 10}}})])
+    monkeypatch.setattr(harness, "request", lambda *args: next(rows))
+    args = SimpleNamespace(max_requests=2, max_tokens=10, rounds=100, xctrace=False)
+    cell, _ = harness.measure_cell(None, "fake", "", args, "quiet", tmp_path, 100, None, None)
+    assert cell["cold_requests"] == 1 and cell["rounds"] == 10
+
+
+def test_probe_route_change_flags_target_only_ordinary_requests(monkeypatch, tmp_path):
+    """No mtp receipt, but the probe shows the request left the MTP batch."""
+    blocks = iter([
+        {"enabled": True, "routes": {"generate:MTPGenerationBatch": {"rounds": 5, "tokens": 9}}},
+        {"enabled": True, "routes": {"generate:MTPGenerationBatch": {"rounds": 5, "tokens": 9},
+                                     "generate:GenerationBatch": {"rounds": 9, "tokens": 9}}}])
+    row = lambda: {"prompt_tokens": 100, "cached_tokens": 99, "decode_s": 1.0, "decode_tok_s": 9.0,  # noqa: E731
+                   "mtp": None}
+    monkeypatch.setattr(harness, "request", lambda *args: (row(), next(blocks)))
+    args = SimpleNamespace(max_requests=2, max_tokens=10, rounds=100, xctrace=False)
+    cell, _ = harness.measure_cell(None, "fake", "", args, "quiet", tmp_path, 100, None, None)
+    assert cell["route_transitions"] == []
+    assert cell["probe_route_changes"] == [{"request": 1, "routes": ["generate:GenerationBatch"],
+                                            "first_routes": ["generate:MTPGenerationBatch"]}]
+    row_summary = harness.summarize({"rounds_target": 100, "cells": [cell]})["rows"][0]
+    assert row_summary["quiet"]["route_transitions"] == 1
+    old = {k: v for k, v in cell.items() if k not in ("route_transitions", "probe_route_changes")}
+    assert harness.summarize({"rounds_target": 100, "cells": [old]})["rows"][0]["quiet"]["route_transitions"] is None
+
+
+def test_fresh_status_waits_for_new_snapshots_and_never_raises(monkeypatch):
+    monkeypatch.setattr(harness.time, "sleep", lambda s: None)
+
+    class Client:
+        def __init__(self, values):
+            self.values = iter(values)
+
+        def call(self, path, timeout=None):
+            value = next(self.values)
+            if isinstance(value, Exception):
+                raise value
+            return value
+
+    snap = lambda n: {"host_snapshot_timing": {"collections": n}, "scheduler": {"x": n}}  # noqa: E731
+    status, info = harness.fresh_status(Client([snap(4), snap(4), snap(5), snap(6)]))
+    assert status["scheduler"]["x"] == 6 and info["fresh"] and info["collections"] == 6
+    status, info = harness.fresh_status(Client([TimeoutError("slow")]))
+    assert status == {} and "TimeoutError" in info["error"]
+    status, info = harness.fresh_status(Client(["not json"]))
+    assert status == {} and "TypeError" in info["error"]
+
+
+def test_past_deadline_request_receipt_is_marked(monkeypatch, tmp_path):
+    import json
+    import time
+    now = time.monotonic()
+
+    def request(*args):
+        monkeypatch.setattr(harness.time, "monotonic", lambda: now + 10)
+        return ({"completion_tokens": 3, "mlx2_receipt": {"route": "native_mtp"}},
+                {"enabled": True, "routes": {"a": {"rounds": 1}}})
+
+    monkeypatch.setattr(harness, "request", request)
+    args = SimpleNamespace(max_requests=1, max_tokens=3, rounds=1, xctrace=False)
+    cell, _ = harness.measure_cell(None, "fake", "", args, "contended", tmp_path, 1, None, None,
+                                   load_deadline=now + 5)
+    line = json.loads((tmp_path / "receipts-1-contended.jsonl").read_text())
+    assert line["past_deadline"] is True and cell["rounds"] == 0
+
+
+def test_rerun_options_are_refused_before_evidence_is_written(tmp_path):
+    token = tmp_path / "token"
+    token.write_text("t")
+    base = ["run", "--base-url", "http://127.0.0.1:9", "--admin-token", str(token), "--checkpoint", "c@f",
+            "--arm", "a", "--source-revision", "x", "--sizes", "65536"]
+    for extra, message in ((["--size-max-tokens", "65535=32"], "not in --sizes"),
+                           (["--size-max-tokens", "65536=16"], "cannot book 200 rounds"),
+                           (["--size-max-tokens", "65536"], "SIZE=TOKENS")):
+        out = tmp_path / extra[1].replace("=", "_")
+        with pytest.raises(SystemExit, match=message):
+            harness.main(base + extra + ["--output", str(out)])
+        assert not out.exists()
+    args = SimpleNamespace(max_requests=8, max_tokens=256, rounds=136, contended_rounds=60,
+                           size_max_tokens={65536: 64})
+    harness.validate_rerun_options(args, [65536], ["quiet", "contended"])  # the rerun recipe fits

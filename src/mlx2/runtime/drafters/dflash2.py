@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: MIT
 # Mined closure; provenance/muse-dflash2.json.
+import os
+from collections import Counter
 from collections.abc import Callable, Mapping
 
 import mlx.core as mx
@@ -421,6 +423,12 @@ __all__ = [
     "_grouped_dynamic_convolve",
 ]
 
+# Engagement counters of MLX2_DFLASH2_BATCHED_SELECTOR_READS (process-wide;
+# rounds = draft calls that took the batched reads, positions = their
+# per-position combined reads).
+SELECTOR_READ_STATS: Counter = Counter()
+
+
 # Original mlx2 distribution-aware extension. Selector scores define q.
 def _draft_distributions(
     self,
@@ -523,27 +531,98 @@ def _draft_distributions(
     predecessor_values = list(anchor_values)
     active = [True] * batch
     tokens = [[] for _ in range(batch)]; laws = [[] for _ in range(batch)]
+    # MLX2_DFLASH2_BATCHED_SELECTOR_READS=1 (default off; Pierre 2026-11-26:
+    # exact, A/B before any default).  Off reads edges, scores, the dense
+    # row, the candidate ids and each processed row separately at every
+    # position (Phase 0: five host reads per Raon round per position).  On
+    # reads every position's candidate ids once, keeps the dense row on the
+    # device for the processors, and builds each processor row's candidate
+    # scores on the device (the same float32 gather and add the host did), so
+    # each position costs one read of the selector scores plus those rows.
+    # Position j still needs the token chosen at j-1, so the reads cannot
+    # leave the loop.
+    batched_reads = (
+        os.environ.get("MLX2_DFLASH2_BATCHED_SELECTOR_READS", "0") == "1"
+        and proposal_length > 0
+    )
+    all_ids = np.asarray(candidates) if batched_reads else None
+    if batched_reads:
+        SELECTOR_READ_STATS["batched_rounds"] += 1
     for position in range(proposal_length):
         edges = mx.sum(selector.predecessor_codebook(predecessor)[:, None] * projected[:, position, None] * selector.successor_codebook(candidates[:, position]), axis=-1)
         needs_processor_rows = any(
             active[row] and logits_processors[row] for row in range(batch)
         )
-        hosted_edges = np.asarray(edges.astype(mx.float32)) if needs_processor_rows else None
-        scores = np.asarray(
-            selector_scores(unary[:, position], edges, post_cap).astype(mx.float32)
-        )
-        dense_scores = (
-            np.asarray(logits[:, position].astype(mx.float32))
-            if needs_processor_rows else None
-        )
-        ids = np.asarray(candidates[:, position])
+        device_candidate_scores = {}
+        if batched_reads:
+            parts = [
+                selector_scores(unary[:, position], edges, post_cap).astype(mx.float32)
+            ]
+            processor_rows = [
+                row for row in range(batch)
+                if active[row] and logits_processors[row]
+            ]
+            built = []
+            if processor_rows:
+                dense_rows = logits[:, position].astype(mx.float32)
+                edge_rows = edges.astype(mx.float32)
+                for row in processor_rows:
+                    # A processor failure is raised at this row's turn below,
+                    # after the earlier rows sampled, as the off path does.
+                    try:
+                        value = probe_logits_processors(
+                            logits_processors[row],
+                            mx.array(
+                                processor_histories[row]
+                                + [anchor_values[row]]
+                                + tokens[row],
+                                dtype=mx.int32,
+                            ),
+                            dense_rows[row][None],
+                        )
+                        processed = value[0].astype(mx.float32)
+                        # The off path's NumPy gather refuses a narrowed row;
+                        # ``mx.take`` would not.
+                        width = int(processed.shape[-1])
+                        if int(all_ids[row, position].max()) >= width:
+                            raise IndexError(
+                                f"DFlash2 candidate id out of bounds for a processed row of width {width}"
+                            )
+                    except Exception as error:  # noqa: BLE001 - re-raised at the row
+                        device_candidate_scores[row] = error
+                        continue
+                    built.append(row)
+                    parts.append((
+                        mx.take(processed, candidates[row, position]) + edge_rows[row]
+                    )[None])
+            hosted = np.asarray(mx.concatenate(parts, axis=0))
+            scores = hosted[:batch]
+            for index, row in enumerate(built):
+                device_candidate_scores[row] = hosted[batch + index]
+            hosted_edges = dense_scores = None
+            ids = all_ids[:, position]
+            SELECTOR_READ_STATS["batched_positions"] += 1
+        else:
+            hosted_edges = np.asarray(edges.astype(mx.float32)) if needs_processor_rows else None
+            scores = np.asarray(
+                selector_scores(unary[:, position], edges, post_cap).astype(mx.float32)
+            )
+            dense_scores = (
+                np.asarray(logits[:, position].astype(mx.float32))
+                if needs_processor_rows else None
+            )
+            ids = np.asarray(candidates[:, position])
         selected = []
         for row in range(batch):
             if not active[row]:
                 selected.append(predecessor_values[row])
                 continue
             processors = logits_processors[row]
-            if processors:
+            if processors and batched_reads:
+                candidate_scores = device_candidate_scores[row]
+                if isinstance(candidate_scores, Exception):
+                    raise candidate_scores
+            elif processors:
                 # Give grammar/logit-order probes the dense draft row.  The
                 # selector edge is then added only to its top-k candidates.
                 value = mx.array(dense_scores[row])[None]
@@ -558,6 +637,7 @@ def _draft_distributions(
                     np.asarray(value[0].astype(mx.float32))[ids[row]]
                     + hosted_edges[row]
                 )
+            if processors:
                 if post_cap is not None:
                     # Preserve processor exclusions: tanh(-inf) itself is -1.
                     excluded = np.isneginf(candidate_scores)

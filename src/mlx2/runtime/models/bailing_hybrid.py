@@ -7,7 +7,10 @@ self-contained runtime and target taps are added for the external drafter.
 """
 
 import math
+import os
+import threading
 from collections import Counter
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
 
@@ -119,7 +122,78 @@ class ClampedSwiGLU(nn.Module):
         return clamped_swiglu(gate, x, self.swiglu_limit)
 
 
+# MLX2_LING_PREFETCH_CACHE_OFFSETS=1 (default off; Pierre 2026-11-26: exact,
+# A/B before any default).  Off, every MLA layer visit reads its size-1
+# ``cache.offset`` with ``.item()`` (Phase 0: 8.8 host reads per Ling MTP d2
+# round).  On, a trunk forward reads every global layer's size-1 integer
+# offset in one ``tolist()`` at its start and each layer's first visit takes
+# its own value from that table.  Exact: a layer's cache offset only moves in
+# that layer's own ``update_and_fetch``, after its read, so the value at the
+# forward's start is the value at the visit.  An entry is consumed on use, so
+# a cache visited twice in one forward reads the live offset the second time.
+_PREFETCH_OFFSETS_ENV = "MLX2_LING_PREFETCH_CACHE_OFFSETS"
+_offset_table = threading.local()
+# Engagement counters (process-wide): forwards that prefetched, offsets read.
+OFFSET_PREFETCH_STATS: Counter = Counter()
+
+
+def _prefetchable_offset(cache):
+    offset = getattr(cache, "offset", None) if cache is not None else None
+    if (
+        isinstance(offset, mx.array) and offset.size == 1
+        and mx.issubdtype(offset.dtype, mx.integer)
+    ):
+        return offset
+    return None
+
+
+@contextmanager
+def _prefetched_cache_offsets(layers, cache):
+    """Read the global layers' size-1 cache offsets of one forward at once."""
+    if (
+        os.environ.get(_PREFETCH_OFFSETS_ENV, "0") != "1"
+        or cache is None
+        or getattr(_offset_table, "table", None) is not None
+    ):
+        yield
+        return
+    pending = []
+    for layer, layer_cache in zip(layers, cache):
+        if not getattr(layer, "is_global", False):
+            continue
+        offset = _prefetchable_offset(layer_cache)
+        if offset is not None:
+            pending.append((layer_cache, offset))
+    # Shared offset objects could move under another layer's in-place
+    # update; mixed dtypes would change ``.item()``'s Python type.  Both keep
+    # the per-visit reads.
+    if (
+        len(pending) < 2
+        or len({offset.dtype for _, offset in pending}) != 1
+        or len({id(offset) for _, offset in pending}) != len(pending)
+        or len({id(layer_cache) for layer_cache, _ in pending}) != len(pending)
+    ):
+        yield
+        return
+    values = mx.concatenate([offset.reshape(1) for _, offset in pending]).tolist()
+    OFFSET_PREFETCH_STATS["forwards"] += 1
+    OFFSET_PREFETCH_STATS["offsets"] += len(pending)
+    _offset_table.table = {
+        id(layer_cache): (layer_cache, value)
+        for (layer_cache, _), value in zip(pending, values)
+    }
+    try:
+        yield
+    finally:
+        _offset_table.table = None
+
+
 def _cache_offset(cache: Any | None) -> int | mx.array:
+    table = getattr(_offset_table, "table", None)
+    if table and cache is not None:
+        entry = table.pop(id(cache), None)
+        if entry is not None and entry[0] is cache:
+            return entry[1]
     offset = cache.offset if cache is not None else 0
     if isinstance(offset, mx.array):
         if offset.size == 1:
@@ -1125,7 +1199,8 @@ class LanguageModel(nn.Module):
         # claimed it (bit-identical to stock sorted gather_qmm); a no-op
         # under claim_stock_moe and for decode rows.
         shape = inputs if inputs_embeds is None else inputs_embeds
-        with moe_nax_gather.forward_scope(inputs, cache), ling_rowwise.scope(shape, cache):
+        with moe_nax_gather.forward_scope(inputs, cache), ling_rowwise.scope(shape, cache), \
+                _prefetched_cache_offsets(self.layers, cache):
             return self._forward(inputs, cache, tail_row=tail_row,
                                  inputs_embeds=inputs_embeds, rope_positions=rope_positions)
 
@@ -1346,7 +1421,8 @@ class Model(nn.Module):
             raise ValueError("invalid Ling target capture layers")
         if body_only and last_logits_only:
             raise ValueError("body_only and last_logits_only are mutually exclusive")
-        with moe_nax_gather.forward_scope(inputs, cache):
+        with moe_nax_gather.forward_scope(inputs, cache), \
+                _prefetched_cache_offsets(self.layers, cache):
             return self._forward_with_taps(inputs, cache, capture_layers, body_only=body_only,
                                            last_logits_only=last_logits_only)
 

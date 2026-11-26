@@ -2576,6 +2576,15 @@ class ExternalDraftBatchGenerator:
         self.batched_sampled_laws = (
             os.environ.get("MLX2_SPEC_BATCHED_SAMPLED_LAWS", "1") != "0"
         )
+        # Default off (Pierre 2026-11-26: exact, A/B before any default;
+        # =1 opts in): one device read for a cohort's greedy verify rows
+        # (processor-free or branch-safe processors) instead of an eval plus two ``.item()`` per row
+        # (``_batched_greedy_target_laws``; Phase 0 found about 6 blocking
+        # syncs per Raon DFlash2 round there).  Same normalizers, argmaxes,
+        # response rows and refusals as ``_target_law``.
+        self.batched_greedy_laws = (
+            os.environ.get("MLX2_SPEC_BATCHED_GREEDY_LAWS", "0") == "1"
+        )
         # Diagnostic-only: fence the MLX queue at every timing boundary so
         # queued device work is charged to the phase that submitted it.  This
         # deliberately serializes the measured route and is never default-on.
@@ -3443,6 +3452,102 @@ class ExternalDraftBatchGenerator:
                 lane.uid,
                 f"external draft target law is not a probability distribution: {error}",
             ) from error
+
+    def _batched_greedy_target_laws(self, cohort, logits, counts, greedy, drafts):
+        """``_target_law``'s greedy rows for a whole cohort with one host read.
+
+        ``MLX2_SPEC_BATCHED_GREEDY_LAWS=1`` (default off).  For every row that
+        ``_verify`` verifies by token compare (``greedy``), build exactly
+        ``_target_law``'s per-row graph (the float32 row, its processors,
+        its 1-D ``logsumexp`` and ``argmax``), then read every normalizer and
+        argmax of the cohort in one ``np.asarray``.  Stacking copies the
+        scalars; the argmax goes through float32, exact below 2**24, so a
+        larger vocabulary keeps the per-row path.
+
+        A lane with processors joins only when every processor declares the
+        stateless branch contract (``processors_branch_safe``: history-pure,
+        no mutable receipt or grammar state; e.g. the presence penalty).
+        ``_target_law`` runs its processors only on reachable rows, and
+        reachability needs the previous row's argmax, so such a lane builds
+        both the processed and the raw variant of every row after the first
+        and picks on the host exactly as ``_target_law`` would; evaluating a
+        branch-safe processor on a row that turns out unreachable has no
+        effect.  Grammar and other stateful processors keep ``_target_law``.
+
+        Returns ``{row: [(law_row or None, normalizer, host_normalizer,
+        token), ...]}`` per verify position; the caller applies the
+        finite-normalizer refusal at the row where ``_target_law`` would
+        have raised it.  Law rows are kept only for lanes that publish
+        logprobs.
+        """
+        mx = self.mx
+        if int(logits.shape[-1]) >= 1 << 24:
+            return {}
+
+        def variant(row, j, lane, processed, keep):
+            value = logits[row, j][None].astype(mx.float32)
+            if processed:
+                inputs = [lane.anchor, *drafts[row]][:j + 1]
+                tokens = mx.array([*lane.history, *inputs], dtype=mx.int32)
+                for processor in lane.processors:
+                    value = processor(tokens, value)
+            law_row = value[0].astype(mx.float32)
+            return [law_row if keep else None, mx.logsumexp(law_row), mx.argmax(law_row)]
+
+        entries = []
+        for row, lane in enumerate(cohort):
+            if not greedy[row] or float(lane.sampling.get("sampling_temp", 0)) != 0:
+                continue
+            if lane.processors and (
+                not processors_branch_safe(lane.processors)
+                # A verify ledger snapshots per-row state through
+                # ``VerifyWindow``; building every row first would skew it.
+                or any(callable(getattr(processor, "verify_ledger", None))
+                       for processor in lane.processors)
+            ):
+                continue
+            keep = lane.sampling.get("emit_logprobs", True)
+            positions = []
+            for j in range(counts[row]):
+                processed = (
+                    variant(row, j, lane, True, keep) if lane.processors else None
+                )
+                raw = (
+                    variant(row, j, lane, False, keep)
+                    if not lane.processors or j > 0 else None
+                )
+                positions.append((processed, raw))
+            entries.append((row, lane, positions))
+        if not entries:
+            return {}
+        flat = [
+            item for _row, _lane, positions in entries
+            for pair in positions for item in pair if item is not None
+        ]
+        host = np.asarray(mx.concatenate([
+            mx.stack([item[1] for item in flat]),
+            mx.stack([item[2] for item in flat]).astype(mx.float32),
+        ]))
+        total = len(flat)
+        for index, item in enumerate(flat):
+            item.extend((float(host[index]), int(host[total + index])))
+        out, rows_read = {}, 0
+        for row, lane, positions in entries:
+            reachable, chosen = True, []
+            for j, (processed, raw) in enumerate(positions):
+                item = processed if reachable and lane.processors else raw
+                law_row, normalizer, _argmax, host_normalizer, token = item
+                chosen.append((law_row, normalizer, host_normalizer, token))
+                rows_read += 1
+                if (
+                    reachable and j < len(drafts[row]) and lane.processors
+                    and token != int(drafts[row][j])
+                ):
+                    reachable = False
+            out[row] = chosen
+        _bump(self.scheduler_stats, "external_batched_greedy_law_rounds")
+        _bump(self.scheduler_stats, "external_batched_greedy_law_rows", rows_read)
+        return out
 
     @staticmethod
     def _batched_sampled_law_eligible(lane, greedy=False):
@@ -8305,19 +8410,27 @@ class ExternalDraftBatchGenerator:
         # On: any proposal a lane would refuse sends the whole round back to
         # the interleaved path, so an earlier lane's LaneFailure still wins
         # over a later lane's malformed proposal, as with the switch off.
-        rows_info, batched_laws = None, {}
-        if batched:
+        rows_info, batched_laws, greedy_laws = None, {}, {}
+        batched_greedy = bool(getattr(self, "batched_greedy_laws", False))
+        if batched or batched_greedy:
             try:
                 rows_info = [prepare(row, lane) for row, lane in enumerate(cohort)]
-                batched_laws = self._batched_sampled_target_laws(
-                    cohort, logits, [len(info[2]) + 1 for info in rows_info],
-                    [info[1] for info in rows_info],
-                )
+                counts = [len(info[2]) + 1 for info in rows_info]
+                greedy_rows = [info[1] for info in rows_info]
+                if batched:
+                    batched_laws = self._batched_sampled_target_laws(
+                        cohort, logits, counts, greedy_rows,
+                    )
+                if batched_greedy:
+                    greedy_laws = self._batched_greedy_target_laws(
+                        cohort, logits, counts, greedy_rows,
+                        [info[2] for info in rows_info],
+                    )
             except Exception:  # noqa: BLE001 - re-raised lane by lane below
-                batched, rows_info, batched_laws = False, None, {}
+                rows_info, batched_laws, greedy_laws = None, {}, {}
         for row, lane in enumerate(cohort):
             _fly, greedy, drafts, laws = (
-                rows_info[row] if batched else prepare(row, lane)
+                rows_info[row] if rows_info is not None else prepare(row, lane)
             )
             inputs = [lane.anchor] + drafts
             if _VERIFY_TRACE_PATH is not None:
@@ -8339,7 +8452,24 @@ class ExternalDraftBatchGenerator:
                     if response_rows is not None:
                         response_rows.append(None)
                     window.mark()
-            for j in range(count+1) if row not in batched_laws else ():
+            if row in greedy_laws:
+                # Greedy rows read with the cohort
+                # (``_batched_greedy_target_laws``): ``_target_law``'s values,
+                # processor reachability and refusal, row by row.
+                for law_row, normalizer, host_normalizer, token in greedy_laws[row]:
+                    if not np.isfinite(host_normalizer):
+                        raise LaneFailure(
+                            lane.uid,
+                            "external draft target law is not a probability distribution",
+                        )
+                    if response_rows is not None:
+                        response_rows.append(law_row - normalizer)
+                    targets.append(token)
+                    window.mark()
+            for j in (
+                range(count + 1)
+                if row not in batched_laws and row not in greedy_laws else ()
+            ):
                 targets.append(self._target_law(
                     lane, logits[row, j], lane.history, reachable, response_rows,
                     greedy_token=greedy, history_suffix=inputs[:j + 1],

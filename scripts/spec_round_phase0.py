@@ -39,6 +39,31 @@ loaded stretches are at most 10 + 50 s with 60 s of cooldown, and 48 workers).
 The 1-minute load average lags the ramp, so the
 instantaneous runnable-process count is the headline contention figure.
 
+Long contexts (2026-11-26 reruns).  A contended request that outlasts the load
+window is dropped, and at 64K one 256-token request is longer than the window.
+``--size-max-tokens 65536=32`` shortens the requests of that context size in
+*both* conditions: the report compares tokens per round exactly, so the quiet
+and contended cells of a size must answer the same greedy prefix.
+``--contended-rounds`` lowers only the contended cell's round target; tokens
+per round still has to match the quiet cell exactly, so a route whose requests
+differ (a mid-cell route change) leaves the pair incomplete rather than
+comparing.  Both default to the Phase 0 behaviour, and ``run`` refuses a
+combination that cannot book its round target (a round commits at least one
+token) before it writes any evidence.
+
+Route transitions.  Each request row records the response receipt's ``mtp``
+transition (``ordinary_after_mtp_fallback`` / ``_handoff`` with its reason,
+widths and committed tokens), and the full ``mlx2`` receipt of every request
+goes to ``receipts-<size>-<condition>.jsonl`` (an overrun request is marked
+``past_deadline``; the traced request is ``"trace"``).  Cells also list
+``probe_route_changes``: requests whose probed round routes differ from the
+first request's, which catches a target-only APCv2 hit that decodes ordinary
+with no ``mtp`` receipt.  ``--scheduler-deltas`` also reads ``/v1/status``
+after each request, waiting (at most 2.5 s) for two newer worker snapshots,
+and stores the changed counts, scheduler, APCv2 and segmented-MTP counters (a native-MTP route that drops to the
+ordinary batcher mid-cell, as Maxwell 16K did on 2026-11-25, is then
+explained by its own counters).
+
 ``load`` runs only the generator (calibration). ``report`` joins cell files
 into the go/no-go table of §4.4: Phase 1 is a go for a route when contended
 round time rises by >= 20 % at unchanged tokens per round, or when the quiet host share of round
@@ -355,6 +380,122 @@ def build_prompts(sizes):
     return {size: prompt_text(test, size).rsplit("\n\n", 1)[0] + INSTRUCTION for size in sizes}
 
 
+def parse_size_max_tokens(value):
+    """``"65536=32,16384=128"`` -> {65536: 32, 16384: 128}."""
+    out = {}
+    for item in (value or "").split(","):
+        if not item.strip():
+            continue
+        size, sep, tokens = item.partition("=")
+        if not sep or int(size) <= 0 or int(tokens) <= 0:
+            raise ValueError(f"--size-max-tokens wants SIZE=TOKENS, got {item!r}")
+        out[int(size)] = int(tokens)
+    return out
+
+
+def validate_rerun_options(args, sizes, conditions):
+    """Refuse options that cannot produce a complete cell, before any evidence is written."""
+    unknown = sorted(set(args.size_max_tokens) - set(sizes))
+    if unknown:
+        raise SystemExit(f"--size-max-tokens names sizes not in --sizes: {unknown}")
+    for size in sizes:
+        for condition in conditions:
+            # A round commits at least one token, so a request books at most
+            # max_tokens rounds.
+            reachable = args.max_requests * max_tokens_for(args, size)
+            if reachable < rounds_target(args, condition):
+                raise SystemExit(
+                    f"{condition} {size}: --max-requests {args.max_requests} x max_tokens "
+                    f"{max_tokens_for(args, size)} cannot book {rounds_target(args, condition)} rounds")
+
+
+def max_tokens_for(args, size):
+    return (getattr(args, "size_max_tokens", None) or {}).get(size, getattr(args, "max_tokens", None))
+
+
+def rounds_target(args, condition):
+    contended = getattr(args, "contended_rounds", None)
+    return contended if condition == "contended" and contended else getattr(args, "rounds", None)
+
+
+def mtp_transition(receipt):
+    """Compact summary of a response receipt's ``mtp`` block (None if absent)."""
+    mtp = (receipt or {}).get("mtp")
+    if not isinstance(mtp, dict):
+        return None
+    detail = mtp.get("mtp_plain_fallback") or mtp.get("mtp_ordinary_handoff") or {}
+    out = {"route": mtp.get("route"), "num_draft": mtp.get("num_draft"),
+           "observed_compute_widths": mtp.get("observed_compute_widths"),
+           "ordinary_compute_widths": mtp.get("ordinary_compute_widths")}
+    if detail:
+        out.update({
+            "transition": detail.get("transition") or "handoff",
+            "reason": detail.get("reason"),
+            "committed_tokens_before": detail.get("committed_tokens_before_fallback",
+                                                  detail.get("committed_tokens_before_handoff")),
+            "projected_width": detail.get("projected_width"),
+            "decision": detail.get("decision"),
+        })
+    return out
+
+
+COUNTER_GROUPS = ("counts", "scheduler", "apcv2", "segmented_self_mtp")
+
+
+def counter_snapshot(status):
+    """Flat numeric leaves of the status counter groups."""
+    flat = {}
+
+    def walk(prefix, value):
+        if isinstance(value, bool):
+            return
+        if isinstance(value, (int, float)):
+            flat[prefix] = value
+        elif isinstance(value, dict):
+            for key, item in value.items():
+                walk(f"{prefix}.{key}", item)
+
+    for group in COUNTER_GROUPS:
+        walk(group, (status or {}).get(group))
+    return flat
+
+
+def snapshot_collections(status):
+    return int(((status or {}).get("host_snapshot_timing") or {}).get("collections") or 0)
+
+
+def fresh_status(client, wait_s=2.5, poll_s=0.25):
+    """``/v1/status`` after two further worker snapshots (bounded).
+
+    scheduler/APCv2/segmented-MTP counters come from a worker snapshot that
+    is republished about once a second; a read right after a response can
+    miss what the request's end published.  Returns (status, info); a failed
+    read yields ({}, {"error": ...}) and never ends the run.
+    """
+    started = time.monotonic()
+    try:
+        status = client.call("/v1/status", timeout=30)
+        if not isinstance(status, dict):
+            raise TypeError(f"status is {type(status).__name__}")
+        first = snapshot_collections(status)
+        while (snapshot_collections(status) < first + 2
+               and time.monotonic() - started < wait_s):
+            time.sleep(poll_s)
+            status = client.call("/v1/status", timeout=30)
+            if not isinstance(status, dict):
+                raise TypeError(f"status is {type(status).__name__}")
+    except Exception as error:  # noqa: BLE001 - evidence, never fatal
+        return {}, {"error": f"{type(error).__name__}: {error}"}
+    return status, {"collections": snapshot_collections(status),
+                    "fresh": snapshot_collections(status) >= first + 2,
+                    "waited_s": round(time.monotonic() - started, 3)}
+
+
+def counter_delta(after, before):
+    return {key: round(value - before.get(key, 0), 6) for key, value in sorted(after.items())
+            if value != before.get(key, 0)}
+
+
 def request(client, model, text, max_tokens):
     from ling32_air_prefill_ab import find
     started = time.monotonic()
@@ -374,12 +515,18 @@ def request(client, model, text, max_tokens):
         "decode_tok_s": ((completion - 1) / decode_s if decode_s and completion > 1 else None),
         "finish_reason": (result.get("choices") or [{}])[0].get("finish_reason"),
         "route": (result.get("mlx2") or {}).get("route"),
+        "mtp": mtp_transition(result.get("mlx2")),
+        "mlx2_receipt": {k: v for k, v in (result.get("mlx2") or {}).items() if k != "round_probe"},
     }, find(result, "round_probe")
 
 
 def measure_cell(client, model, text, args, condition, out_dir, size, server_pid, baseline, load_deadline=None):
     """Warm requests until ``--rounds`` decode rounds; returns (cell, last probe block)."""
     rows, totals, last = [], {}, baseline
+    max_tokens, target = max_tokens_for(args, size), rounds_target(args, condition)
+    receipts = out_dir / f"receipts-{size}-{condition}.jsonl"
+    deltas = getattr(args, "scheduler_deltas", False)
+    counters = counter_snapshot(fresh_status(client)[0]) if deltas else None
     sampler = Sampler()
     sampler.start()
     overran = None
@@ -387,12 +534,25 @@ def measure_cell(client, model, text, args, condition, out_dir, size, server_pid
         for index in range(args.max_requests):
             if load_deadline is not None and time.monotonic() >= load_deadline:
                 break
-            row, block = request(client, model, text, args.max_tokens)
+            row, block = request(client, model, text, max_tokens)
+            receipt = row.pop("mlx2_receipt", None)
+            past = load_deadline is not None and time.monotonic() > load_deadline
+            if receipt is not None:
+                with receipts.open("a") as handle:
+                    handle.write(json.dumps({"request": index, "past_deadline": past,
+                                             "receipt": receipt}) + "\n")
+            if deltas:
+                status, info = fresh_status(client)
+                row["counter_read"] = info
+                if status:
+                    now = counter_snapshot(status)
+                    row["counter_deltas"] = counter_delta(now, counters or {})
+                    counters = now
             if not (block or {}).get("enabled"):
                 raise SystemExit("server receipt has no enabled round_probe; start it with MLX2_ROUND_PROBE=1")
             delta = probe_delta(block, last)
             last = block
-            if load_deadline is not None and time.monotonic() > load_deadline:
+            if past:
                 overran = row
                 break
             row["probe"] = delta
@@ -400,9 +560,12 @@ def measure_cell(client, model, text, args, condition, out_dir, size, server_pid
             add_deltas(totals, delta)
             print(json.dumps({"size": size, "condition": condition, "request": index,
                               "decode_tok_s": row["decode_tok_s"],
-                              "rounds": sum(r["rounds"] for r in delta.values())}), flush=True)
+                              "rounds": sum(r["rounds"] for r in delta.values()),
+                              "routes": sorted(delta),
+                              "mtp_route": (row.get("mtp") or {}).get("route"),
+                              "mtp_reason": (row.get("mtp") or {}).get("reason")}), flush=True)
             booked = sum(r.get("rounds", 0) for r in totals.values())
-            if booked >= args.rounds:
+            if booked >= target:
                 break
     finally:
         samples = sampler.finish()
@@ -427,6 +590,10 @@ def measure_cell(client, model, text, args, condition, out_dir, size, server_pid
             try:
                 if tracer.start():
                     row, block = request(client, model, text, args.trace_max_tokens)
+                    receipt = row.pop("mlx2_receipt", None)
+                    if receipt is not None:
+                        with receipts.open("a") as handle:
+                            handle.write(json.dumps({"request": "trace", "receipt": receipt}) + "\n")
                     delta = probe_delta(block, last)
                     last = block
                     trace.update(status="recorded", request=row, probe=delta)
@@ -482,7 +649,22 @@ def measure_cell(client, model, text, args, condition, out_dir, size, server_pid
     cell = {
         "size": size, "condition": condition, "requests": rows,
         "route_label": name, "routes": totals, "request_past_load_deadline": overran,
-        "rounds": rounds,
+        "rounds": rounds, "rounds_target": target, "max_tokens": max_tokens,
+        "route_transitions": [
+            {"request": i, **r["mtp"]} for i, r in enumerate(rows)
+            if (r.get("mtp") or {}).get("transition")],
+        # A warm request that re-prefilled (no APCv2 hit) measured decode
+        # only, but its prefill ate the contended load window (Ling 64K,
+        # 2026-11-25: cached 0 of 70,905, TTFT 85-110 s).
+        "cold_requests": sum(1 for r in rows if r.get("prompt_tokens") and r.get("cached_tokens") == 0),
+        "partial_hit_requests": sum(1 for r in rows if r.get("prompt_tokens") and r.get("cached_tokens")
+                                    and r["cached_tokens"] < r["prompt_tokens"] - 1),
+        # A route the receipt does not report as a transition can still
+        # change under one request (Maxwell 16K, 2026-11-25: a target-only
+        # APCv2 hit decodes on the ordinary batcher with no mtp receipt).
+        "probe_route_changes": [
+            {"request": i, "routes": sorted(r.get("probe") or {}), "first_routes": sorted(rows[0].get("probe") or {})}
+            for i, r in enumerate(rows) if i and sorted(r.get("probe") or {}) != sorted(rows[0].get("probe") or {})],
         "rounds_per_s": (rounds / decode_s) if decode_s and rounds else None,
         "decode_tok_s_median": statistics.median(decode) if decode else None,
         "per_round": pr,
@@ -498,6 +680,13 @@ def run(args):
     # A TERM from the unit's trap must unwind through ``finally`` so the load
     # workers stop with the harness (they also exit when orphaned).
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
+    sizes = [int(v) for v in args.sizes.split(",")]
+    conditions = [c for c in args.conditions.split(",") if c]
+    try:
+        args.size_max_tokens = parse_size_max_tokens(args.size_max_tokens)
+    except ValueError as error:
+        raise SystemExit(str(error)) from error
+    validate_rerun_options(args, sizes, conditions)
     out_dir = Path(args.output)
     if out_dir.exists() and any(out_dir.iterdir()):
         raise SystemExit(f"refuse nonempty evidence directory {out_dir}")
@@ -505,9 +694,7 @@ def run(args):
     client = gsm.Client(args.base_url, Path(args.admin_token).read_text().strip())
     status = client.call("/v1/status", timeout=30)
     model = gsm.served_model_name(status, args.checkpoint)
-    sizes = [int(v) for v in args.sizes.split(",")]
     prompts = build_prompts(sizes)
-    conditions = [c for c in args.conditions.split(",") if c]
     meta = {
         "schema": SCHEMA, "checkpoint": args.checkpoint, "arm": args.arm,
         "route": args.route, "source_revision": args.source_revision,
@@ -519,7 +706,10 @@ def run(args):
         "load_workers": args.load_workers, "load_nice": args.load_nice,
         "load_ramp_s": args.load_ramp_s, "cell_max_s": args.cell_max_s, "cooldown_s": args.cooldown_s,
         "rounds_target": args.rounds,
-        "max_tokens": args.max_tokens, "server_pid": args.server_pid,
+        "rounds_target_contended": rounds_target(args, "contended"),
+        "max_tokens": args.max_tokens,
+        "size_max_tokens": {str(k): v for k, v in sorted(args.size_max_tokens.items())},
+        "scheduler_deltas": bool(args.scheduler_deltas), "server_pid": args.server_pid,
         "host": {"cpus": os.cpu_count()}, "started_at": time.time(),
         "thermal_admission": False, "performance_claim": False,
         "purpose": "Phase 0 attribution (quiet vs contended); not publishable statistics",
@@ -529,6 +719,7 @@ def run(args):
         for size in sizes:
             client.call("/v1/admin/apc/clear", {"reason": f"phase0-{size}"}, admin=True)
             warm, last = request(client, model, prompts[size], 8)  # cold prefill, unmeasured
+            warm.pop("mlx2_receipt", None)
             generator = None
             if not (last or {}).get("enabled"):
                 raise SystemExit("warmup receipt has no enabled round_probe")
@@ -576,7 +767,17 @@ def summarize(document):
             pr = cell.get("per_round") or {}
             trace = cell.get("metal_trace") or {}
             row[name] = {
-                "rounds": cell.get("rounds"), "rounds_target": document.get("rounds_target"),
+                "rounds": cell.get("rounds"),
+                "rounds_target": cell.get("rounds_target") or (
+                    (document.get("rounds_target_contended") or document.get("rounds_target"))
+                    if name == "contended" else document.get("rounds_target")),
+                "max_tokens": cell.get("max_tokens"),
+                # Requests, not events: a fallback row shows in both lists.
+                "route_transitions": (None if "route_transitions" not in cell else len(
+                    {t["request"] for t in cell["route_transitions"]}
+                    | {t["request"] for t in cell.get("probe_route_changes") or []})),
+                "cold_requests": cell.get("cold_requests"),
+                "partial_hit_requests": cell.get("partial_hit_requests"),
                 "route_label": cell.get("route_label"),
                 "decode_tok_s": cell.get("decode_tok_s_median"),
                 "rounds_per_s": cell.get("rounds_per_s"),
@@ -615,8 +816,11 @@ def summarize(document):
         row["quiet_in_round_host_share"] = in_scope
         row["tokens_per_round_drift"] = mal_drift
         target = document.get("rounds_target", 0)
-        quiet_complete = q is not None and (q["rounds"] or 0) >= target
-        pair_complete = quiet_complete and c is not None and (c["rounds"] or 0) >= target
+        quiet_complete = q is not None and (q["rounds"] or 0) >= (q.get("rounds_target") or target)
+        pair_complete = quiet_complete and c is not None and (c["rounds"] or 0) >= (c.get("rounds_target") or target)
+        # Different request lengths answer different greedy prefixes.
+        if q and c and q.get("max_tokens") and c.get("max_tokens") and q["max_tokens"] != c["max_tokens"]:
+            pair_complete = False
         period_increase = None
         if q and c and q["rounds_per_s"] and c["rounds_per_s"]:
             period_increase = q["rounds_per_s"] / c["rounds_per_s"] - 1
@@ -648,8 +852,8 @@ def report(args):
         rows.extend(summarize(json.loads(Path(path).read_text()))["rows"])
     lines = ["| checkpoint | mlx2 revision | arm | prompt tok | quiet tok/s | contended tok/s | round time increase | tok/round q/c | "
              "period ms q | in-round ms q | encode ms q | wait ms q | python ms q | between ms q | GPU ms q | "
-             "blocking syncs/round q | runnable c (load1) | host share q | Phase 1 |",
-             "|" + "---|" * 19]
+             "blocking syncs/round q | runnable c (load1) | host share q | route transitions q/c | Phase 1 |",
+             "|" + "---|" * 20]
     for r in rows:
         q, c = r.get("quiet") or {}, r.get("contended") or {}
         lines.append("| " + " | ".join([
@@ -664,6 +868,7 @@ def report(args):
             fmt(q.get("gpu_ms"), ".2f"), fmt(q.get("blocking_syncs"), ".1f"),
             f"{fmt(c.get('runnable_median'), '.0f')} ({fmt(c.get('load1_mean'), '.0f')})",
             fmt(r["quiet_host_share"], ".1%"),
+            f"{fmt(q.get('route_transitions'), '.0f')}/{fmt(c.get('route_transitions'), '.0f')}",
             {True: "go", False: "no-go", None: "incomplete"}[r["phase1_go"]]]) + " |")
     text = "\n".join(lines) + "\n"
     document = {"schema": SCHEMA + ".report", "rows": rows,
@@ -700,6 +905,13 @@ def main(argv=None):
     r.add_argument("--rounds", type=int, default=200, help="minimum decode rounds per cell")
     r.add_argument("--max-requests", type=int, default=10)
     r.add_argument("--max-tokens", type=int, default=256)
+    r.add_argument("--size-max-tokens", default="",
+                   help="SIZE=TOKENS[,...]: max_tokens for that context size, quiet and contended "
+                        "alike (a 256-token contended request at 64K outlasts the load window)")
+    r.add_argument("--contended-rounds", type=int, default=None,
+                   help="round target of contended cells (default --rounds)")
+    r.add_argument("--scheduler-deltas", action="store_true",
+                   help="read /v1/status around each request; store changed scheduler/APCv2 counters")
     r.add_argument("--load-workers", type=int, default=48)
     r.add_argument("--load-nice", type=int, choices=range(20), default=0,
                    help="nice increment for the load workers (0 = default priority, as the real pytest load)")
