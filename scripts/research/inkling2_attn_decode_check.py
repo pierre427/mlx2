@@ -227,7 +227,7 @@ def main() -> int:
                 "off": 1e3 * statistics.median(arms[False][2][4:]),
                 "off_control": 1e3 * statistics.median(arms["off_control"][2][4:]),
                 "on": 1e3 * statistics.median(arms[True][2][4:])}
-            del arms
+            arms = None  # release (captured by per_step_dlogit above)
             # 4. interleaved A/B on one cache.
             plan = [("off", False, False), ("on", True, False), ("on_fp", True, True)]
             configure(False)

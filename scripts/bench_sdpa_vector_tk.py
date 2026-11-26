@@ -231,7 +231,7 @@ def main() -> int:
                          if x.get("tk") == c["tk"])))
             print(name, n, "stock", round(row["stock_fused_ms_median"], 3),
                   {f"tk{t}": round(v, 3) for t, v in best.items()}, flush=True)
-            del q, k, v, ref
+            q = k = v = ref = None  # release (captured by the timed lambdas above)
     receipt = {
         "script": "scripts/bench_sdpa_vector_tk.py",
         "mlx_version": mx.__version__,

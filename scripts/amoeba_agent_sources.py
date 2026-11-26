@@ -35,7 +35,6 @@ import hashlib
 import json
 import os
 import re
-import sys
 from collections import Counter
 from pathlib import Path
 

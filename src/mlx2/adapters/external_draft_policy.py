@@ -569,7 +569,13 @@ class ExternalDraftAdapterMixin:
 
     def _check_num_draft(self, record):
         count = self.external_policy.get("num_draft", self.EXTERNAL_DEFAULT_NUM_DRAFT)
-        if type(count) is not int or not 1 <= count <= self._num_draft_ceiling(record):
+        # Adapters that borrow this method unbound (Flash-Next calls
+        # ``External._check_num_draft(self, record)`` without inheriting the
+        # mixin) fall back to the mixin's own ceiling.
+        ceiling = getattr(
+            type(self), "_num_draft_ceiling", ExternalDraftAdapterMixin._num_draft_ceiling
+        )(self, record)
+        if type(count) is not int or not 1 <= count <= ceiling:
             raise ValueError(
                 "num_draft must be a positive integer below the draft block size"
             )

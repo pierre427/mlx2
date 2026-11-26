@@ -107,7 +107,7 @@ def read_bandwidth_gbs(gb: float = 1.5, reps: int = 15) -> float:
     a = mx.ones((int(gb * 2**30) // 2,), dtype=mx.bfloat16)
     mx.eval(a)
     med, best = timed(lambda: mx.sum(a), reps)
-    del a
+    a = None  # release (captured by the timed lambda) before clear_cache
     mx.clear_cache()
     return (gb * 2**30) / (best / 1e3) / 1e9
 

@@ -3,6 +3,14 @@
 # Scope and earlier grants: provenance/LICENSE-calculator-scope.json
 # Terms: provenance/LICENSE-calculator.txt
 """Exact GPU calculator differential checks; run only inside an owned GPU window."""
+import sys as _tree_sys  # mlx2 worktree bootstrap: import this tree's src, not the editable install
+from pathlib import Path as _TreePath
+
+_tree_src = str(_TreePath(__file__).resolve().parents[2] / "src")
+if _tree_src not in _tree_sys.path[:1]:
+    _tree_sys.path.insert(0, _tree_src)
+del _tree_sys, _TreePath, _tree_src
+
 import argparse,json,random,subprocess,time
 from pathlib import Path
 from mlx2.runtime import amoeba_det_tiles as D

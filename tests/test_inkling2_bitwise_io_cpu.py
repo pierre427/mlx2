@@ -347,7 +347,10 @@ def test_ring_direct_with_default_policy_options(monkeypatch):
     from mlx2.adapters.inkling2 import KERNEL_DEFAULTS
 
     options = {k: v for k, v in KERNEL_DEFAULTS.items()
-               if isinstance(v, bool) and k not in ("moe_fused", "fuse_sconv_kernel")}
+               if isinstance(v, bool) and k not in ("moe_fused", "fuse_sconv_kernel",
+                                                    # need moe_fused (decode kernel default on, b8d842edf)
+                                                    "moe_decode_kernel", "moe_panel_kernel",
+                                                    "moe_weighted_sum", "compile_decode_blocks")}
     model = _tiny_model()
     tokens = mx.random.randint(0, 500, (1, 30))
     plan = [(0, 9), (9, 17)] + [(i, i + 1) for i in range(17, 30)]

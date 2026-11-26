@@ -56,6 +56,7 @@ from ..technologies import hyper_connections as _hc
 from .activations import swiglu
 from .base import BaseModelArgs, create_attention_mask, scaled_dot_product_attention
 from .cache import BatchKVCache, KVCache
+from .import_env import snapshot as _import_env_snapshot
 from .switch_layers import SwitchGLU
 from ..technologies.drafter_blocks import STREAM_SUM_FUSION, fuse_mtp_module
 from ..technologies.moe_router import cached_spec, route as _route_reference
@@ -148,6 +149,7 @@ if ROW_EXACT_VERIFY not in ("off", "layerwise", "serial"):
     raise ValueError("MLX2_MAXWELL_ROW_EXACT_VERIFY must be off, layerwise or serial")
 if HEAD_MODE not in ("fp32", "bf16"):
     raise ValueError("MLX2_MAXWELL_HEAD must be fp32 or bf16")
+_import_env_snapshot(__name__)
 
 STATS = {"dense_calls": 0, "sparse_gather_calls": 0, "sparse_masked_calls": 0,
          "sparse_union_calls": 0, "union_blocks": 0, "union_subchunks": 0,

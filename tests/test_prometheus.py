@@ -886,3 +886,23 @@ def test_every_isolated_finish_cleanup_step_is_exported():
         assert f"finish_cleanup_failures_{step}" in {
             **prometheus._ENGINE_EVENTS, **prometheus._OPTIONAL_ENGINE_EVENTS
         }
+
+
+def test_technology_counters_render_from_the_snapshot_beside_execution():
+    # Morning 2026-11-26: process-wide technology dispatch counts are a
+    # serving snapshot key, not part of route-owned ``execution``.
+    engine = FakeEngine()
+    engine.snapshot["execution"] = {"decode_wins": {}}
+    engine.snapshot["technologies"] = {
+        "selections": [{"technology": "demo", "operation": "op",
+                        "path": "reference", "count": 2}],
+        "refusals": [{"technology": "demo", "operation": "op", "path": "fast",
+                      "code": "geometry", "count": 2}],
+    }
+    rendered = render_engine_metrics(engine)
+    assert ('mlx2_technology_dispatch_total{operation="op",path="reference",'
+            'technology="demo"} 2') in rendered
+    assert ('mlx2_technology_refusals_total{code="geometry",operation="op",'
+            'path="fast",technology="demo"} 2') in rendered
+    engine.snapshot["technologies"] = None
+    assert "mlx2_technology_dispatch_total{" not in render_engine_metrics(engine)

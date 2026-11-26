@@ -47,7 +47,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import math
 import os
 import random
 import re
@@ -226,7 +225,6 @@ class Model:
         return mx.concatenate([out[:, :1], out[:, 1:] + d], axis=1)
 
     def width(self):
-        import mlx.core as mx
         rec = {0: []}
         self.patch(0)
         self.record = rec

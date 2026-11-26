@@ -73,7 +73,6 @@ def main():
     ap.add_argument("--bench", type=int, default=0, help="stop after this many batches (throughput probe)")
     a = ap.parse_args()
     import mlx.core as mx
-    from research.amoeba.carve import __main__ as D
     from research.amoeba.carve import ops as O
     from research.amoeba.carve.host import Host
     out = Path(a.out)

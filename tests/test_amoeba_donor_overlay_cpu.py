@@ -297,7 +297,9 @@ def _fixture(tmp_path, n_fit=40, n_held=30, n_res=10, L=30):
     return probes, mp
 
 
-def _loader(donor_seed=11):
+# Seed 12: 089ac4e63 (2026-11-25) widened the shared _tiny_hybrid fixture (key head dim 8 -> 32) and with
+# the old seed 11 the donor won no training text, so ov_sink_sft trained nothing. The arm needs donor wins.
+def _loader(donor_seed=12):
     models = {"host": _tiny(3), "donor": _tiny(donor_seed)}
 
     def load(path):

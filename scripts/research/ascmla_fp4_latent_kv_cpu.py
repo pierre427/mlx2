@@ -10,7 +10,7 @@ import json, os, struct, sys
 import numpy as np
 
 ROOT = sys.argv[1] if len(sys.argv) > 2 else os.environ.get(
-    "MLX2_XING4_CHECKPOINT", os.path.expanduser("~/Models/Xing4.0-29B-A4B"))
+    "MLX2_XING4_CHECKPOINT", os.path.join(os.path.expanduser("~"), "Models", "Xing4.0-29B-A4B"))
 rng = np.random.default_rng(1121)
 
 

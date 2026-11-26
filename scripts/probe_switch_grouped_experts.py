@@ -187,7 +187,7 @@ def main():
                     f"{n}={c['median_ms']:.3f}ms({c['speedup_vs_stock']:.2f}x)" for n, c in cell["arms"].items()
                     if "median_ms" in c), flush=True)
         record["layers"].append(lrec)
-        del block, sw, tables
+        block = sw = tables = None  # release (captured by the arm closures above)
         shards.clear()
         mx.clear_cache()
     a.out.parent.mkdir(parents=True, exist_ok=True)

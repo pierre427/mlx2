@@ -1751,9 +1751,10 @@ def _add_maxwell(builder: PrometheusBuilder, execution: Mapping[str, Any]) -> No
                           "Largest query chunk that gathers routed blocks.", rows)
 
 
-def _add_technologies(builder: PrometheusBuilder, execution: Mapping[str, Any]) -> None:
-    """Shared per-technology dispatch counters (runtime/technologies/dispatch)."""
-    technologies = execution.get("technologies")
+def _add_technologies(builder: PrometheusBuilder, snapshot: Mapping[str, Any]) -> None:
+    """Shared per-technology dispatch counters (runtime/technologies/dispatch),
+    published process-wide as the serving snapshot's ``technologies``."""
+    technologies = snapshot.get("technologies")
     if not isinstance(technologies, Mapping):
         return
 
@@ -3042,7 +3043,7 @@ def render_engine_metrics(
     execution = snapshot.get("execution")
     if isinstance(execution, Mapping):
         _add_execution(builder, execution)
-        _add_technologies(builder, execution)
+    _add_technologies(builder, snapshot)
     spomin = snapshot.get("spomin_live_surgery")
     if isinstance(spomin, Mapping):
         for event, value in sorted((spomin.get("counts") or {}).items()):

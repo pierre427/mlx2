@@ -153,7 +153,7 @@ def test_tree_walk_exact(seed, target):
     block = TreeDraftRow(tokens, parents)
 
     def run(ex):
-        lane = SimpleNamespace(anchor=-1, base=[11, 12], history=None,
+        lane = SimpleNamespace(anchor=-1, base=[11, 12], history=None, processors=None,
                                rng=SymRequestRNG(ex), sampling={"emit_logprobs": False})
         lane.history = list(lane.base)
         # history = base + [anchor] + path tokens; strip base+anchor below

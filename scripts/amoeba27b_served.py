@@ -118,8 +118,6 @@ def no_evidence(ta, tb):
 
 
 def near_tie_probe(base, width, ref):
-    from mlx2.near_tie import near_tie_equivalent
-    out = []
     bodies = [probe_body(p) for p, _ in PROBES]
     with ThreadPoolExecutor(max_workers=width) as ex:
         resps = list(ex.map(lambda b: post(base, b), bodies)) if width > 1 else [post(base, b) for b in bodies]

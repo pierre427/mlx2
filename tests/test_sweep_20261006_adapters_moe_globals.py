@@ -204,6 +204,9 @@ _MODEL_OWNER = {
     "flash_next_tree": "flash_next",
     "hy_v4_flash_ast": "hy_v4_flash",
     "hy_v4_flash_memory": "hy_v4_flash",
+    # Ling-3.2-air vision wrapper around the loaded text model; Ling32AirAdapter
+    # inherits the Ling3FlashAdapter construction that claims the globals.
+    "ling32_air_vl": "ling3_flash",
 }
 _CLAIMS = ("claim_stock_moe(self", "claim_moe(self", "MOE_RHS_PAD_POLICY")
 

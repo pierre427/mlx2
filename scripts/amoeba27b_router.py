@@ -226,8 +226,6 @@ def main():
         tiles = [tid for tid, tt in tile_topics.items() if set(tt) & set(on)]
         return on, tiles
     # diagnostic only: what the 20x20 sanity prompts would open (never used to fit or choose thresholds)
-    import importlib.util
-    spec = importlib.util.spec_from_file_location("sl", Path(__file__).resolve().parent / "amoeba_sanity_lanes.py")
     diag = {}
     try:
         sys.argv = ["x", "http://127.0.0.1:1", "/dev/null"]

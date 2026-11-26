@@ -59,7 +59,7 @@ def _ling():
     args = SimpleNamespace(hidden_size=D, moe_intermediate_size=F, num_experts=E, num_experts_per_tok=K, use_bias=False,
                            moe_shared_expert_intermediate_size=F, num_shared_experts=1, intermediate_size=F, n_group=1,
                            topk_group=1, norm_topk_prob=True, routed_scaling_factor=1.0, score_function="sigmoid",
-                           moe_router_enable_expert_bias=True)
+                           moe_router_enable_expert_bias=True, vendor_v32_laws=False, router_dtype=None)
     return bh.SparseMoeBlock(args)
 
 

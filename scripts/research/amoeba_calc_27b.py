@@ -17,7 +17,7 @@ import runpy, signal, subprocess, sys, time, urllib.request
 from fractions import Fraction
 
 ROOT=Path(__file__).resolve().parents[2]
-sys.path[:0]=[str(ROOT/'scripts/research'),str(ROOT/'scripts'),str(ROOT)]
+sys.path[0:0]=[str(ROOT/'src'),str(ROOT/'scripts/research'),str(ROOT/'scripts'),str(ROOT)]
 MODEL=Path.home()/'mlx-models/Qwen3.8-27B-BF16-q8-mlx2'
 
 

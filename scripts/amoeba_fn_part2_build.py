@@ -177,7 +177,6 @@ def main():
     fitsel = np.ones(S, bool)
     if a.fit_field:
         fitsel = np.array([rows[i].get(a.fit_field) == "fit" for i, _ in order])
-    Xall = X
     X = X[:, fitsel]
     X -= X.mean(1, keepdims=True)
     X /= np.linalg.norm(X, axis=1, keepdims=True) + 1e-12

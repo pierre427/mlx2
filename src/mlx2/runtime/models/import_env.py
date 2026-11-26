@@ -36,6 +36,10 @@ PREFIXES = (
     "MLX_ENABLE_TF32",
     # deepseek_v41 reads this opt-in once at import (Recon 2026-11-07).
     "MLX2_DS41_PACKED_INDEX_DECODE_ONCE",
+    # maxwell_moe reads its operator levers once at import (Maxwell-V1-Flash 2026-11-22).
+    "MLX2_MAXWELL_",
+    # hy_v4_flash_buckets latches its small-call path at import (2026-11-23).
+    "MLX2_HY4_BUCKET_",
 )
 
 _SNAPSHOTS: Dict[str, Dict[str, str]] = {}

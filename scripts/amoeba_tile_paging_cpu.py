@@ -25,9 +25,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import math
 import os
-import re
 import subprocess
 import sys
 import tempfile
@@ -267,7 +265,6 @@ def main():
     hook.all_boxes = boxes
     prog, rand, prog_info = prog_tile(core)
     rest = ((1 - core) * (1 - prog)).clamp(0, 1)
-    allbox = torch.stack([b[1] for b in boxes]).amax(0)
     arms = {"full": (None, []), "core": (core, []), "core+prog": (core + prog, []),
             **{f"core+rand{i}": (core + r, []) for i, r in enumerate(rand)},
             "core+rest": (core + rest, []), "core+boxes": (core, boxes), "core+prog+boxes": (core + prog, boxes)}

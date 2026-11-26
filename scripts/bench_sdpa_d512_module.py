@@ -71,7 +71,7 @@ def main() -> int:
             rows.append(row)
             print(json.dumps({k: (round(v, 3) if isinstance(v, float) else v)
                               for k, v in row.items()}), flush=True)
-            del q, k, v, stock
+            q = k = v = stock = None  # release (captured by the timed lambdas above)
     receipt = {"script": "scripts/bench_sdpa_d512_module.py", "mlx_version": mx.__version__,
                "device": mx.device_info(), "kernel_version": d512.VERSION,
                "mlx2_commit": subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True,

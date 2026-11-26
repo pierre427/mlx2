@@ -13,7 +13,7 @@ for n in ("hanning", "mel_filters", "stft"): setattr(dsp, n, None)
 sys.modules["mlx_audio"] = stub; sys.modules["mlx_audio.dsp"] = dsp
 sys.path.insert(0, MLX2 + "/src")
 import mlx.core as mx
-from mlx.utils import tree_flatten, tree_map
+from mlx.utils import tree_flatten
 mx.set_default_device(mx.cpu if dev == "cpu" else mx.gpu)
 from mlx2.runtime.models.inkling2 import Model, TextConfig
 sys.path.insert(0, UP)

@@ -42,7 +42,6 @@ def main():
     ap.add_argument("--swap-growth-gb", type=float, default=2.0)
     ap.add_argument("--swap-waiver-note", default="")
     a = ap.parse_args()
-    import mlx.core as mx
     from research.amoeba.carve import __main__ as D
     from research.amoeba.carve import evals as E
     from research.amoeba.carve import ops as O

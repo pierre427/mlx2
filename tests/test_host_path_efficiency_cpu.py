@@ -28,6 +28,13 @@ def external_class():
         if isinstance(n, ast.FunctionDef)
         and n.name in {"_propose", "_draft_accepts_processors"}
     ]
+    # Constant class defaults (e.g. ``predraft = False``) exist so instances
+    # built without ``__init__`` keep the off behaviour; carry them over.
+    defaults = [
+        n
+        for n in cls.body
+        if isinstance(n, ast.Assign) and isinstance(n.value, ast.Constant)
+    ]
 
     class Row:
         def __init__(self, tokens, laws, width, features=None):
@@ -59,7 +66,11 @@ def external_class():
         if isinstance(n, ast.FunctionDef) and n.name in {"_speculation_parked"}
     ]
     shell = ast.ClassDef(
-        name="Executor", bases=[], keywords=[], body=methods, decorator_list=[]
+        name="Executor",
+        bases=[],
+        keywords=[],
+        body=[*defaults, *methods],
+        decorator_list=[],
     )
     exec(  # noqa: S102 - owned AST executed with host doubles
         compile(
@@ -327,6 +338,8 @@ def test_real_serving_snapshot_collectors_run_outside_admission_lock():
         "execution_headroom": lambda: checked("headroom", 1),
         "spomin_manager": None,
         "_loop_trace": SimpleNamespace(enabled=lambda: False),
+        "_round_probe_status": lambda: checked("round_probe", {}),
+        "_technology_counters": lambda: checked("technologies", None),
     }
     exec(  # noqa: S102 - owned AST executed with host doubles
         compile(
@@ -336,7 +349,7 @@ def test_real_serving_snapshot_collectors_run_outside_admission_lock():
         ),
         ns,
     )
-    assert len(calls) == 8
+    assert len(calls) == 10
     capsules.counters["bytes"] = 9
     assert self.snapshot["cache_capsules"] == {"bytes": 4}
     assert self.snapshot["old"] is True

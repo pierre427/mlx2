@@ -75,6 +75,34 @@ def test_production_adapter_diagnostics_use_bounded_default_provider():
     assert set(delta.values()) == {1}
 
 
+def test_process_wide_technology_counters_stay_out_of_route_diagnostics():
+    # Morning 2026-11-26: b1c1ad7b6 merged the process-wide KernelRegistry
+    # counters into every route snapshot once any technology had dispatched,
+    # so route receipts depended on which other code ran in the process.
+    from mlx2 import serving
+    from mlx2.runtime.technologies.dispatch import (
+        FastPath, KernelRegistry, reset_counters,
+    )
+
+    reset_counters()
+    try:
+        assert serving._technology_counters() is None
+        registry = KernelRegistry("demo.op", reference=lambda: "ref")
+        registry.register(
+            FastPath("fast", admits=lambda spec, **s: "geometry: no", run=lambda: "fast")
+        )
+        registry.select(object())
+        adapter = SimpleNamespace(diagnostics=lambda: {"calls": 9})
+        assert route_diagnostics_snapshot(adapter) == {"calls": 9}
+        assert serving._execution_diagnostics(adapter) == {"calls": 9}
+        counters = serving._technology_counters()
+        assert counters["selections"] == [
+            {"technology": "demo", "operation": "op", "path": "reference", "count": 1}
+        ]
+    finally:
+        reset_counters()
+
+
 def test_segmented_mtp_qsa_alias_is_versioned_for_one_cycle():
     from mlx2.runtime.segmented_self_mtp import (
         note_segmented_self_mtp,

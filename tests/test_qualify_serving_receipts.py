@@ -575,17 +575,34 @@ def test_delta_validator_refuses_a_changed_conftest(tmp_path):
         )
 
 
-def test_write_preflight_delta_refuses_a_change_no_test_reaches(tmp_path):
-    tree = qualify.preflight_tree()
+def test_write_preflight_delta_refuses_a_change_no_test_reaches(tmp_path, monkeypatch):
+    # The writer must surface the selector's refusal.  This runs over a
+    # synthetic tree: the real tree no longer has any location an unnamed file
+    # can sit in unreached, because research scripts such as
+    # scripts/research/inkling2_fuse_ab.py (loaded by a test since e639e0c96)
+    # glob a non-literal pattern over docs/, src/, scripts/ and tests/, which
+    # the lexical selector correctly over-selects as reading every file there.
+    root = tmp_path / "repo"
+    tree = _tmp_tree(root, {
+        "tests/test_a.py": "x = 1\n",
+        "scripts/tool.py": "pass\n",
+    })
+    selector = qualify.preflight_impacted_tests
+    monkeypatch.setattr(
+        qualify, "preflight_impacted_tests",
+        lambda changes, current: selector(changes, current, root=root),
+    )
     base = _full_base(tmp_path, tree)
-    # Built at run time so that this module's own text does not name it.
-    orphan = "scripts/fixtures/" + "_".join(["nothing", "names", "this"]) + ".json"
+    orphan = "scripts/fixtures/orphan.json"
+    (root / orphan).parent.mkdir(parents=True)
+    (root / orphan).write_text("{}\n")
     current = _edited(tree, orphan)
-    with pytest.raises(AssertionError, match="full preflight"):
+    with pytest.raises(AssertionError, match="orphan.json.*full preflight"):
         qualify.write_preflight_delta(
             tmp_path / "delta.json", base, run=_passing_run(),
             identity_fn=lambda: _BOUND, tree_fn=lambda: current,
         )
+    assert not (tmp_path / "delta.json").exists()
 
 
 def test_real_tree_delta_reruns_importers_of_a_changed_test_module(tmp_path):

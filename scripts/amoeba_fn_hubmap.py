@@ -724,7 +724,6 @@ def stage_select(a, out, ctx, prof, guard, state):
         return json.loads(pj.read_text()), dict(np.load(p))
     S, U = prof["S"], prof["U"]
     K = len(FAMILIES)
-    off = np.cumsum([0] + prof["site_units"])
     # per-context per-layer breadth-flag rates, for the independence null
     rates = np.array([[prof["rates"][c["name"]][f"d>={a.breadth_d}"][s] for s in range(S)] for c in ctx]) \
         if f"d>={a.breadth_d}" in prof["rates"][ctx[0]["name"]] else None
@@ -816,13 +815,11 @@ def stage_hubrows(a, out, ctx, prof, sel_info, sel, guard, state):
         if str(z.get("stamp")) == stamp:
             return z
     C, U, S = prof["C"], prof["U"], prof["S"]
-    K = len(FAMILIES)
     off = np.cumsum([0] + prof["site_units"])
     hub_idx = np.sort(sel["hub_idx"])
     cat = sel["cat"]
     D = Rows(out / "d16.rows", C, U, np.float16)
     FL = Rows(out / "flags.rows", C, U, np.uint8)
-    fam = fam_index(ctx)
     ov = np.zeros((C, C), np.int64)
     ctx_hub = np.zeros(C, np.int64)
     exp_counts = np.zeros((S, 512), np.int32)
@@ -1355,7 +1352,7 @@ def main():
     ap.add_argument("--guard-interval", type=float, default=3.0)
     ap.add_argument("--drop-recheck-s", type=float, default=6.0,
                     help="after a sharp free-page drop, re-sample this many seconds later; pause only if it stayed down")
-    ap.add_argument("--pause-file", default="~/amoeba-runs/HUBMAP_PAUSE")
+    ap.add_argument("--pause-file", default=str(Path.home() / "amoeba-runs/HUBMAP_PAUSE"))
     ap.add_argument("--no-guard", action="store_true", help="tests only")
     ap.add_argument("--yield-after-s", type=float, default=300.0,
                     help="exit with code 75 when a pause lasts longer (releases memory; rerun resumes); 0: never")

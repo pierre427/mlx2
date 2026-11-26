@@ -110,7 +110,7 @@ def test_astc2_confirmed_stop_is_accepted_without_committing_stop_state():
     g.tree_gates = {'logprobs_on_request': True}
     g.scheduler_stats = {}
     g._target_law = lambda *a, **kw: None
-    lane = SimpleNamespace(anchor=9, history=[], sampling={'emit_logprobs': False}, rng=SimpleNamespace(sample=lambda law: next(samples)))
+    lane = SimpleNamespace(anchor=9, history=[], processors=None, sampling={'emit_logprobs': False}, rng=SimpleNamespace(sample=lambda law: next(samples)))
     samples = iter([5, 0])
     block = TreeDraftRow([5, 0], [-1, 0])
     import numpy as np

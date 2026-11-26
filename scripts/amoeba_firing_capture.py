@@ -23,7 +23,6 @@ Usage: amoeba_firing_capture.py --model M --out DIR --corpus eng=E.jsonl --corpu
 from __future__ import annotations
 
 import argparse
-import glob
 import hashlib
 import json
 import os

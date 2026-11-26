@@ -409,7 +409,6 @@ def group_gates(arm, groups, names):
 
 
 def part_q(a, host, log, receipt):
-    import mlx.core as mx
     pd = Path(a.partition)
     prep = json.loads((pd / "partition.json").read_text())
     tz = np.load(pd / "tiles.npz")

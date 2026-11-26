@@ -513,7 +513,7 @@ def do_code(a):
             if len(t) < MIN or len(t) > 400_000 or max(map(len, t.splitlines() or [""])) > 1000:
                 continue
             rel = str(p.relative_to(d))
-            k = (h := int(hashlib.sha256(rel.encode()).hexdigest()[:6], 16)) % max(1, len(t) // MAX + 1)
+            k = int(hashlib.sha256(rel.encode()).hexdigest()[:6], 16) % max(1, len(t) // MAX + 1)
             body = t[k * MAX: k * MAX + MAX] if len(t) > MAX else t
             cut = body.rfind("\n", 0, MAX)
             body = body[: cut if cut > MIN else MAX]
@@ -580,7 +580,6 @@ def do_cyber(a):
     o = Out(Path(a.out) / "cyber.jsonl")
     guard = open(Path(a.out) / "cyber-eval-guard.shingles", "w")
     skipped = Counter()
-    rng_keep = {}
     for d in sorted(Path(a.src).glob("*-20261118")):
         if not (d / "SOURCE.json").exists():
             continue

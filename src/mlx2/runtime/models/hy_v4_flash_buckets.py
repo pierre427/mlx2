@@ -31,6 +31,8 @@ from pathlib import Path
 
 import numpy as np
 
+from .import_env import snapshot as _import_env_snapshot
+
 SCHEMA = "mlx2.hy4-expert-buckets.v1"
 LAW = "bucketed-zero-mask-v1"
 SLICE_MIN_ASSIGNMENTS = 4096
@@ -44,6 +46,7 @@ SLICE_MIN_ASSIGNMENTS = 4096
 # run far below the stock kernels' efficiency); kept as an explicit research option, never a default.
 SMALL_PATHS = ("remap", "sliced", "fanout")
 SMALL_PATH = os.environ.get("MLX2_HY4_BUCKET_SMALL_PATH", "remap")
+_import_env_snapshot(__name__)
 FANOUT_MAX_ROWS = 16384          # block rows per fan-out chunk (bounds the float32 partials)
 PROJ = ("gate_proj", "up_proj", "down_proj")
 PARTS = ("weight", "scales", "biases")

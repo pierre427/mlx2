@@ -644,9 +644,9 @@ def run_model(model, a, log, cells):
                         return extra
                     extra = guarded(checks)
                 emit(cell, r, extra)
-        del packedw, blocks
+        packedw = blocks = None  # release (captured by the arm closures above)
         mx.clear_cache()
-    del weights, flat, mods
+    weights = flat = mods = None  # release (captured by the arm closures above)
     for key in [k for k in RAW if k[0] == model]:
         del RAW[key]
     mx.clear_cache()
@@ -660,9 +660,7 @@ def gate_cells(model, names, d, xs, rng, a, log, cells, emit):
     one call.  Arms: fused kernel, split kernels, the same two on the token law, host token law
     (ids already on the host -> closure -> upload), host probe law (numpy; needs h on the host, a
     sync in a real loop).  ``auto_impl`` records what the default picks for that shape."""
-    import mlx.core as mx
     from mlx2.runtime.amoeba_blocks import layout as L
-    from mlx2.runtime.amoeba_blocks import ops as O
     real = L.graph_from_partition_names(names)
     # a wide synthetic graph (416 boxes = 13 words, the tile count of the real one): where split's
     # one-threadgroup-per-word parallelism exists

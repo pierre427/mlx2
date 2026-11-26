@@ -104,7 +104,7 @@ def _run_ladder(tmp_path, monkeypatch, *, answer, cached, warm_ids=(5, 6), extra
     status = {"status": "ok", "artifact": "sha256:routedigest",
               "execution": {"checkpoint": "m@sha256:artifactprint"}}
     monkeypatch.setattr(transformers.AutoTokenizer, "from_pretrained", lambda *a, **k: object())
-    monkeypatch.setattr(ladder, "build_prompt", lambda tok, cell, depth, code, offset: ("prompt text", cell))
+    monkeypatch.setattr(ladder, "build_prompt", lambda tok, cell, depth, code, offset, long_answer=False: ("prompt text", cell))
     monkeypatch.setattr(ladder.subprocess, "Popen", lambda *a, **k: _Server())
     monkeypatch.setattr(ladder, "get_json", lambda base, path, timeout=10: status)
     monkeypatch.setattr(ladder, "post_json", lambda *a, **k: {"cleared": True})
@@ -169,9 +169,10 @@ def test_ladder_fails_when_the_warm_arm_restored_nothing(tmp_path, monkeypatch, 
     assert report["verdict"]["warm_misses"] == [1024]
 
 
-def test_ladder_only_counts_a_cold_warm_token_mismatch(tmp_path, monkeypatch):
+def test_ladder_fails_on_a_cold_warm_token_mismatch(tmp_path, monkeypatch):
+    # d52f055d9 (2026-11-25): width-one cold/warm replay of one route requires exact token parity.
     rc, report = _run_ladder(tmp_path, monkeypatch, answer="{code}", cached=999, warm_ids=(5, 7))
-    assert rc == 0 and report["status"] == "completed"
+    assert rc == 1 and report["status"] == "failed: 1 cold warm mismatches"
     assert report["verdict"]["cold_warm_mismatches"] == [1024]
 
 

@@ -336,6 +336,7 @@ INLINE_PROFILE_MODULES = [
     ("inkling", "InklingAdapter"),
     ("inkling2", "Inkling2Adapter"),
     ("maxwell_moe", "MaxwellMoeAdapter"),
+    ("nemotron36_academia", "Nemotron36AcademiaAdapter"),
 ]
 
 # These adapters inherit the guarded loader instead of defining a separate

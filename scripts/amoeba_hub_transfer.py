@@ -79,7 +79,6 @@ sys.path.insert(0, str(ROOT / "scripts"))
 sys.path.insert(0, str(ROOT / "src"))
 import amoeba_gsm549 as g549  # noqa: E402
 import amoeba_hub_align as ha  # noqa: E402
-import amoeba_transplant_screen as screen  # noqa: E402
 import probe_amoeba_unit_box as pb  # noqa: E402
 
 STATE = {}  # receipt written on any failure (see __main__)

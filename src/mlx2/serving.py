@@ -74,6 +74,16 @@ def _round_probe_status():
     return _round_probe.status()
 
 
+def _technology_counters():
+    """Process-wide technology dispatch counts (runtime/technologies), or
+    None until a technology reference has dispatched.  Published beside
+    ``execution`` because they are not owned by the serving route."""
+    from .runtime.technologies.dispatch import counters_snapshot
+
+    counters = counters_snapshot()
+    return counters if counters["selections"] else None
+
+
 # Execution-policy keys the serving engine owns; every other key is passed to
 # the adapter factory, which validates it.  One list so offline tools (the
 # profiler's --dry-run) split a policy exactly as the engine does.
@@ -14149,6 +14159,7 @@ class ServingEngine(KernelReloadMixin):
                     "scheduler": dict(batch.scheduler_stats),
                     "segmented_self_mtp": segmented_self_mtp_stats(),
                     "round_probe": _round_probe_status(),
+                    "technologies": _technology_counters(),
                     "spomin_live_surgery": (
                         spomin_manager.snapshot()
                         if spomin_manager is not None
@@ -18349,6 +18360,7 @@ class ServingEngine(KernelReloadMixin):
                             "scheduler": dict(batch.scheduler_stats),
                             "segmented_self_mtp": segmented_self_mtp_stats(),
                             "round_probe": _round_probe_status(),
+                            "technologies": _technology_counters(),
                             "metal_active_bytes": mx.get_active_memory(),
                             "metal_peak_bytes": mx.get_peak_memory(),
                             "process_physical_footprint_bytes": physical_footprint_bytes(),
