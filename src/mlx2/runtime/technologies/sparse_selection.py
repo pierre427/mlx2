@@ -306,11 +306,11 @@ def select_groups(spec: SelectionSpec, scores, own, *, fill=-1):
     """
     groups = scores.shape[-1]
     k = min(spec.topk - 1, groups)
-    own_col = mx.broadcast_to(own[None, :, None], (*scores.shape[:-1], 1))
+    own_col = mx.broadcast_to(own[:, None], (*scores.shape[:-1], 1))
     if k <= 0:
         return own_col
     picked = topk(spec, scores, k).astype(mx.int32)
-    valid = mx.arange(groups)[None, None, :] < own[None, :, None]
+    valid = mx.broadcast_to(mx.arange(groups) < own[:, None], scores.shape)
     picked = mx.where(mx.take_along_axis(valid, picked, axis=-1), picked, fill)
     return mx.concatenate([picked, own_col], axis=-1)
 

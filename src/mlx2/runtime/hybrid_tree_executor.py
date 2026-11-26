@@ -31,17 +31,17 @@ _SNAPSHOT = SnapshotBranchOps()
 class _SerialLane:
     """One request's private per-node snapshots (the serial reference)."""
 
-    def __init__(self, live, branches):
+    def __init__(self, live, branches, topology):
         self.live = live
         self.branches = branches
+        self.topology = topology
 
     def validate_path(self, path):
-        # The serial lane publishes its terminal node's snapshot; it only
-        # requires a nonempty path that ends inside the tile.
         if not path:
             raise RuntimeError("hybrid tree transaction needs one nonempty path")
-        if not 0 <= int(path[-1]) < len(self.branches):
+        if type(path[-1]) is not int or not 0 <= path[-1] < len(self.branches):
             raise ValueError("hybrid tree commit path is outside the tile")
+        self.topology.validate_path(path)
 
     def prepare_commit(self, path):
         return _SNAPSHOT.prepare_commit(self.live, self.branches, int(path[-1]))
@@ -51,10 +51,12 @@ class HybridTreeTransaction(TreeLaneTransaction):
     protocol = PROTOCOL
     count_error = "hybrid tree transaction needs one nonempty path"
 
-    def __init__(self, live, branches, *, token):
+    def __init__(self, live, branches, *, token, topology=None):
         self.live = live
         self.branches = branches
-        super().__init__([_SerialLane(live, branches)], token)
+        if topology is None:
+            topology = TreeTopology(range(-1, len(branches) - 1), TOPOLOGY)
+        super().__init__([_SerialLane(live, branches, topology)], token)
 
     def commit(self, *, accepted_lengths):
         if len(accepted_lengths) != 1:
@@ -74,6 +76,11 @@ class HybridTreeCohortTransaction(TreeLaneTransaction):
         self.transactions = transactions
         super().__init__([lane for item in transactions for lane in item.trees], token)
 
+    def _validated_paths(self, paths):
+        if any(transaction.closed for transaction in self.transactions):
+            raise RuntimeError("hybrid tree cohort contains a closed transaction")
+        return super()._validated_paths(paths)
+
     def _close(self):
         super()._close()
         for transaction in self.transactions:
@@ -87,7 +94,7 @@ def tree_forward(model, tokens, parents, live, layers, token):
     logits, features, branches = _SNAPSHOT.forward_rows(
         model, tokens, topology.parents, live, layers
     )
-    return logits, features, HybridTreeTransaction(live, branches, token=token)
+    return logits, features, HybridTreeTransaction(live, branches, token=token, topology=topology)
 
 
 class HybridTreeExecutor(SourceBoundRevision):
@@ -98,7 +105,7 @@ class HybridTreeExecutor(SourceBoundRevision):
     _revision_error = "hybrid tree executor source changed"
 
     def __init__(self):
-        self._bind_sources((Path(__file__), *TECHNOLOGY_SOURCES))
+        self._bind_sources((Path(__file__), Path(__file__).with_name("cow_cache.py"), *TECHNOLOGY_SOURCES))
         self.source_revision_token = revision_token(self.source_identity)
         self.dispatches = 0
 
@@ -125,6 +132,9 @@ class HybridTreeExecutor(SourceBoundRevision):
     ):
         self.validate_revision()
         self.validate_cohort(len(caches), configured_limit)
+        owners = [id(item) for cache in caches for item in cache]
+        if len(set(owners)) != len(owners):
+            raise ValueError("hybrid tree cohorts require independent cache descriptors")
         outputs, transactions = [], []
         try:
             for row, tree, cache in zip(inputs, parents, caches, strict=True):

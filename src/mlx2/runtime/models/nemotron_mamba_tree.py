@@ -202,7 +202,7 @@ def conv_windows(parents, kernel_size: int = 4) -> list[list[int]]:
         path = [row] if parent < 0 else paths[parent] + [row]
         paths.append(path)
         history = [*range(count), *(count + index for index in path[:-1])]
-        windows.append(history[-count:])
+        windows.append(history[-count:] if count else [])
     return windows
 
 

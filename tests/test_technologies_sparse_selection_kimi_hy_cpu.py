@@ -144,3 +144,15 @@ def test_hy_v4_group_select(key_dtype, tied, group_topk):
         _eq(new, old)
 
 
+
+
+@pytest.mark.parametrize("batch_shape", [(), (2,), (2, 3)])
+def test_hy_group_selection_accepts_any_leading_batch_shape(batch_shape):
+    from mlx2.runtime.technologies.sparse_selection import SelectionSpec, select_groups
+
+    scores = mx.broadcast_to(mx.array([[1., 2.], [2., 1.]]), batch_shape + (2, 2))
+    own = mx.array([0, 1], mx.int32)
+    spec = SelectionSpec(topk=2, tie_break="argpartition_low")
+    got = select_groups(spec, scores, own)
+    expected = mx.broadcast_to(mx.array([[-1, 0], [0, 1]]), batch_shape + (2, 2))
+    assert mx.array_equal(got, expected).item()

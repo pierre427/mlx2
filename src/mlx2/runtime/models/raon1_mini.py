@@ -1178,7 +1178,9 @@ def install_affine(model: Model, config: dict, weight_names) -> dict:
     expected = {n[: -len(".scales")] for n in names if n.endswith(".scales")}
     if counts["linear"] + counts["switch"] != len(expected):
         raise ValueError("Raon affine artifact quantizes modules the model does not expose")
-    return {"format": "mlx2-affine-a4g64-h8g64", "quantized_linears": counts["linear"],
+    recipe = (config.get("mlx2_conversion") or {}).get("recipe")
+    storage = "mlx2-" + recipe.removeprefix("raon1-mini-").removesuffix("-v1") if recipe else "mlx2-affine"
+    return {"format": storage, "quantized_linears": counts["linear"],
             "expert_banks": counts["switch"]}
 
 

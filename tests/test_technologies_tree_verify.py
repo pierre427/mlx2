@@ -781,6 +781,36 @@ def test_hybrid_serial_reference_is_bit_identical(dtype, parents):
             _assert_same_fields(left.__dict__, right.__dict__)
 
 
+def test_serial_tree_refuses_siblings_before_publishing_and_allows_retry():
+    from mlx2.runtime.hybrid_tree_executor import HybridTreeExecutor
+
+    model = _TinyModel(mx.float32)
+    cache = model.make_cache()
+    executor = HybridTreeExecutor()
+    _, _, transaction = executor.forward(model, [3, 4, 5], [-1, 0, 0], cache, (), cached=True)
+    with pytest.raises(ValueError, match="root path"):
+        transaction.commit_paths([[0, 1, 2]])
+    assert not transaction.closed and cache[0].offset == 0
+    transaction.commit_paths([[0, 2]])
+    assert cache[0].offset == 2
+    with pytest.raises(ValueError, match="independent cache descriptors"):
+        executor.forward_many(model, [[3], [4]], [[-1], [-1]], [cache, list(cache)], (),
+                              cached=True, configured_limit=2)
+
+
+def test_hybrid_cohort_cannot_republish_an_aborted_lane():
+    from mlx2.runtime.hybrid_tree_executor import HybridTreeExecutor
+
+    model = _TinyModel(mx.float32)
+    caches = [model.make_cache(), model.make_cache()]
+    _, _, transaction = HybridTreeExecutor().forward_many(
+        model, [[3], [4]], [[-1], [-1]], caches, (), cached=True, configured_limit=2)
+    transaction.transactions[1].abort()
+    with pytest.raises(RuntimeError, match="closed transaction"):
+        transaction.commit_paths([[0], [0]])
+    assert transaction.closed and all(cache[0].offset == 0 for cache in caches)
+
+
 def test_hybrid_cohort_prepares_every_lane_before_publishing():
     from mlx2.runtime.hybrid_tree_executor import HybridTreeExecutor
 
@@ -846,6 +876,7 @@ def test_executors_bind_the_shared_source(cls_path, style):
     assert TV.TREE_VERIFY_SOURCE in executor._sources
     executor.validate_revision()
     identity = dict(executor.source_identity)
+    assert len(identity) == len(executor.source_identity)
     if style == "module":
         assert identity["module"] == module and "tree_verify.py" in identity
     assert executor.receipt()["source_revision_token"] == executor.source_revision_token
@@ -862,7 +893,10 @@ def test_attention_executor_now_refuses_changed_source(tmp_path):
     executor.validate_revision()          # same bytes, new metadata: re-armed
     copy_path.write_bytes(copy_path.read_bytes() + b"\n# edit\n")
     with pytest.raises(RuntimeError, match="source changed"):
-        executor.validate_revision()
+        executor.forward(None, [1], [-1], [], (), cached=True)
+    with pytest.raises(RuntimeError, match="source changed"):
+        executor.forward_many(None, [[1]], [[-1]], [[]], (), cached=True, configured_limit=1)
+    assert executor.dispatches == 0
 
 
 # ---------------------------------------------------------------------------

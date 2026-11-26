@@ -156,15 +156,17 @@ def _kernel(name):
 def site_params(site) -> mx.array:
     """The 23 fp32 site constants (gamma = sigmoid(eta) precomputed)."""
     cached = site.__dict__.get("_fused_params")
-    key = (id(site.alpha_pre), id(site.b_pre), id(site.res.eta), id(site.res.b_z))
-    if cached is None or cached[0] != key:
+    tensors = (site.alpha_pre, site.b_pre, site.alpha_post, site.b_post,
+               site.res.alpha_z, site.res.b_z, site.res.eta, site._consts[3])
+    if (cached is None or cached[2] != site._eps
+            or any(old is not current for old, current in zip(cached[0], tensors))):
         f = lambda a: a.astype(mx.float32).reshape(-1)  # noqa: E731
         params = mx.concatenate([
             f(site.alpha_pre), f(site.b_pre), f(site.alpha_post), f(site.b_post),
             f(site.res.alpha_z), f(site.res.b_z), mx.sigmoid(f(site.res.eta)),
             mx.array([float(site._consts[3]), site._eps], dtype=mx.float32)])
         mx.eval(params)
-        cached = (key, params)
+        cached = (tensors, params, site._eps)
         object.__setattr__(site, "_fused_params", cached)
     return cached[1]
 

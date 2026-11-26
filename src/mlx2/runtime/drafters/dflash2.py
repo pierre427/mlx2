@@ -171,7 +171,7 @@ class CandidateSelector(nn.Module):
         # of position, so it gets the greedy pick rather than a draw that the
         # exact-match verifier would have to guess its way back to.
         sample_candidate = getattr(sampler, "sample_candidate", None)
-        vocab_size = self.predecessor_codebook.weight.shape[0]
+        vocab_size = logits.shape[-1]
         for position in range(hidden.shape[1]):
             edges = mx.sum(
                 self.predecessor_codebook(predecessor)[:, None]
@@ -220,6 +220,7 @@ class DFlash2DraftModel(DFlashDraftModel):
             # implement the post-correction cap, so this drafter offers
             # neither (``_start_tree`` and lattice capture refuse it too).
             object.__setattr__(self, "supports_continuation_tree_reuse", False)
+            object.__setattr__(self, "supports_tree_calibration", False)
 
     @property
     def receipt_settings(self):
@@ -234,9 +235,6 @@ class DFlash2DraftModel(DFlashDraftModel):
             "selector_rank": self.config.selector_rank,
             "conv_kernel_size": self.config.conv_kernel_size,
             "conv_group_size": self.config.conv_group_size,
-            "proposal_distribution": "categorical_chain_plus_bound_best_first_tree",
-            "tree_ranking": "best_first_cumulative_sibling_log_law",
-            "tree_max_nodes": 15,
         }
         # Drafter arithmetic (mlx2), present only when not the artifact's
         # own bf16 weights on stock kernels, so default receipts are unchanged.
@@ -259,6 +257,10 @@ class DFlash2DraftModel(DFlashDraftModel):
         # every existing receipt is unchanged.
         if self.candidate_selector.post_softcap is not None:
             settings["selector_softcap_mode"] = self.config.selector_softcap_mode
+            settings["proposal_distribution"] = "categorical_chain"
+        else:
+            settings.update(proposal_distribution="categorical_chain_plus_bound_best_first_tree",
+                            tree_ranking="best_first_cumulative_sibling_log_law", tree_max_nodes=15)
         embedding = self.__dict__.get("target_embedding_receipt")
         if embedding is not None:
             settings["target_token_embedding"] = embedding
@@ -288,7 +290,6 @@ class DFlash2DraftModel(DFlashDraftModel):
 
     def bind(self, target_model) -> "DFlash2DraftModel":
         self.validate_target_compatibility(target_model)
-        super().bind(target_model)
         # Target-declared draft input terms (mlx2).  A target whose own
         # forward normalizes token embeddings (Inkling 2's embedding RMSNorm)
         # declares ``speculative_token_embedding``: the drafter then embeds
@@ -299,14 +300,8 @@ class DFlash2DraftModel(DFlashDraftModel):
         if self.__dict__.get("_raw_token_embedding"):
             # Diagnostic opt-out survives a re-bind (``reset``).
             embed = None
-        if embed is not None:
-            if not callable(embed):
-                raise ValueError("DFlash2 target speculative_token_embedding must be callable")
-            object.__setattr__(self, "_target_token_embedding", embed)
-            object.__setattr__(
-                self, "target_embedding_receipt",
-                str(getattr(target_model, "speculative_token_embedding_law", "target_declared")),
-            )
+        if embed is not None and not callable(embed):
+            raise ValueError("DFlash2 target speculative_token_embedding must be callable")
         rows = getattr(target_model, "speculative_vocab_rows", None)
         if rows is not None:
             if type(rows) is not int or not 0 < rows <= self.config.vocab_size:
@@ -315,8 +310,20 @@ class DFlash2DraftModel(DFlashDraftModel):
                 raise ValueError("DFlash2 mask_token_id lies in the target's padded head rows")
             if self.config.selector_top_k > rows:
                 raise ValueError("DFlash2 selector_top_k exceeds the target's real vocabulary")
-            if rows != self.config.vocab_size:
-                object.__setattr__(self, "_target_vocab_rows", rows)
+
+        super().bind(target_model)
+        if embed is not None:
+            object.__setattr__(self, "_target_token_embedding", embed)
+            object.__setattr__(self, "target_embedding_receipt",
+                               str(getattr(target_model, "speculative_token_embedding_law", "target_declared")))
+        else:
+            self.__dict__.pop("_target_token_embedding", None)
+            if not self.__dict__.get("_raw_token_embedding"):
+                self.__dict__.pop("target_embedding_receipt", None)
+        if rows is not None and rows != self.config.vocab_size:
+            object.__setattr__(self, "_target_vocab_rows", rows)
+        else:
+            self.__dict__.pop("_target_vocab_rows", None)
         return self
 
     def use_raw_token_embedding(self) -> None:

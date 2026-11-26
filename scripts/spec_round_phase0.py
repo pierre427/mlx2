@@ -41,7 +41,7 @@ instantaneous runnable-process count is the headline contention figure.
 
 ``load`` runs only the generator (calibration). ``report`` joins cell files
 into the go/no-go table of §4.4: Phase 1 is a go for a route when contended
-decode is >= 20 % slower than quiet, or when the quiet host share of round
+round time rises by >= 20 % at unchanged tokens per round, or when the quiet host share of round
 time is >= 15 %. The round period is decode time / rounds as the client sees
 it, so it includes the serving loop between rounds. Host share is (period -
 GPU busy) / period when a usable trace exists, else (encode/submit + host
@@ -69,7 +69,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 SCHEMA = "mlx2.spec-round-phase0.v1"
-GO_CONTENDED_SLOWDOWN = 0.20
+GO_PERIOD_INCREASE = 0.20
 GO_HOST_SHARE = 0.15
 INSTRUCTION = ("\n\nSummarise the kinds of problems listed above in about 150 words, "
                "as plain prose.")
@@ -84,7 +84,7 @@ def _burn(deadline, parent, nice=0):
     if nice:
         os.nice(nice)
     table, spin = {}, 0
-    while time.time() < deadline:
+    while time.monotonic() < deadline:
         for i in range(2000):
             key = f"k{(spin * 2654435761 + i) % 50021}"
             table[key] = [i, key, (i, spin)]
@@ -124,11 +124,15 @@ class LoadGenerator:
 
     def start(self):
         ctx = multiprocessing.get_context("spawn")
-        deadline = time.time() + self.max_seconds
-        for _ in range(self.workers):
-            proc = ctx.Process(target=_burn, args=(deadline, os.getpid(), self.nice), daemon=True)
-            proc.start()
-            self.procs.append(proc)
+        self.deadline = time.monotonic() + self.max_seconds
+        try:
+            for _ in range(self.workers):
+                proc = ctx.Process(target=_burn, args=(self.deadline, os.getpid(), self.nice), daemon=True)
+                proc.start()
+                self.procs.append(proc)
+        except BaseException:
+            self.stop()
+            raise
         return self
 
     def stop(self):
@@ -228,10 +232,6 @@ def per_round(row):
             "by_kind": {kind: round(v["calls"] / rounds, 3)
                         for group in ("explicit_syncs", "implicit_syncs")
                         for kind, v in sorted(row.get(group, {}).items())}}
-
-
-def dominant(routes):
-    return max(routes.items(), key=lambda item: item[1].get("rounds", 0)) if routes else (None, {})
 
 
 # ------------------------------------------------------------- GPU trace --
@@ -377,28 +377,35 @@ def request(client, model, text, max_tokens):
     }, find(result, "round_probe")
 
 
-def measure_cell(client, model, text, args, condition, out_dir, size, server_pid, baseline):
+def measure_cell(client, model, text, args, condition, out_dir, size, server_pid, baseline, load_deadline=None):
     """Warm requests until ``--rounds`` decode rounds; returns (cell, last probe block)."""
     rows, totals, last = [], {}, baseline
     sampler = Sampler()
     sampler.start()
-    started = time.monotonic()
-    for index in range(args.max_requests):
-        row, block = request(client, model, text, args.max_tokens)
-        if not (block or {}).get("enabled"):
-            raise SystemExit("server receipt has no enabled round_probe; start it with MLX2_ROUND_PROBE=1")
-        delta = probe_delta(block, last)
-        last = block
-        row["probe"] = delta
-        rows.append(row)
-        add_deltas(totals, delta)
-        print(json.dumps({"size": size, "condition": condition, "request": index,
-                          "decode_tok_s": row["decode_tok_s"],
-                          "rounds": sum(r["rounds"] for r in delta.values())}), flush=True)
-        booked = sum(r.get("rounds", 0) for r in totals.values())
-        if booked >= args.rounds or (condition == "contended" and
-                                     time.monotonic() - started >= args.cell_max_s):
-            break
+    overran = None
+    try:
+        for index in range(args.max_requests):
+            if load_deadline is not None and time.monotonic() >= load_deadline:
+                break
+            row, block = request(client, model, text, args.max_tokens)
+            if not (block or {}).get("enabled"):
+                raise SystemExit("server receipt has no enabled round_probe; start it with MLX2_ROUND_PROBE=1")
+            delta = probe_delta(block, last)
+            last = block
+            if load_deadline is not None and time.monotonic() > load_deadline:
+                overran = row
+                break
+            row["probe"] = delta
+            rows.append(row)
+            add_deltas(totals, delta)
+            print(json.dumps({"size": size, "condition": condition, "request": index,
+                              "decode_tok_s": row["decode_tok_s"],
+                              "rounds": sum(r["rounds"] for r in delta.values())}), flush=True)
+            booked = sum(r.get("rounds", 0) for r in totals.values())
+            if booked >= args.rounds:
+                break
+    finally:
+        samples = sampler.finish()
     trace = None
     # Trace quiet cells only: the host-share criterion reads the quiet GPU time,
     # and a trace under load would keep the generator running for minutes.
@@ -417,40 +424,52 @@ def measure_cell(client, model, text, args, condition, out_dir, size, server_pid
         tracer = MetalTrace(server_pid, trace_path, args.trace_limit_s)
         trace = {"path": str(trace_path), "status": "unavailable"}
         try:
-            if tracer.start():
-                row, block = request(client, model, text, args.trace_max_tokens)
-                delta = probe_delta(block, last)
-                last = block
-                trace.update(status="recorded", request=row, probe=delta)
-        finally:
-            trace["recorder_returncode"] = tracer.stop()
-        if trace["status"] == "recorded" and trace_path.exists():
             try:
-                rows_xml = export_gpu_intervals(trace_path, out_dir / f"metal-{size}-{condition}.xml")
-                busy = gpu_busy(rows_xml, server_pid)
-                rounds = sum(r["rounds"] for r in trace["probe"].values())
-                wall = sum(r["wall_ns"] for r in trace["probe"].values())
-                traced = trace["request"]
-                truncated = traced["elapsed_s"] >= args.trace_limit_s - 5
-                usable = busy["filter"] == "pid" and not truncated and rounds
-                trace.update(status="parsed" if usable else "unusable", gpu=busy,
-                             truncated=truncated,
-                             unusable_reason=None if usable else (
-                                 "no interval matched the server pid" if busy["filter"] != "pid"
-                                 else "trace time limit reached" if truncated else "no rounds"),
-                             gpu_ms_per_round=(busy["busy_ns"] / rounds / 1e6) if usable else None,
-                             probe_wall_ms_per_round=(wall / rounds / 1e6) if rounds else None,
-                             note="GPU busy includes the request's short warm prefill")
-            except (subprocess.SubprocessError, OSError, ET.ParseError) as error:
-                trace.update(status="export_failed", error=f"{type(error).__name__}: {error}")
-        if trace_path.exists():
-            trace["trace_bytes"] = sum(f.stat().st_size for f in trace_path.rglob("*") if f.is_file()) \
-                if trace_path.is_dir() else trace_path.stat().st_size
-            if not args.keep_traces:
-                shutil.rmtree(trace_path, ignore_errors=True) if trace_path.is_dir() else trace_path.unlink()
-                trace["trace_deleted"] = True
-    samples = sampler.finish()
-    name, top = dominant(totals)
+                if tracer.start():
+                    row, block = request(client, model, text, args.trace_max_tokens)
+                    delta = probe_delta(block, last)
+                    last = block
+                    trace.update(status="recorded", request=row, probe=delta)
+            finally:
+                trace["recorder_returncode"] = tracer.stop()
+            if trace["status"] == "recorded" and trace_path.exists():
+                try:
+                    rows_xml = export_gpu_intervals(trace_path, out_dir / f"metal-{size}-{condition}.xml")
+                    busy = gpu_busy(rows_xml, server_pid)
+                    rounds = sum(r["rounds"] for r in trace["probe"].values())
+                    wall = sum(r["wall_ns"] for r in trace["probe"].values())
+                    traced = trace["request"]
+                    truncated = traced["elapsed_s"] >= args.trace_limit_s - 5
+                    usable = busy["filter"] == "pid" and not truncated and rounds
+                    trace.update(status="parsed" if usable else "unusable", gpu=busy,
+                                 truncated=truncated,
+                                 unusable_reason=None if usable else (
+                                     "no interval matched the server pid" if busy["filter"] != "pid"
+                                     else "trace time limit reached" if truncated else "no rounds"),
+                                 gpu_ms_per_round=(busy["busy_ns"] / rounds / 1e6) if usable else None,
+                                 probe_wall_ms_per_round=(wall / rounds / 1e6) if rounds else None,
+                                 note="GPU busy includes the request's short warm prefill")
+                except (subprocess.SubprocessError, OSError, ET.ParseError) as error:
+                    trace.update(status="export_failed", error=f"{type(error).__name__}: {error}")
+        finally:
+            # start() reserves the log exclusively before launching xctrace.
+            # Only a launched recorder can own a partial bundle here.
+            if tracer.proc is not None and trace_path.exists():
+                trace["trace_bytes"] = sum(f.stat().st_size for f in trace_path.rglob("*") if f.is_file()) \
+                    if trace_path.is_dir() else trace_path.stat().st_size
+                if not args.keep_traces:
+                    if trace_path.is_dir():
+                        shutil.rmtree(trace_path)
+                    else:
+                        trace_path.unlink()
+                    trace["trace_deleted"] = True
+    # Terminal ordinary steps and speculative rounds can share a request.
+    # Both consumed the measured decode interval.
+    combined = {}
+    for counters in totals.values():
+        add_deltas(combined, {"all": counters})
+    top = combined.get("all", {})
+    name = ", ".join(sorted(totals)) or None
     decode = [r["decode_tok_s"] for r in rows if r["decode_tok_s"]]
     decode_s = sum(r["decode_s"] or 0 for r in rows)
     rounds = top.get("rounds", 0)
@@ -462,7 +481,7 @@ def measure_cell(client, model, text, args, condition, out_dir, size, server_pid
         pr["outside_ms"] = round(max(0.0, pr["period_ms"] - pr["wall_ms"]), 4)
     cell = {
         "size": size, "condition": condition, "requests": rows,
-        "route_label": name, "routes": totals,
+        "route_label": name, "routes": totals, "request_past_load_deadline": overran,
         "rounds": rounds,
         "rounds_per_s": (rounds / decode_s) if decode_s and rounds else None,
         "decode_tok_s_median": statistics.median(decode) if decode else None,
@@ -511,26 +530,29 @@ def run(args):
             client.call("/v1/admin/apc/clear", {"reason": f"phase0-{size}"}, admin=True)
             warm, last = request(client, model, prompts[size], 8)  # cold prefill, unmeasured
             generator = None
-            if condition == "contended":
-                generator = LoadGenerator(args.load_workers, args.load_ramp_s + args.cell_max_s + 600,
-                                          nice=args.load_nice).start()
-                time.sleep(args.load_ramp_s)
+            if not (last or {}).get("enabled"):
+                raise SystemExit("warmup receipt has no enabled round_probe")
             try:
+                if condition == "contended":
+                    generator = LoadGenerator(args.load_workers, args.load_ramp_s + args.cell_max_s, nice=args.load_nice)
+                    generator.start()
+                    time.sleep(args.load_ramp_s)
                 cell, last = measure_cell(client, model, prompts[size], args, condition,
-                                          out_dir, size, args.server_pid, last)
+                                          out_dir, size, args.server_pid, last,
+                                          generator.deadline if generator is not None else None)
             finally:
                 if generator is not None:
                     generator.stop()
             cell["warmup"] = warm
             cells.append(cell)
-            (out_dir / f"cell-{size}-{condition}.json").write_text(json.dumps(cell, indent=1) + "\n")
+            gsm.write_atomic(out_dir / f"cell-{size}-{condition}.json", cell)
             if generator is not None:
                 time.sleep(args.cooldown_s)
     status_after = client.call("/v1/status", timeout=30)
     document = {**meta, "finished_at": time.time(), "cells": cells,
                 "round_probe_final": status_after.get("round_probe"),
                 "scheduler_final": status_after.get("scheduler")}
-    (out_dir / "phase0.json").write_text(json.dumps(document, indent=1) + "\n")
+    gsm.write_atomic(out_dir / "phase0.json", document)
     print(json.dumps(summarize(document), indent=1))
 
 
@@ -554,6 +576,7 @@ def summarize(document):
             pr = cell.get("per_round") or {}
             trace = cell.get("metal_trace") or {}
             row[name] = {
+                "rounds": cell.get("rounds"), "rounds_target": document.get("rounds_target"),
                 "route_label": cell.get("route_label"),
                 "decode_tok_s": cell.get("decode_tok_s_median"),
                 "rounds_per_s": cell.get("rounds_per_s"),
@@ -591,12 +614,26 @@ def summarize(document):
         row["host_share_basis"] = basis
         row["quiet_in_round_host_share"] = in_scope
         row["tokens_per_round_drift"] = mal_drift
-        row["phase1_go"] = bool((slowdown is not None and slowdown >= GO_CONTENDED_SLOWDOWN)
-                                or (host_share is not None and host_share >= GO_HOST_SHARE))
-        row["go_reasons"] = [reason for reason, hit in (
-            (f"contended {slowdown:.1%} slower >= 20%" if slowdown is not None else "", slowdown is not None and slowdown >= GO_CONTENDED_SLOWDOWN),
-            (f"quiet host share {host_share:.1%} >= 15%" if host_share is not None else "", host_share is not None and host_share >= GO_HOST_SHARE),
-        ) if hit]
+        target = document.get("rounds_target", 0)
+        quiet_complete = q is not None and (q["rounds"] or 0) >= target
+        pair_complete = quiet_complete and c is not None and (c["rounds"] or 0) >= target
+        period_increase = None
+        if q and c and q["rounds_per_s"] and c["rounds_per_s"]:
+            period_increase = q["rounds_per_s"] / c["rounds_per_s"] - 1
+        row["contended_period_increase"] = period_increase
+        # Comparing different numbers of tokens per round confounds work per
+        # round with host contention on this fixed, greedy prompt.
+        comparable = pair_complete and mal_drift == 0 and period_increase is not None
+        valid_host_share = quiet_complete and host_share is not None
+        reasons = []
+        if comparable and period_increase >= GO_PERIOD_INCREASE - 1e-12:
+            reasons.append(f"contended round period {period_increase:.1%} longer at unchanged tokens/round")
+        if valid_host_share and host_share >= GO_HOST_SHARE:
+            reasons.append(f"quiet host share {host_share:.1%} >= 15%")
+        row["go_reasons"] = reasons
+        row["phase1_go"] = True if reasons else None
+        if not reasons and comparable and valid_host_share:
+            row["phase1_go"] = False
         rows.append(row)
     return {"schema": SCHEMA + ".summary", "rows": rows}
 
@@ -609,17 +646,17 @@ def report(args):
     rows = []
     for path in args.inputs:
         rows.extend(summarize(json.loads(Path(path).read_text()))["rows"])
-    lines = ["| checkpoint | arm | prompt tok | quiet tok/s | contended tok/s | slowdown | tok/round q/c | "
+    lines = ["| checkpoint | mlx2 revision | arm | prompt tok | quiet tok/s | contended tok/s | round time increase | tok/round q/c | "
              "period ms q | in-round ms q | encode ms q | wait ms q | python ms q | between ms q | GPU ms q | "
              "blocking syncs/round q | runnable c (load1) | host share q | Phase 1 |",
-             "|" + "---|" * 18]
+             "|" + "---|" * 19]
     for r in rows:
         q, c = r.get("quiet") or {}, r.get("contended") or {}
         lines.append("| " + " | ".join([
-            str(r["checkpoint"]).split("@")[0], str(r["arm"]),
+            str(r["checkpoint"]), str(r["source_revision"] or "-"), str(r["arm"]),
             fmt(q.get("prompt_tokens") or r["size"], ".0f"),
             fmt(q.get("decode_tok_s")), fmt(c.get("decode_tok_s")),
-            fmt(r["contended_slowdown"], ".1%"),
+            fmt(r["contended_period_increase"], ".1%"),
             f"{fmt(q.get('tokens_per_round'), '.2f')}/{fmt(c.get('tokens_per_round'), '.2f')}",
             fmt(q.get("period_ms"), ".2f"), fmt(q.get("wall_ms"), ".2f"),
             fmt(q.get("encode_submit_ms"), ".2f"), fmt(q.get("wait_ms"), ".2f"),
@@ -627,10 +664,10 @@ def report(args):
             fmt(q.get("gpu_ms"), ".2f"), fmt(q.get("blocking_syncs"), ".1f"),
             f"{fmt(c.get('runnable_median'), '.0f')} ({fmt(c.get('load1_mean'), '.0f')})",
             fmt(r["quiet_host_share"], ".1%"),
-            "go" if r["phase1_go"] else "no-go"]) + " |")
+            {True: "go", False: "no-go", None: "incomplete"}[r["phase1_go"]]]) + " |")
     text = "\n".join(lines) + "\n"
     document = {"schema": SCHEMA + ".report", "rows": rows,
-                "criteria": {"contended_slowdown": GO_CONTENDED_SLOWDOWN, "quiet_host_share": GO_HOST_SHARE}}
+                "criteria": {"contended_period_increase": GO_PERIOD_INCREASE, "quiet_host_share": GO_HOST_SHARE}}
     if args.output:
         Path(args.output).write_text(json.dumps(document, indent=1) + "\n")
         Path(args.output).with_suffix(".md").write_text(text)
@@ -664,7 +701,7 @@ def main(argv=None):
     r.add_argument("--max-requests", type=int, default=10)
     r.add_argument("--max-tokens", type=int, default=256)
     r.add_argument("--load-workers", type=int, default=48)
-    r.add_argument("--load-nice", type=int, default=0,
+    r.add_argument("--load-nice", type=int, choices=range(20), default=0,
                    help="nice increment for the load workers (0 = default priority, as the real pytest load)")
     r.add_argument("--load-ramp-s", type=float, default=10)
     r.add_argument("--cell-max-s", type=float, default=50,

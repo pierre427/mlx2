@@ -37,6 +37,7 @@ import json
 import shutil
 import time
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 
 import mlx.core as mx
@@ -310,15 +311,17 @@ def _untouched(model, planes):
 
 def convert_hq(source: Path, dest: Path, settings: HQSettings | None = None, *, log=print) -> dict:
     """Calibrate on the exact mxfp8e artifact at ``source`` and write the mixed affine artifact."""
+    from .raon1_mini import _publish
+
+    return _publish(source, dest, partial(_write_hq, settings=settings or HQSettings()), log)
+
+
+def _write_hq(source, dest, *, settings, log):
     from ..adapters import raon1_mini as A
     from ..runtime.models import raon1_mini as R
     from ..runtime.ubc_evict import load_shards_evicting
     from transformers import AutoTokenizer
 
-    settings = settings or HQSettings()
-    source, dest = Path(source).expanduser().resolve(), Path(dest).expanduser().resolve()
-    if dest.exists() and any(dest.iterdir()):
-        raise FileExistsError(f"{dest} is not empty")
     artifact = A.inspect_artifact(source)
     if artifact["layout"] != "mlx2_mxfp8e":
         raise ValueError("the HQ recipe calibrates on the exact mxfp8e artifact")
@@ -340,7 +343,6 @@ def convert_hq(source: Path, dest: Path, settings: HQSettings | None = None, *, 
     log(f"calibration rows / hidden = {ratio:.1f}")
     planes, quant, receipt = plan_and_quantize(model, hessians, counts, settings, log=log)
     keep = _untouched(model, planes)
-    dest.mkdir(parents=True, exist_ok=True)
     index, files = {}, []
     tensors = {**keep, **planes}
     chunk, size = {}, 0
@@ -358,6 +360,9 @@ def convert_hq(source: Path, dest: Path, settings: HQSettings | None = None, *, 
     config = dict(artifact["config"])
     config["quantization"] = {"group_size": settings.dense_group, "bits": settings.dense_bits, "mode": "affine", **quant}
     config["mlx2_conversion"] = {**config["mlx2_conversion"], "recipe": RECIPE_ID,
+                                 "experts": "GPTQ affine by layer (quantization module overrides)",
+                                 "dense": f"GPTQ affine {settings.dense_bits}-bit g{settings.dense_group} where aligned",
+                                 "head": f"affine {settings.head_bits}-bit g64",
                                  "calibrated_from": artifact["checkpoint"],
                                  "method": "Hessian-weighted layer knapsack + GPTQ (Litke & Lamy 2026 method on MLX affine)"}
     (dest / "config.json").write_text(json.dumps(config, indent=2) + "\n")

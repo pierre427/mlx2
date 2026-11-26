@@ -365,7 +365,7 @@ def _gated_delta_kernel_impl(
     # The generic Metal reduction assigns complete 32-lane strips. Smaller
     # keys create a zero-length register array; partial strips silently omit
     # the remainder. The ordinary recurrence covers both shapes exactly.
-    if Dk < 32 or Dk % 32:
+    if not _lr.step_kernel_key_supported(Dk):
         return gated_delta_ops(q, k, v, g, beta, state, mask)
     input_type = q.dtype
     state_type = state.dtype

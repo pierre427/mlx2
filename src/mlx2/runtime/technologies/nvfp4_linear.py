@@ -527,8 +527,14 @@ def sanitize_modelopt(weights: Mapping[str, Any], prefixes, spec: NVFP4Spec) -> 
             _check_e4m3_codes(name, value)
             out[prefix + ".scales"] = value
         elif leaf == ".weight":
-            if value.dtype != mx.uint8 or value.shape[-1] % 4:
-                raise ValueError(f"{name}: packed weight must be uint8 bytes, width % 4 == 0")
+            group_bytes = spec.group_size * spec.bits // 8
+            if value.dtype != mx.uint8 or value.ndim != 2 or value.shape[1] % group_bytes:
+                raise ValueError(f"{name}: expected a uint8 matrix of complete {spec.mode} groups")
+            block_scales = weights.get(prefix + ".weight_scale")
+            if spec.mode == "nvfp4" and block_scales is not None:
+                expected = (value.shape[0], value.shape[1] // group_bytes)
+                if block_scales.shape != expected:
+                    raise ValueError(f"{prefix}.weight_scale: expected block-scale grid {expected}")
             out[prefix + ".weight"] = value.view(mx.uint32)
             if spec.mode == "mxfp8":
                 out.setdefault(prefix + ".scales", mx.full(

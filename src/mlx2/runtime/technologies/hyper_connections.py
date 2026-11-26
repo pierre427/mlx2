@@ -591,8 +591,13 @@ def _ds4_mixes(spec, flat, fn=None, *, project=None, head=False):
     return _target("deepseek_v4_hc_projection", "project")(normalized, fn.astype(mx.float32))
 
 
-def _no_project(spec, *, project=None, **_):
-    return None if project is None else "policy_off: a caller-owned projection replaces fn"
+def _projection_refusal(spec, *, project=None, head=False, **_):
+    if project is not None:
+        return "policy_off: a caller-owned projection replaces fn"
+    kind = (spec.head_norm_kind or spec.norm_kind) if head else spec.norm_kind
+    if kind != "pre_rms":
+        return "spec_law: fixed projection requires pre_rms normalization"
+    return None
 
 
 TECHNOLOGY = "hyper_connections"
@@ -627,8 +632,8 @@ for registry, path in (
                     _admits_law(dict(hc_mult=4, pre_eps=True, gate_activation="sigmoid",
                                      upcast_fp32=True)), _ds4_head)),
     (MIXES, FastPath("ds4_projection_fixed_fp32",
-                     _admits_law(dict(hc_mult=4, norm_kind="pre_rms", upcast_fp32=True),
-                                 extra=_no_project), _ds4_mixes)),
+                     _admits_law(dict(hc_mult=4, upcast_fp32=True),
+                                 extra=_projection_refusal), _ds4_mixes)),
     (BOUNDARY, FastPath("glm53_hc_mega_post", _admits_law(GLM53_BOUNDARY_LAW),
                         _lazy("glm53_hc_mega", "post"))),
     (BOUNDARY, FastPath("glm53_hc_mega_pre", _admits_law(GLM53_BOUNDARY_LAW),

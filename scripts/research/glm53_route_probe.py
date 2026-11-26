@@ -75,6 +75,7 @@ def identity():
     paths = (
         list(root.glob("src/mlx2/**/*glm53*.py"))
         + list(root.glob("src/mlx2/runtime/gguf/*.py"))
+        + list(root.glob("src/mlx2/runtime/technologies/**/*.py"))
         + [
             root / "src/mlx2/runtime/gguf/k_metal.py",
             root / "src/mlx2/runtime/gguf/packed_metal.py",
@@ -91,7 +92,7 @@ def identity():
     return {
         "checkpoint": MODEL_NAME + "@" + MODEL_SHA,
         "source_revision": subprocess.check_output(
-            ["git", "rev-parse", "HEAD"], text=True
+            ["git", "-C", str(root), "rev-parse", "HEAD"], text=True
         ).strip(),
         "source_files": {
             str(p.relative_to(root)): hashlib.sha256(p.read_bytes()).hexdigest()

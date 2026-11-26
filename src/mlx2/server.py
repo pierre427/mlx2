@@ -2490,6 +2490,7 @@ class _HeaderPhaseReader:
 def handler_for(
     engine,
     *,
+    target_artifact: str | None = None,
     max_request_bytes: int | None = None,
     request_tracer=None,
     response_store=None,
@@ -3800,6 +3801,8 @@ def handler_for(
                     },
                 )
             elif self.path == "/v1/status":
+                if target_artifact is not None:
+                    status = {**status, "target_artifact": target_artifact}
                 if tensorfold_owned_router is not None:
                     status = {**status, "tensorfold_owned": tensorfold_owned_router.status()}
                 if tenant_authenticator is not None and "recent_receipts" in status:
@@ -8632,7 +8635,9 @@ def main():
         from .adapters.registry import inspect_model
 
         try:
-            adapter_resolution = inspect_model(args.model)
+            target_resolution = inspect_model(args.model)
+            # The external MTP head and route policies may compose a new identity.
+            adapter_resolution = target_resolution
         except (OSError, TypeError, ValueError) as error:
             # A missing directory or an unreadable, non-object or unsupported
             # config.json is an operator mistake, not a fault: report it like
@@ -8959,6 +8964,7 @@ def main():
     try:
         handler = handler_for(
             engine,
+            target_artifact=target_resolution.artifact_fingerprint,
             max_request_bytes=max_request_bytes,
             request_tracer=request_tracer,
             api_state_dir=args.api_state_dir,

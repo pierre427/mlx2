@@ -614,3 +614,12 @@ def test_fp32_product_law_is_not_less_accurate(dtype):
     errors = _law_errors(dtype)
     # One rounding (fp32_product) versus two (scale_rounded_product).
     assert errors["fp32_product"] <= errors["scale_rounded_product"], errors
+
+
+def test_sanitize_packed_weight_requires_complete_groups_and_matching_scales():
+    with pytest.raises(ValueError, match="complete mxfp8 groups"):
+        tech.sanitize_modelopt({"p.weight": mx.zeros((8, 36), mx.uint8)},
+                               ["p"], runtime_nvfp4.VENDOR_FP8_SPEC)
+    weights = {"p.weight": mx.zeros((8, 32), mx.uint8), "p.weight_scale": mx.zeros((8, 1), mx.uint8)}
+    with pytest.raises(ValueError, match="block-scale grid"):
+        tech.sanitize_modelopt(weights, ["p"], modelopt_nvfp4.MODELOPT_SPEC)

@@ -362,7 +362,15 @@ def absorbed_attention(spec: MLASpec, q_latent, q_pe, kv_latent, k_pe, mask, *,
         q_pe = (q_pe * scale).transpose(0, 2, 1, 3).reshape(B, 1, L * H, q_pe.shape[-1])
         pe_scores = q_pe @ k_pe.swapaxes(-1, -2)
         if mask is not None:
-            rows = mx.repeat(mask, H, axis=-2)
+            if mask.ndim >= 3 and mask.shape[-3] != 1:
+                # Preserve each head's mask in the same (position, head)
+                # order as the folded queries.
+                rows = mx.broadcast_to(mask, (B, H, L, k_pe.shape[-2]))
+                rows = rows.transpose(0, 2, 1, 3).reshape(B, 1, L * H, -1)
+            elif mask.ndim >= 2 and mask.shape[-2] != 1:
+                rows = mx.repeat(mask, H, axis=-2)
+            else:
+                rows = mask
             pe_scores = _masked_min(pe_scores, rows)
         output = _sdpa(spec, q, kv_latent, kv_latent, scale=scale, mask=pe_scores, cache=cache)
         return output.reshape(B, L, H, D).transpose(0, 2, 1, 3)
@@ -421,6 +429,8 @@ def latent_attention(q, kv, mask, *, scale, sinks=None, value_dims=None,
     rows = L if isinstance(mask, str) else max(1, score_budget // max(1, N * H * T))
     if rows >= L:
         return run(q, mask)
+    if mask is not None:
+        mask = mx.broadcast_to(mask, (*mask.shape[:-2], L, T))
     outs = []
     for a in range(0, L, rows):
         b = min(L, a + rows)
@@ -471,6 +481,8 @@ def latent_softmax_tiled(q_latent, q_pe, latent, k_pe, mask, *, scale, out_dtype
     causal = isinstance(mask, str)
     offset = latent.shape[2] - q_latent.shape[2]
     rank = latent.shape[-1]
+    if mask is not None and not causal:
+        mask = mx.broadcast_to(mask, (*mask.shape[:-2], q_latent.shape[2], latent.shape[2]))
     pieces = []
     for start in range(0, q_latent.shape[2], row_tile):
         end = min(start + row_tile, q_latent.shape[2])
@@ -586,7 +598,10 @@ def _shape_refusal(spec, want: dict, shape: dict) -> str | None:
 
 
 def _device(shape):
-    if shape.get("device", "gpu") != "gpu":
+    device = shape.get("device")
+    if device is None:
+        device = "gpu" if mx.default_device() == mx.gpu else "cpu"
+    if device != "gpu":
         return "device: needs the GPU"
     return None
 
@@ -603,12 +618,17 @@ def _admits_xing_split_k(spec, **shape):
     """xing4_0_mla_metal: score_bias absorbed, rank 512, rope 64, 1..4 rows."""
     reason = _gpu_half(shape) or _shape_refusal(spec, {
         "kv_lora_rank": 512, "qk_rope_head_dim": 64, "pe_form": "score_bias",
-        "rows": lambda r: r is not None and 1 <= r <= 4,
-        "context": lambda c: c is not None and c <= 131072,
     }, shape)
-    if reason is None and shape.get("rows") != 1 and shape.get("mask") == "none":
-        reason = "mask: multi-row needs an explicit array mask"
-    return reason
+    if reason:
+        return reason
+    from ..models.xing4_0_mla_metal import launch_geometry_supported
+
+    rows, batch, context = (shape.get(key) for key in ("rows", "batch", "context"))
+    if None in (rows, batch, context) or not launch_geometry_supported(batch, spec.n_heads, rows, context):
+        return "shape: query, context or scratch exceeds the Xing launch bounds"
+    if shape.get("mask") != "array" and not (rows == 1 and shape.get("mask") == "none"):
+        return "mask: requires an explicit array mask or one unmasked row"
+    return None
 
 
 def _compiled_scale(scale: float, text: str):

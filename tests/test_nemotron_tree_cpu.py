@@ -29,10 +29,12 @@ CAPTURES = (0, 1, 4)
 PARENTS_16 = [-1, 0, 1, 2, 3, 4, 5, 6, 0, 8, 1, 10, 2, 12, 12, 7]
 
 
-def _model(pattern=("M", "*", "E", "M", "M")):
+def _model(pattern=("M", "*", "E", "M", "M"), *, conv_kernel=None):
     mx.set_default_device(mx.cpu)
     seed = tiny_model()
     args = copy.copy(seed.args)
+    if conv_kernel is not None:
+        args.conv_kernel = conv_kernel
     args.hybrid_override_pattern = list(pattern)
     args.num_hidden_layers = len(pattern)
     args.moe_latent_size = 4
@@ -226,6 +228,28 @@ def test_abort_leaves_live_cache_at_its_committed_boundary():
     _assert_bits(_continue(model, live), _continue(model, reference))
     with pytest.raises(RuntimeError):
         transaction.commit_paths([[0]])
+
+
+def test_single_tap_convolution_has_empty_history_in_ordinary_and_packed_trees():
+    from mlx2.runtime.models.nemotron_mamba_tree import conv_windows
+
+    parents, tokens, path = [-1, 0, 0], [3, 4, 5], [0, 2]
+    model = _model(conv_kernel=1)
+    base = _prefilled(model)
+    cache = copy.deepcopy(base)
+    tree = NemotronTree(parents, cache)
+    assert tree.window_rows(1) == conv_windows(parents, 1) == [[], [], []]
+    assert tree.window_array(1).shape == (3, 0)
+    assert tree.validate_path(iter(path)) == path
+
+    oracle = _ordinary_commit(model, base, tokens, parents, path)
+    _, _, transaction = NemotronTreeExecutor().forward(model, tokens, parents, cache, CAPTURES, cached=True)
+    transaction.commit_paths([iter(path)])
+    for item in cache:
+        if isinstance(item, ArraysCache):
+            assert item.cache[0].shape[1] == 0
+    _assert_planes_close(cache, oracle)
+    np.testing.assert_allclose(_continue(model, cache), _continue(model, oracle), rtol=1e-5, atol=2e-6)
 
 
 def test_shallow_windows_read_committed_conv_rows():

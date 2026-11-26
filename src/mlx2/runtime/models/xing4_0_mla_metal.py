@@ -148,6 +148,14 @@ def snapshot_stats() -> dict[str, int]:
     return dict(STATS)
 
 
+def launch_geometry_supported(batch, heads, rows, context):
+    if not (batch >= 1 and heads >= 1 and 1 <= rows <= _MAX_QUERY
+            and rows <= context <= _MAX_CONTEXT):
+        return False
+    parts = (context + _CHUNK - 1) // _CHUNK
+    return batch * heads * rows * parts * (_RANK + 2) * 4 <= _MAX_SCRATCH_BYTES
+
+
 def supported(q, qpe, kv, kpe, mask, *, context_len=None) -> bool:
     """Bounded exact-cache shape gate; no host-side array evaluation."""
     if not hasattr(mx.fast, "metal_kernel") or mx.default_device() != mx.gpu:
@@ -163,13 +171,7 @@ def supported(q, qpe, kv, kpe, mask, *, context_len=None) -> bool:
     b, h, length, rank = q.shape
     kv_length = kv.shape[2]
     context = kv_length if context_len is None else context_len
-    if not (b >= 1 and h >= 1 and 1 <= length <= _MAX_QUERY
-            and length <= context and kv_length <= context <= _MAX_CONTEXT
-            and rank == _RANK):
-        return False
-    parts = (context + _CHUNK - 1) // _CHUNK
-    scratch_bytes = b * h * length * parts * (_RANK + 2) * 4
-    if scratch_bytes > _MAX_SCRATCH_BYTES:
+    if rank != _RANK or kv_length > context or not launch_geometry_supported(b, h, length, context):
         return False
     if qpe.shape != (b, h, length, _ROPE):
         return False

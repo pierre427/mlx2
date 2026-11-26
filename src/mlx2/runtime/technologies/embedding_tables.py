@@ -410,6 +410,8 @@ def decode_affine4_g32(spec: Affine4RowSpec, words: np.ndarray, scales: np.ndarr
 
 def split_packed_affine4(spec: Affine4RowSpec, raw: np.ndarray):
     """One packed row per table row: codes, then scales, then biases."""
+    if raw.ndim != 2 or raw.dtype != np.uint8 or raw.shape[1] != spec.packed_row_bytes:
+        raise ValueError(f"packed affine4 rows require uint8 [n, {spec.packed_row_bytes}]")
     groups, width = spec.groups, SCALE_BYTES[spec.scale_dtype]
     words = np.ascontiguousarray(raw[:, : spec.dim // 2]).view("<u4")
     at = spec.dim // 2

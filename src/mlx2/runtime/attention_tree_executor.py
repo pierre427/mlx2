@@ -391,6 +391,7 @@ class AttentionTreeExecutor(SourceBoundRevision):
             raise ValueError("attention tree cohort exceeds its bound")
 
     def forward(self, model, inputs, parents, cache, layers, *, cached):
+        self.validate_revision()
         self.validate_cohort(1, 1)
         logits, features, snapshot = tile_forward(model, inputs, parents, cache, layers)
         self.dispatches += 1
@@ -400,6 +401,7 @@ class AttentionTreeExecutor(SourceBoundRevision):
         )
 
     def forward_many(self, model, inputs, parents, caches, layers, *, cached, configured_limit):
+        self.validate_revision()
         self.validate_cohort(len(caches), configured_limit)
         if len(inputs) != len(caches) or len(parents) != len(caches):
             raise ValueError("attention tree cohort rows, parents and owners must align")

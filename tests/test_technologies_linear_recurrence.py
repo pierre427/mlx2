@@ -426,7 +426,7 @@ def test_kda_dispatch_order_matches_kimi_and_raon(monkeypatch, gpu):
     calls = []
     if gpu:
         _fake_gpu(monkeypatch, calls)
-    q, k, v, g, beta, state = _operands()
+    q, k, v, g, beta, state = _operands(H=4, D=128)
     for reference in (False, True):
         for wy in (False, True):
             for c32 in (False, True):
@@ -435,7 +435,7 @@ def test_kda_dispatch_order_matches_kimi_and_raon(monkeypatch, gpu):
                     _, receipt = lr.RECURRENCE.select(
                         None, q=q, k=k, v=v, g=g, beta=beta, state=state, mask=None,
                         kernels=None if (not reference and gpu) else "kernels_disallowed",
-                        chunk=chunk, allow_core=False, prefill_chunk_size=0)
+                        chunk=chunk, log_decay=mx.log(g), allow_core=False, prefill_chunk_size=0)
                     assert receipt.selected == _legacy_kda_choice(reference, gpu, wy, c32, chunked)
 
 
@@ -622,3 +622,45 @@ def test_gdn_order_kernels_disallowed_is_reference(monkeypatch):
     assert receipt.selected == "reference" and calls == [] and not stats
     assert {receipt.refusals[p] for p in ("prefill_scan", "core_scan", "step_kernel")} == {
         "kernels_disallowed"}
+
+
+@pytest.mark.parametrize("chunk,path", [("wy", "chunk_wy"), ("chunk32", "chunk32")])
+def test_masked_chunk_request_preserves_padding(chunk, path):
+    q, k, v, g, beta, state = _operands()
+    mask = mx.array([[False, True, True]])
+    out, final, receipt = lr.recurrence(q, k, v, g, beta, state, mask,
+                                        chunk=chunk, log_decay=mx.log(g), with_receipt=True)
+    assert receipt.selected == "reference" and receipt.refusals[path] == "masked"
+    _eq((out, final), lr.gated_delta_ops(q, k, v, g, beta, state, mask))
+    with pytest.raises(RuntimeError, match="masked"):
+        lr.recurrence(q, k, v, g, beta, state, mask, chunk=chunk,
+                      log_decay=mx.log(g), policy=path)
+
+
+def test_one_tap_short_conv_keeps_empty_decode_history():
+    x = mx.ones((1, 2, 3))
+    first, history = lr.short_conv(x, None, None, None, lambda values: values, kernel_size=1)
+    second, history = lr.short_conv(x, history, None, None, lambda values: values, kernel_size=1)
+    assert history.shape == (1, 0, 3)
+    _eq(first, second)
+
+@pytest.mark.parametrize("dim,state_present,refusal", [(31, True, "incomplete_simd_strip"),
+                                                       (32, False, "state_required")])
+def test_dispatch_receipt_matches_actual_step_kernel_support(monkeypatch, dim, state_present, refusal):
+    calls = []
+    _fake_gpu(monkeypatch, calls)
+    q, k, v, g, beta, state = _operands(D=dim)
+    state = state if state_present else None
+    out, final, receipt = lr.recurrence(q, k, v, g, beta, state, allow_core=False, with_receipt=True)
+    assert receipt.selected == "reference" and receipt.refusals["step_kernel"] == refusal
+    assert not calls
+    _eq((out, final), lr.gated_delta_ops(q, k, v, g, beta, state))
+    with pytest.raises(RuntimeError, match=refusal):
+        lr.recurrence(q, k, v, g, beta, state, allow_core=False, policy="step_kernel")
+
+
+def test_single_step_rollback_uses_checkpoint_and_final_only():
+    before = mx.array([[2], [3], [4]])
+    final = mx.array([[5], [6], [7]])
+    got = lr.select_rollback_rows([0, 1, 0], [1, 1, 0], mx.zeros((3, 0, 1)), before, final)
+    _eq(got, mx.array([[2], [6], [4]]))

@@ -509,3 +509,56 @@ def test_raon_auto_pairing_adds_no_policy_pins(monkeypatch):
     adapter = object.__new__(RaonAdapter)
     assert adapter._parse_external_policy(speculative, family="Raon-1-mini")
     assert adapter.external_policy == {"draft_model": "/draft"}
+
+
+def test_mixed_affine_recipe_binds_storage_variant_and_declared_mode():
+    from mlx2.adapters import raon1_mini as A
+    from mlx2.runtime.models import raon1_mini as R
+
+    config = dict(A._TOPOLOGY, rda_config=A._RDA,
+                  reasoning_effort_steering={"layers": A.STEERING_LAYERS, "default": "high", "alpha": {"high": 0}},
+                  mlx2_conversion={"recipe": A.MIX_RECIPE, "source_revision": A.SOURCE_REVISION},
+                  quantization={"mode": "affine", "bits": 8, "group_size": 32})
+    adapter = object.__new__(A.RaonAdapter)
+    adapter.config = config
+    adapter.artifact_layout = A.validate_config(config)
+    assert adapter.artifact_variant == "mlx2-affine-mix-ordinary"
+    receipt = R.install_for_layout(_model(), adapter.artifact_layout, config, ["lm_head.scales"])
+    assert receipt["format"] == "mlx2-affine-mix"
+    config["quantization"]["lm_head"] = {"mode": "mxfp8", "bits": 8, "group_size": 32}
+    with pytest.raises(ValueError, match="mixed affine"):
+        A.validate_config(config)
+
+
+@pytest.mark.parametrize("name", ["alpha_post", "b_post", "alpha_z"])
+def test_fused_mhc_rebuilds_replaced_parameters(name):
+    from mlx2.runtime.models.raon1_mini_fused import site_params
+
+    site = _model().layers[0].self_attn_raon_mhc
+    old = site_params(site)
+    assert site_params(site) is old
+    owner = site.res if name == "alpha_z" else site
+    setattr(owner, name, getattr(owner, name) + 1)
+    updated = site_params(site)
+    assert not mx.array_equal(old, updated).item()
+
+
+def test_hq_partial_write_can_be_retried(tmp_path, monkeypatch):
+    from mlx2.conversion import raon1_mini_hq as HQ
+
+    dest = tmp_path / "converted"
+    def fail(source, staging, *, settings, log):
+        (staging / "model-00.safetensors").write_bytes(b"partial")
+        raise OSError("disk full")
+
+    monkeypatch.setattr(HQ, "_write_hq", fail)
+    with pytest.raises(OSError, match="disk full"):
+        HQ.convert_hq(tmp_path / "source", dest)
+    assert not dest.exists()
+    def succeed(source, staging, *, settings, log):
+        (staging / "model-00.safetensors").write_bytes(b"complete")
+        return {"ok": True}
+
+    monkeypatch.setattr(HQ, "_write_hq", succeed)
+    assert HQ.convert_hq(tmp_path / "source", dest) == {"ok": True}
+    assert (dest / "model-00.safetensors").read_bytes() == b"complete"

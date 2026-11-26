@@ -252,11 +252,11 @@ def test_tree_hashes_only_bound_helpers_and_detects_exact_byte_changes(policy, h
             'mla.py', 'drafter_blocks.py', 'linear_recurrence.py', 'dispatch.py', 'differentiable.py', 'gated_delta.py',
             'gdn_state.py', 'precise_ops.py'} | {p.name for p in TECHNOLOGY_SOURCES}
     assert {p.name for p in provider._sources} == core | helpers
+    runtime = provider._sources[0].parent
     copies = []
-    for index, source in enumerate(provider._sources):
-        # Distinct directories: two bound sources may share a name (__init__.py).
-        copied = tmp_path / str(index) / source.name
-        copied.parent.mkdir()
+    for source in provider._sources:
+        copied = tmp_path / source.relative_to(runtime)
+        copied.parent.mkdir(parents=True, exist_ok=True)
         copied.write_bytes(source.read_bytes())
         copies.append(copied)
     provider._sources = tuple(copies)

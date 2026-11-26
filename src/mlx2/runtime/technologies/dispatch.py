@@ -194,6 +194,9 @@ class KernelRegistry:
                     f"{self.operation}: required fast path {policy!r} refused: {reason}"
                 )
         if policy is not None:
+            # Operator input must never become an unbounded metric label.
+            _record(self.technology, self.op, Receipt(
+                self.operation, "failed_closed", {"unknown": "unknown_path"}))
             raise RuntimeError(f"{self.operation}: unknown fast path {policy!r}")
         return self.reference, Receipt(self.operation, "reference", refusals)
 

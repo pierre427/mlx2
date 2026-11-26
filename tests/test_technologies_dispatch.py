@@ -39,6 +39,20 @@ def test_registry_selects_admitting_path_and_fails_closed():
     reset_counters()
 
 
+def test_unknown_required_paths_share_one_failure_metric():
+    reset_counters()
+    reg = KernelRegistry("demo.op", reference=lambda: None)
+    for name in ("typo1", "typo2"):
+        with pytest.raises(RuntimeError, match="unknown fast path"):
+            reg.select(_Spec(), policy=name)
+    snap = counters_snapshot()
+    assert snap["selections"] == [
+        {"technology": "demo", "operation": "op", "path": "failed_closed", "count": 2}]
+    assert snap["refusals"] == [
+        {"technology": "demo", "operation": "op", "path": "unknown", "code": "unknown_path", "count": 2}]
+    reset_counters()
+
+
 def test_refusal_code_and_operation_names():
     assert refusal_code("geometry: needs 32 heads") == "geometry"
     assert refusal_code("") == "unspecified"

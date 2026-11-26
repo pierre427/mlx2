@@ -41,6 +41,10 @@ ABOVE_M1_FLOOR = {
     "runtime/models/qwen4_qsa_indexed.py": 1,
     # Flash-Next fused GDN decode: 32 x 32.
     "runtime/models/qwen4_fused_gdn.py": 1,
+    # Ling B1 KDA decode and Raon mHC stream reduction each launch one
+    # 1024-thread group per head or stream row.
+    "runtime/models/ling_kda_fused.py": 1,
+    "runtime/models/raon1_mini_fused.py": 1,
     # NAX (M5-only) MoE gather and its research twin.
     "runtime/models/moe_nax_gather.py": 1,
     "adapters/segmented_moe_prefill_research.py": 1,

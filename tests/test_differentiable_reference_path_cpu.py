@@ -34,7 +34,8 @@ def _tiny_hybrid(seed=3):
     text = dict(
         model_type="qwen3_5", hidden_size=32, intermediate_size=64, num_hidden_layers=4,
         num_attention_heads=4, num_key_value_heads=2, head_dim=8, vocab_size=128,
-        linear_num_key_heads=2, linear_num_value_heads=4, linear_key_head_dim=8,
+        # The step kernel processes complete 32-wide key strips.
+        linear_num_key_heads=2, linear_num_value_heads=4, linear_key_head_dim=32,
         linear_value_head_dim=8, linear_conv_kernel_dim=3, full_attention_interval=4,
         partial_rotary_factor=0.5, rope_parameters=None, max_position_embeddings=128,
         mtp_num_hidden_layers=0,
@@ -137,7 +138,7 @@ def test_fused_gdn_shortcuts_stand_down_inside_the_reference_path():
     gdn = next(m for _, m in model.named_modules() if isinstance(m, qwen38_fused_gdn.GatedDeltaNet))
     assert gdn.fused_gdn_enabled
     before = dict(gdn.fused_gdn_counters)
-    x = mx.zeros((1, 1, 4 * 8 * 2 + 4 * 8))
+    x = mx.zeros((1, 1, gdn.conv_dim))
     with differentiable.reference_path():
         assert gdn._try_fused_decode(x, None, None, None, None, None) is None
     assert gdn.fused_gdn_counters == before  # not a serving fallback: no counter moves

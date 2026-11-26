@@ -92,6 +92,7 @@ def test_numerics_contract_names_the_sources():
     adapter = Inkling2Adapter.__new__(Inkling2Adapter)
     adapter.kernel_policy = {"moe_fused": True, "moe_panel_kernel": True}
     contract = adapter.execution_numerics_contract()
+    assert "../technologies/nvfp4_linear.py" in contract["source_sha256"]
     assert "inkling2/moe_panel_kernel.py" in contract["source_sha256"]
     assert "inkling2/moe_decode_kernel.py" in contract["source_sha256"]
     adapter.kernel_policy = {"moe_fused": True}

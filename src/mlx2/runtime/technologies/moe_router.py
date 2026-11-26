@@ -333,8 +333,6 @@ def route(
             if spec.grouped:
                 choice = _group_limit(choice, spec)
             indices = _topk(choice, k, spec.topk_method)
-        if spec.index_dtype == "int32" and not spec.hash_layer:
-            indices = indices.astype(mx.int32)
         source = choice if spec.combine_scores == "biased" else scores
         if spec.renorm == "logdomain":
             picked = mx.take_along_axis(logits, indices, axis=-1)
@@ -359,6 +357,8 @@ def route(
         weights = weights.astype(out_dtype)
     if spec.index_dtype == "uint32":
         indices = indices.astype(mx.uint32)
+    elif spec.index_dtype == "int32":
+        indices = indices.astype(mx.int32)
     if with_scores:
         return indices, weights, picked_scores
     return indices, weights
@@ -430,8 +430,8 @@ class RouterFastPath:
             return "law: fused routers do not route hash layers"
         if logits is None:
             return "shape: no logits given"
-        if spec.use_bias and bias is None:
-            return "shape: no correction bias given"
+        if spec.use_bias != (bias is not None):
+            return "shape: correction bias presence differs from the spec"
         return self.kernel_admits(spec, logits=logits, bias=bias, **kw)
 
     def run(self, logits, spec, bias=None, *, out_dtype=None, expert_scale=None,
@@ -441,6 +441,8 @@ class RouterFastPath:
             raise ValueError(f"{self.name}: {reason}")
         if hash_table is not None or token_ids is not None:
             raise ValueError(f"{self.name}: fused routers do not route hash layers")
+        if spec.use_bias != (bias is not None):
+            raise ValueError(f"{self.name}: correction bias presence differs from the spec")
         if not prepared:
             logits = prepare_logits(logits, spec)
         indices, weights = self.kernel(logits, spec, bias, **kw)
@@ -526,6 +528,10 @@ def _laguna_kernel(logits, spec, bias, *, candidate_token_widths=(), **_):
 
 
 def _deepseek_v41_admits(spec, *, logits, bias, **_):
+    if logits.ndim < 1 or not 1 <= spec.top_k <= logits.shape[-1]:
+        return "shape: top_k must fit the logits expert dimension"
+    if bias.shape != (logits.shape[-1],):
+        return "shape: kernel requires one shared correction vector"
     return _metal_refusal()
 
 

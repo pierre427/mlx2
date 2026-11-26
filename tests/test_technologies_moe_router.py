@@ -994,3 +994,22 @@ def test_fast_path_run_honours_the_reference_signature(name, dtype):
     # on CPU the registered path refuses at the admission/device stage, coded
     reason = path.admits(spec, logits=logits, bias=bias)
     assert reason is not None and reason.split(":")[0] in {"admission", "device", "shape"}
+
+
+def test_after_topk_respects_explicit_index_dtype():
+    spec = RouterSpec(top_k=2, softmax_position="after_topk", index_dtype="int32")
+    ids, _ = route(mx.array([[2., 3., 1.]]), spec)
+    assert ids.dtype == mx.int32
+
+
+def test_fused_admission_checks_correction_bias_contract(monkeypatch):
+    monkeypatch.setattr(MR, "_metal_refusal", lambda: None)
+    ds = MR.ROUTER_FAST_PATHS["deepseek_v41_fused_router"]
+    logits = mx.zeros((2, 256))
+    assert ds.admits(ds.law, logits=logits, bias=mx.zeros((256,))) is None
+    for bias in (mx.zeros((2, 256)), mx.zeros((1,))):
+        assert ds.admits(ds.law, logits=logits, bias=bias).startswith("shape:")
+    qwen = MR.ROUTER_FAST_PATHS["qwen4_moe_router"]
+    assert qwen.admits(qwen.law, logits=logits, bias=mx.zeros((256,))).startswith("shape:")
+    with pytest.raises(ValueError, match="bias"):
+        qwen.run(logits, qwen.law, mx.zeros((256,)))

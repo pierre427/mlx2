@@ -410,9 +410,10 @@ def test_model_mode_runs_every_arm_through_every_question(tmp_path, monkeypatch)
 
 
 
-def test_mismatched_server_alias_requires_checkpoint_evidence():
+@pytest.mark.parametrize("name", ["unrelated", "M"])
+def test_advertised_artifact_must_match_even_with_same_model_name(name):
     with pytest.raises(ValueError, match="requested checkpoint"):
-        gsm.served_model_name({"model": "unrelated", "artifact": "1" * 64}, "M@sha256:" + "0" * 64)
+        gsm.served_model_name({"model": name, "target_artifact": "1" * 64}, "M@sha256:" + "0" * 64)
 
 
 @pytest.mark.parametrize("selection", [["--indices=-1"], ["--indices=1"], ["--offset", "-1"],
@@ -423,3 +424,38 @@ def test_invalid_question_selection_fails_before_contacting_server(tmp_path, mon
     with pytest.raises(SystemExit):
         gsm.main(["--output", str(tmp_path), "--base-url", "http://unused", "--checkpoint", "M@fixture",
                   *selection])
+
+
+def test_http_status_exposes_the_inspected_target():
+    from mlx2.server import handler_for
+    from test_serving_contract import FakeEngine
+
+    target = "1" * 64
+    engine = FakeEngine()
+    with HTTPServer(("127.0.0.1", 0), handler_for(engine, target_artifact=target)) as server:
+        thread = threading.Thread(target=server.handle_request, daemon=True)
+        thread.start()
+        status = gsm.Client(f"http://127.0.0.1:{server.server_port}").call("/v1/status")
+        thread.join(timeout=5)
+    assert status["target_artifact"] == target
+    assert gsm.served_model_name(status, "target-path@sha256:" + target) == "fixture"
+
+
+def test_external_route_distinguishes_target_from_composite_digest():
+    target, composite = "1" * 64, "2" * 64
+    checkpoint = "M@sha256:" + target
+    status = {"model": "M", "artifact": composite, "base_artifact": composite,
+              "execution": {"route": "external_draft", "artifact": {"checkpoint": "M@sha256:" + target[:16]}}}
+    assert gsm.served_model_name(status, checkpoint) == "M"
+    status["execution"]["checkpoint"] = "M@" + composite
+    assert gsm.served_model_name(status, checkpoint) == "M"  # legacy composite only
+    status.update(model="alias", target_artifact=target)
+    assert gsm.served_model_name(status, checkpoint) == "alias"
+    assert gsm.served_model_name(status, "M@sha256:" + composite) == "alias"
+    with pytest.raises(ValueError):
+        gsm.served_model_name(status, "M@sha256:" + "3" * 64)
+
+
+def test_native_mtp_zero_round_histograms_are_evidence():
+    receipt = gsm.speculation_receipt({"mtp": {"stats": {"verify_accept_hist": {}, "verify_depth_hist": {}}}})
+    assert receipt["verify_accept_hist"] == receipt["verify_depth_hist"] == {}

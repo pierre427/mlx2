@@ -290,7 +290,7 @@ def speculation_receipt(extra):
         return spec
     mtp = extra.get("mtp")
     stats = mtp.get("stats") if isinstance(mtp, dict) else None
-    if isinstance(stats, dict) and stats.get("verify_accept_hist"):
+    if isinstance(stats, dict) and stats.get("verify_accept_hist") is not None:
         return {"source": "mtp.stats", "verify_accept_hist": stats["verify_accept_hist"],
                 "verify_depth_hist": stats.get("verify_depth_hist"),
                 "verify_full_accept_rounds": stats.get("verify_full_accept_rounds"),
@@ -379,18 +379,21 @@ def stop_time(clock, now=None):
 def served_model_name(status, checkpoint):
     name, _, fingerprint = checkpoint.partition("@")
     advertised = status.get("model")
-    if not advertised or advertised == name:
+    target = status.get("target_artifact")
+    # Historical servers may expose a target+drafter or policy digest even as
+    # their execution checkpoint. Keep their same-name fallback.
+    if not target and (not advertised or advertised == name):
         return name
-    # A served alias can differ from the artifact directory name. Bind the
-    # request to that alias only if the status identifies the requested weights.
-    execution = (status.get("execution") or {}).get("checkpoint") or ""
-    candidates = (execution.rpartition("@")[2], status.get("artifact"), status.get("base_artifact"))
-    if not fingerprint or not any(
-        isinstance(value, str) and value.removeprefix("sha256:") == fingerprint.removeprefix("sha256:")
-        for value in candidates
+    requested = fingerprint.removeprefix("sha256:")
+    candidates = [target, status.get("artifact"), status.get("base_artifact")]
+    if not target:
+        execution_checkpoint = (status.get("execution") or {}).get("checkpoint") or ""
+        candidates.append(execution_checkpoint.rpartition("@")[2])
+    if not requested or not any(
+        isinstance(value, str) and requested == value.removeprefix("sha256:") for value in candidates
     ):
         raise ValueError(f"server model {advertised!r} does not identify the requested checkpoint {checkpoint!r}")
-    return advertised
+    return advertised or name
 
 
 def run_questions(client, model_name, prefix, items, *, chat, max_tokens, log=None, sampling=None,
@@ -498,7 +501,7 @@ def write_atomic(path, document):
 
 def compact(row):
     keep = {k: row.get(k) for k in ("index", "test_index", "expected", "predicted", "correct", "finish_reason",
-                                     "completion_tokens", "decode_tps", "text", "markers", "reasoning_markers",
+                                     "completion_tokens", "decode_tps", "text", "route", "markers", "reasoning_markers",
                                      "det_tiles")}
     spec = row.get("speculation") or {}
     keep["accept_hist"] = spec.get("verify_accept_hist")

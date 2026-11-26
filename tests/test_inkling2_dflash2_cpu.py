@@ -344,10 +344,34 @@ def test_after_correction_laws_and_pairwise_scores_use_real_rows_and_post_cap():
                                rtol=1e-5, atol=1e-5)
 
 
+def test_rebind_clears_previous_target_terms_and_rejects_invalid_target_atomically():
+    target = _Target()
+    _declare(target, rows=30)
+    draft = _draft("after_correction").bind(target)
+    invalid = _Target()
+    _declare(invalid, rows=1)
+    with pytest.raises(ValueError):
+        draft.reset(invalid)
+    assert draft.embed_tokens is target.model.embed_tokens
+    assert draft.proposal_vocab_size == 30
+
+    plain = _Target()
+    draft.reset(plain)
+    assert draft.proposal_vocab_size == draft.config.vocab_size
+    assert "target_token_embedding" not in draft.receipt_settings
+    assert "target_vocab_rows" not in draft.receipt_settings
+    tokens = mx.array([[1, 2, 29]])
+    np.testing.assert_array_equal(draft._embed_input_tokens(tokens), plain.model.embed_tokens(tokens))
+
+
 def test_after_correction_refuses_tree_and_lattice_paths():
     target = _Target()
     draft = _draft("after_correction").bind(target)
     assert draft.supports_continuation_tree_reuse is False
+    assert draft.supports_tree_calibration is False
+    settings = draft.receipt_settings
+    assert settings["proposal_distribution"] == "categorical_chain"
+    assert "tree_ranking" not in settings and "tree_max_nodes" not in settings
     assert _draft("before_correction").supports_continuation_tree_reuse is True
     hidden = mx.random.normal((1, 3, 16))
     with pytest.raises(ValueError, match="tree drafting"):
@@ -540,6 +564,7 @@ class _CaptureSampler:
 
     def sample_candidate(self, scores, candidates, vocab):
         self.scores.append(scores)
+        self.vocab = vocab
         return mx.argmax(scores, axis=-1)
 
 
@@ -555,7 +580,9 @@ def test_select_caps_bf16_scores_in_float32_without_ties():
     logits[0, 0, 9] = 46.0
     hidden = mx.zeros((1, 1, 8), dtype=mx.bfloat16)
     sampler = _CaptureSampler()
+    logits = logits[..., :30]  # The target head has two padding rows.
     path = selector.select(hidden, logits, mx.array([1]), sampler)
+    assert sampler.vocab == 30
     scores = sampler.scores[0]
     assert scores.dtype == mx.float32
     candidates = np.asarray(mx.argpartition(logits, -4, axis=-1)[..., -4:])[0, 0]

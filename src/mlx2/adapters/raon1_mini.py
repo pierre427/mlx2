@@ -128,7 +128,8 @@ def validate_config(config: dict) -> str:
                 # Calibrated mixed recipe: affine everywhere, per-module 4/8-bit, group 32/64.
                 specs = [quant] + [v for v in quant.values() if isinstance(v, dict)]
                 if (quant.get("mode") != "affine"
-                        or any(v.get("bits", quant.get("bits")) not in (4, 8)
+                        or any(v.get("mode", "affine") != "affine"
+                               or v.get("bits", quant.get("bits")) not in (4, 8)
                                or v.get("group_size", quant.get("group_size")) not in (32, 64) for v in specs)):
                     raise ValueError("Raon mixed affine artifact must be affine 4/8-bit, group 32/64")
         return layout
@@ -375,10 +376,10 @@ class RaonAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
         binding = hashlib.sha256(json.dumps({**bound, "layout": layout},
                                             sort_keys=True).encode()).hexdigest()
         self.layout = CACHE_LAYOUT + ":" + binding
-        self.descriptor = replace(DESCRIPTOR, cache_layout=self.layout, variant=LAYOUTS[layout]["variant"],
+        self.descriptor = replace(DESCRIPTOR, cache_layout=self.layout, variant=self.artifact_variant,
                                   metadata={**DESCRIPTOR.metadata, "selected": True, "policy": self.policy,
                                             "checkpoint": self.checkpoint})
-        self.profile = "raon1-mini-" + LAYOUTS[layout]["variant"]
+        self.profile = "raon1-mini-" + self.artifact_variant
         if self.policy["moe_nax"] == "gather":
             if layout != "mlx2_affine":
                 raise ValueError("moe_nax gather needs the affine artifact (QuantizedSwitchLinear experts)")
@@ -409,7 +410,7 @@ class RaonAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
 
             self._bind_external_drafter(draft_record, load_drafter, self.descriptor)
             self.__dict__.pop("profile_name", None)
-            stem = LAYOUTS[layout]["variant"].removesuffix("-ordinary")
+            stem = self.artifact_variant.removesuffix("-ordinary")
             self.descriptor = replace(self.descriptor, variant=stem + "-external-dflash2",
                                       metadata={**self.descriptor.metadata, "qualification": "unqualified",
                                                 "speculative_route": "external_raon_dflash2_chain"})
@@ -554,12 +555,18 @@ class RaonAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
                                "qualified": False},
         }
 
+    @property
+    def artifact_variant(self):
+        if (self.config.get("mlx2_conversion") or {}).get("recipe") == MIX_RECIPE:
+            return "mlx2-affine-mix-ordinary"
+        return LAYOUTS[self.artifact_layout]["variant"]
+
     def diagnostics(self):
         layout = LAYOUTS[self.artifact_layout]
         external = getattr(self, "draft_model", None) is not None
         return {"route": "external_draft" if external else "ordinary",
                 "qualification": "unqualified", "policy": self.policy,
-                "artifact": {"layout": self.artifact_layout, "variant": layout["variant"],
+                "artifact": {"layout": self.artifact_layout, "variant": self.artifact_variant,
                              "checkpoint": self.checkpoint,
                              "source": layout["repo"] + "@" + layout["revision"],
                              "storage": self.storage},

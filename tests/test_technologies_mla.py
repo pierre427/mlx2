@@ -641,3 +641,45 @@ def test_model_modules_build_specs_with_their_legacy_scales(scaling):
     n, r = kargs.qk_nope_head_dim, kargs.qk_rope_head_dim
     assert kimi.scale == kimi.mla_spec.softmax_scale == (n + r) ** -0.5
     assert kimi.mla_spec.position == "nope"
+
+
+@pytest.mark.parametrize("head_specific", [False, True])
+def test_folded_and_tiled_attention_with_broadcast_padding_mask(head_specific):
+    # A per-lane key padding mask can be constant across all queries, with
+    # either shared or different visible keys per head.
+    batch, heads, length, keys, dim = 2, 3, 4, 7, 8
+    q = _rand(1, (batch, heads, length, dim), mx.float32)
+    kv = _rand(2, (batch, 1, keys, dim), mx.float32)
+    per_lane = mx.arange(batch)[:, None, None, None]
+    if head_specific:
+        per_lane = per_lane + mx.arange(heads)[None, :, None, None]
+    mask = mx.arange(keys) >= per_lane
+    full = mx.broadcast_to(mask, (batch, heads, length, keys))
+    spec = mla.MLASpec(heads, dim, dim, dim, dim, absorbed_layout="fold_heads")
+    got = mla.absorbed_attention(spec, q, q, kv, kv, mask)
+    # Independent per-head oracle keeps the mask ordering observable.
+    expected = mx.concatenate([
+        mla.absorbed_attention(spec, q[:, h:h+1], q[:, h:h+1], kv, kv, full[:, h:h+1])
+        for h in range(heads)
+    ], axis=1)
+    assert mx.allclose(got, expected, atol=1e-6).item()
+    def tiled(m):
+        return mla.latent_softmax_tiled(q, q, kv, kv, m, scale=0.2, out_dtype=q.dtype,
+                                        key_tile=3, row_tile=2)
+
+    def bounded(m):
+        return mla.latent_attention(q, kv, m, scale=0.2, score_budget=batch * heads * keys)
+
+    _same(tiled(mask), tiled(full))
+    _same(bounded(mask), bounded(full))
+
+
+def test_xing_kernel_registry_respects_live_device_and_launch_bounds():
+    xing = mla.MLASpec(16, 512, 128, 64, 128)
+    shape = dict(batch=1, rows=2, context=100, mask="array", dtype=mx.bfloat16)
+    _, receipt = mla.ABSORBED_DECODE.select(xing, **shape)
+    assert receipt.selected == "reference" and receipt.refusals["xing_split_k"].startswith("device:")
+    for changes, code in [({"mask": "causal"}, "mask"), ({"context": 1}, "shape"),
+                          ({"batch": 32, "context": 131072}, "shape")]:
+        with pytest.raises(RuntimeError, match=code + ":"):
+            mla.ABSORBED_DECODE.select(xing, policy="xing_split_k", device="gpu", **(shape | changes))

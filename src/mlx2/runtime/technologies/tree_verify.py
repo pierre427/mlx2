@@ -28,8 +28,10 @@ Original mlx2 code; no model names appear below.
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
 import hashlib
+import os
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol, Sequence, runtime_checkable
 
@@ -174,7 +176,7 @@ class TreeTopology:
         for path in self.paths:
             rows = path if include_self else path[:-1]
             history = [*range(state_rows), *(state_rows + row for row in rows)]
-            windows.append(history[-window:])
+            windows.append(history[-window:] if window else [])
         return windows
 
     def history_array(self, state_rows: int, window: int, *, include_self: bool) -> mx.array:
@@ -199,9 +201,10 @@ class TreeTopology:
 
     def validate_path(self, path: Sequence[Any], *, allow_empty: bool = False) -> list[int]:
         """Return ``path`` as a list if it is one complete root path."""
+        path = list(path)
         if not self.is_root_path(path, allow_empty=allow_empty):
             raise ValueError(self.spec.path_error)
-        return list(path)
+        return path
 
 
 def tree_depths(parents: Sequence[Any], spec: TopologySpec) -> list[int]:
@@ -326,10 +329,10 @@ class TreeLaneTransaction:
         if self.closed or len(paths) != len(self.trees):
             raise RuntimeError(self.count_error)
         if not self.close_on_refused_path:
-            self._validate(paths)
+            paths = self._validated_paths(paths)
         try:
             if self.close_on_refused_path:
-                self._validate(paths)
+                paths = self._validated_paths(paths)
             prepared = []
             for tree, path in zip(self.trees, paths, strict=True):
                 prepared.extend(tree.prepare_commit(path))
@@ -338,9 +341,12 @@ class TreeLaneTransaction:
         finally:
             self._close()
 
-    def _validate(self, paths):
+    def _validated_paths(self, paths):
+        # A single-use path must reach preparation exactly as it was validated.
+        paths = [list(path) for path in paths]
         for tree, path in zip(self.trees, paths, strict=True):
             tree.validate_path(path)
+        return paths
 
     def commit(self, *, accepted_lengths):
         return self.commit_paths([list(range(int(length))) for length in accepted_lengths])
@@ -388,7 +394,16 @@ def file_sha256(path: Path) -> str:
 
 
 def manifest_identity(sources: Sequence[Path], key: Callable[[Path], str]) -> tuple[tuple[str, str], ...]:
-    return tuple((key(path), file_sha256(path)) for path in sources)
+    names = [key(path) for path in sources]
+    counts = Counter(names)
+    collisions = [path for path, name in zip(sources, names) if counts[name] > 1]
+    if collisions:
+        # Receipts expose this manifest as a dictionary. Qualify colliding
+        # basenames while preserving existing names for unambiguous sources.
+        root = Path(os.path.commonpath([path.parent for path in collisions]))
+        names = [path.relative_to(root).as_posix() if counts[name] > 1 else name
+                 for path, name in zip(sources, names)]
+    return tuple((name, file_sha256(path)) for name, path in zip(names, sources))
 
 
 class SourceBoundRevision:
@@ -663,7 +678,8 @@ class MambaReplayOps:
         state = material["mixer"].tree_commit_state(material, path, indices)
         count = material["kernel"] - 1
         history = [*range(count), *(count + row for row in path)]
-        conv = mx.take(material["source"], mx.array(history[-count:], dtype=mx.int32), axis=1)
+        tail = history[-count:] if count else []
+        conv = mx.take(material["source"], mx.array(tail, dtype=mx.int32), axis=1)
         private = copy.copy(live)
         private.__dict__ = dict(live.__dict__)
         private.cache = [conv, state]

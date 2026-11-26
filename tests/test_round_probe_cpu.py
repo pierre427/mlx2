@@ -392,3 +392,93 @@ def test_harness_run_end_to_end_against_a_fake_server(tmp_path):
     assert rows[0]["phase1_go"]
     for cell in cells:
         assert cell["prompt_tokens"] == 100 and cell["per_round"]["period_ms"] > 0
+
+
+def test_mixed_round_labels_share_the_measured_decode_period(monkeypatch, tmp_path):
+    block = {"enabled": True, "routes": {
+        "chain": {"rounds": 3, "tokens": 9, "wall_ns": 6_000_000},
+        "ordinary": {"rounds": 1, "tokens": 1, "wall_ns": 2_000_000}}}
+    request = {"decode_tok_s": 100.0, "decode_s": 0.02, "prompt_tokens": 32}
+    monkeypatch.setattr(harness, "request", lambda *args: (request, block))
+    args = SimpleNamespace(max_requests=1, max_tokens=10, rounds=4, xctrace=False)
+    cell, _ = harness.measure_cell(None, "fake", "", args, "quiet", tmp_path, 32, None, None)
+    assert cell["rounds"] == 4
+    assert cell["per_round"]["period_ms"] == 5
+    assert cell["per_round"]["tokens"] == 2.5
+    assert cell["per_round"]["wall_ms"] == 2
+
+
+def test_overrun_does_not_enter_contended_measurement(monkeypatch, tmp_path):
+    # Stop the cell's load window while the HTTP request is outstanding.
+    import time
+    now = time.monotonic()
+
+    def request(*args):
+        monkeypatch.setattr(harness.time, "monotonic", lambda: now + 10)
+        return {"completion_tokens": 3}, {"enabled": True, "routes": {"a": {"rounds": 1}}}
+
+    args = SimpleNamespace(max_requests=1, max_tokens=3, rounds=1, xctrace=False)
+    monkeypatch.setattr(harness, "request", request)
+    cell, _ = harness.measure_cell(None, "fake", "", args, "contended", tmp_path, 1, None, None,
+                                   load_deadline=now + 5)
+    assert cell["rounds"] == 0 and cell["decode_tok_s_median"] is None
+    assert cell["request_past_load_deadline"] == {"completion_tokens": 3}
+
+
+@pytest.mark.parametrize("keep", [False, True])
+def test_failed_traced_request_stops_recorder_and_respects_keep(monkeypatch, tmp_path, keep):
+    bundle = tmp_path / "metal-1-quiet.trace"
+    stopped = []
+
+    class Recorder:
+        def start(self):
+            self.proc = object()
+            bundle.mkdir()
+            (bundle / "partial").write_bytes(b"data")
+            return True
+
+        def stop(self):
+            stopped.append(True)
+            return 0
+
+    def failed_request(*args):
+        raise TimeoutError("request timed out")
+
+    monkeypatch.setattr(harness, "MetalTrace", lambda *args: Recorder())
+    monkeypatch.setattr(harness, "request", failed_request)
+    args = SimpleNamespace(max_requests=0, xctrace=True, trace_max_size=16, trace_min_free_gib=0,
+                           trace_limit_s=60, trace_max_tokens=64, keep_traces=keep)
+    with pytest.raises(TimeoutError, match="request timed out"):
+        harness.measure_cell(None, "fake", "", args, "quiet", tmp_path, 1, 123, None)
+    assert stopped == [True]
+    assert bundle.exists() == keep
+
+
+def test_preexisting_trace_is_preserved_on_refusal(tmp_path):
+    bundle = tmp_path / "metal-1-quiet.trace"
+    bundle.mkdir()
+    marker = bundle / "existing"
+    marker.write_bytes(b"evidence")
+    args = SimpleNamespace(max_requests=0, xctrace=True, trace_max_size=16, trace_min_free_gib=0,
+                           trace_limit_s=60, trace_max_tokens=64, keep_traces=False)
+    with pytest.raises(FileExistsError, match="refuse to overwrite"):
+        harness.measure_cell(None, "fake", "", args, "quiet", tmp_path, 1, 123, None)
+    assert marker.read_bytes() == b"evidence"
+
+
+def test_missing_contention_measurement_leaves_negative_verdict_open():
+    doc = {"cells": [_cell("quiet", 100, 10.0, 0.2, 0.3)]}
+    assert harness.summarize(doc)["rows"][0]["phase1_go"] is None
+
+
+@pytest.mark.parametrize(("contended_tps", "tokens", "rounds", "verdict"), [
+    (100 / 1.2, 4, 200, True),
+    (50, 2, 200, None),
+    (50, 4, 199, None),
+])
+def test_contention_decision_uses_round_period_and_adequate_comparable_cells(
+        contended_tps, tokens, rounds, verdict):
+    quiet = {**_cell("quiet", 100, 10, 0.1, 0.1), "rounds": 200}
+    contended = {**_cell("contended", contended_tps, 10, 0.1, 0.1, tokens=tokens), "rounds": rounds}
+    result = harness.summarize({"rounds_target": 200, "cells": [quiet, contended]})
+    assert result["rows"][0]["phase1_go"] is verdict

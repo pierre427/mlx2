@@ -678,3 +678,12 @@ def test_fast_path_runs_take_the_reference_signature(monkeypatch):
     assert calls[-1][2] == {"eps": 1e-5}
     glm_spec = glm.HC_SPEC
     assert paths["ds4_expand_fp32"].run(glm_spec, bf[..., 0, :], bf, z[..., :4], f32[..., :4]).dtype == mx.float32
+
+
+def test_fixed_projection_gates_the_effective_head_normalization(monkeypatch):
+    monkeypatch.setattr(hc, "_gpu_refusal", lambda: None)
+    spec = hc.derive(_MODEL_SPECS["ds4"], head_norm_kind="post_inv_l2")
+    name = "ds4_projection_fixed_fp32"
+    assert hc.select("mixes", spec, policy=name, head=False)[1].selected == name
+    with pytest.raises(RuntimeError, match="pre_rms"):
+        hc.select("mixes", spec, policy=name, head=True)

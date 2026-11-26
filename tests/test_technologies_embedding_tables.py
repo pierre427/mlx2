@@ -11,7 +11,7 @@ import json
 import math
 import os
 import struct
-from typing import Optional, Sequence
+from typing import Dict, Optional, Sequence
 
 import numpy as np
 import pytest
@@ -991,3 +991,13 @@ def test_device_limb16_refusal_needs_inputs_and_mirrors_the_device_hasher():
         assert reason.startswith("geometry: ") and text in reason
     ds = et.EngramSpec(max_ngram=4, heads_per_ngram=8, multiplier_law="metadata", history_law="blocked_pad")
     assert et.device_limb16_refusal(ds, **ok).startswith("policy_off: ")
+
+
+def test_qwen_ple_truncated_bias_is_not_broadcast_to_all_groups():
+    from mlx2.runtime.models.qwen4_ple_nvme import dequant_rows_numpy
+
+    # Two g32 groups need two BF16 biases. One remaining bias broadcasts
+    # against both groups in the shared decoder unless the row width is checked.
+    truncated = np.zeros((1, 32 + 2 * 2 + 2), dtype=np.uint8)
+    with pytest.raises(ValueError, match="packed affine4 rows"):
+        dequant_rows_numpy(truncated, 64)

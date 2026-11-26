@@ -394,6 +394,8 @@ def conv_tail(conv_input, lengths, keep, steps):
 
     With ``lengths`` each row is cut at its own valid end.
     """
+    if keep == 0:
+        return conv_input[:, :0, :]
     if lengths is not None:
         ends = mx.clip(lengths, 0, steps)
         positions = (ends[:, None] + mx.arange(keep))[..., None]
@@ -601,13 +603,31 @@ def _gd():
 
 
 def _admit_chunk(name):
-    def admits(spec, *, chunk, **_):
-        return None if chunk == name else "not_requested"
+    def admits(spec, *, chunk, mask, q, k, v, g, beta, state, log_decay=None, **_):
+        if chunk != name:
+            return "not_requested"
+        if state is None:
+            return "state_required"
+        if name == "wy":
+            if log_decay is None:
+                return "log_decay_required"
+            from ..models.kda_chunk_wy import refusal
+
+            return refusal(q, k, v, log_decay, beta, state, mask)
+        from ..models.gdn_chunk32 import refusal
+
+        return refusal(q, k, v, g, beta, state, mask)
     return admits
 
 
-def _admit_kernels(spec, *, kernels, **_):
-    return kernels
+def step_kernel_key_supported(key_dim):
+    return key_dim >= 32 and key_dim % 32 == 0
+
+
+def _admit_step_kernel(spec, *, kernels, k, **_):
+    if kernels is not None:
+        return kernels
+    return None if step_kernel_key_supported(k.shape[-1]) else "incomplete_simd_strip"
 
 
 def _admit_prefill_scan(spec, *, kernels, prefill_chunk_size, q, k, v, g, beta, state,
@@ -679,7 +699,7 @@ RECURRENCE.register(FastPath("chunk_wy", _admit_chunk("wy"), _run_chunk_wy))
 RECURRENCE.register(FastPath("chunk32", _admit_chunk("chunk32"), _run_chunk32))
 RECURRENCE.register(FastPath("prefill_scan", _admit_prefill_scan, _run_prefill_scan))
 RECURRENCE.register(FastPath("core_scan", _admit_core, _run_core))
-RECURRENCE.register(FastPath("step_kernel", _admit_kernels, _run_step_kernel))
+RECURRENCE.register(FastPath("step_kernel", _admit_step_kernel, _run_step_kernel))
 
 _UNCOUNTED_PREFILL = frozenset({"not_requested", "kernels_disallowed"})
 
@@ -715,19 +735,21 @@ def recurrence(
     if (not use_kernel or kernel_refused(GUARD_SITE) or mx.default_device() != mx.gpu
             or (not mx.metal.is_available())):
         kernels = "kernels_disallowed"
+    elif state is None:
+        kernels = "state_required"
     if prefill_chunk_size and kernels is None:
         if type(prefill_chunk_size) is not int or prefill_chunk_size not in (8, 16, 32):
             raise ValueError("prefill_chunk_size must be 0, 8, 16 or 32")
     shape = dict(
         q=q, k=k, v=v, g=g, beta=beta, state=state, mask=mask, kernels=kernels,
-        chunk=chunk, allow_core=allow_core, prefill_chunk_size=prefill_chunk_size,
+        chunk=chunk, log_decay=log_decay, allow_core=allow_core, prefill_chunk_size=prefill_chunk_size,
     )
     run, receipt = RECURRENCE.select(spec, policy=policy, **shape)
     reason = receipt.refusals.get("prefill_scan")
     if reason is not None and reason not in _UNCOUNTED_PREFILL and prefill_stats is not None:
         prefill_stats["fallback_" + reason] += 1
     out, new_state = run(dict(
-        shape, log_decay=log_decay, prefill_stats=prefill_stats,
+        shape, prefill_stats=prefill_stats,
         prefill_segment_rows=prefill_segment_rows,
     ))
     if with_receipt:
@@ -785,11 +807,14 @@ def select_rollback_rows(lengths, counts, snapshots, before, final):
     limit = mx.array(counts, mx.int32)
     ends = mx.broadcast_to(lengths.astype(mx.int32).reshape(-1), (rows,))
     ends = mx.minimum(mx.maximum(ends, 0), limit)
+    zero = (ends == 0).reshape((rows,) + (1,) * (before.ndim - 1))
+    if steps == 1:
+        # A single verify step has no intermediate snapshots to gather.
+        return mx.contiguous(mx.where(zero, before, final))
     idx = mx.minimum(mx.maximum(ends - 1, 0), steps - 2)
     index = idx.reshape((rows, 1) + (1,) * (snapshots.ndim - 2))
     selected = mx.take_along_axis(snapshots, index, axis=1).squeeze(1)
     full = (ends == limit).reshape((rows,) + (1,) * (before.ndim - 1))
-    zero = (ends == 0).reshape((rows,) + (1,) * (before.ndim - 1))
     return mx.contiguous(mx.where(zero, before, mx.where(full, final, selected)))
 
 
