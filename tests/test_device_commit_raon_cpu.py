@@ -94,7 +94,7 @@ def _oracle(monkeypatch, sequence, holder):
 
 
 def _decode(policy, *, prompt=PROMPT, steps=40, composed=False, oracle=None, presence=False,
-            stops=None, inspect=None, **options):
+            stops=None, inspect=None, sampling=None, **options):
     from mlx2.runtime.sample_utils import make_logits_processors
 
     target, draft = raon_route(composed=composed)
@@ -114,7 +114,7 @@ def _decode(policy, *, prompt=PROMPT, steps=40, composed=False, oracle=None, pre
                   if presence else None)
     try:
         uid = engine.insert([list(prompt)], max_tokens=[steps],
-                            sampling_configs=[{"sampling_temp": 0.0}],
+                            sampling_configs=[sampling or {"sampling_temp": 0.0}],
                             logits_processors=processors)[0]
         got, state, final = [], None, None
         for _ in range(400):
@@ -519,3 +519,30 @@ def test_a_cost_handoff_engine_keeps_the_host_commit(monkeypatch):
     assert on == off and on_state == off_state
     assert stats["external_device_round_device_commit_enters"] == 0
     assert stats[DEVICE_COMMIT_SKIPS].get("cost_handoff", 0) > 0
+
+
+# -- exact block verification ----------------------------------------------------
+def test_block_verified_sampled_rounds_keep_the_host_commit():
+    """Device block rounds are not validated under a device commit: a sampled
+    lane under ``exact_verification: "block"`` with sampled drafts commits on
+    the host (counted skip).  (The DFlash2 lazy draft is greedy-only, so on
+    this route such rounds decline earlier; the gate is checked directly.)"""
+    from types import SimpleNamespace
+
+    from mlx2.runtime.speculative_device_round import DeviceRound
+
+    runtime = DeviceRound.__new__(DeviceRound)
+    runtime.policy = DeviceRoundPolicy.from_value({**ON, "sampled_drafts": True})
+    lane = SimpleNamespace(sampling={"sampling_temp": 1.0})
+    owner = SimpleNamespace(cost_per_commit_handoff=None, exact_verification="block",
+                            scheduler_stats={})
+    assert runtime._enter_device_commit(owner, [lane], [None]) is False
+    assert owner.scheduler_stats[DEVICE_COMMIT_SKIPS] == {"block_verification": 1}
+
+
+def test_greedy_rounds_under_block_verification_still_commit_on_the_device():
+    off = _decode(OFF, exact_verification="block")
+    on = _decode(ON, exact_verification="block")
+    assert on[0] == off[0]
+    assert on[3].get("external_device_round_device_commit_enters", 0) > 0
+    assert "block_verification" not in on[3].get(DEVICE_COMMIT_SKIPS, {})

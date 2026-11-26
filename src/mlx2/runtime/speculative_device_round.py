@@ -32,6 +32,11 @@ calls into this module.  Switches (``device_round`` policy object):
     law q instead of taking the argmax, and the round accepts each with
     ``min(1, p/q)`` and resamples a rejection from ``normalized(p - q)+``
     (standard speculative sampling; the bonus from p).  Exact output law.
+``exact_verification: "block"`` (engine policy, not a switch here)
+    The ratio rule decides with exact block verification on the device
+    (``speculative_block_device.block_decide``, the host verifier's
+    algorithm; Sun et al. 2024).  Greedy and point-mass rows keep their
+    rules, as on the host, where those rows never reach the block verifier.
 ``nucleus`` (needs ``decide``)
     Requests with top-p / top-k / min-p keep the device decision: the
     filtered law is the same transform ordinary sampling uses
@@ -104,6 +109,7 @@ COUNTERS = (
     "external_device_round_decide_greedy_lanes",
     "external_device_round_decide_point_mass_lanes",
     "external_device_round_decide_ratio_lanes",
+    "external_device_round_decide_block_lanes",
     "external_device_round_nucleus_lanes",
     "external_device_round_nucleus_window_misses",
     "external_device_round_declines",
@@ -287,7 +293,7 @@ class DeviceRound:
             return "multilane_draft_cap"
         if getattr(owner, "draft_tail_equalize", False):
             return "draft_tail_equalize"
-        if getattr(owner, "exact_verification", "token") != "token":
+        if getattr(owner, "exact_verification", "token") not in ("token", "block"):
             return "block_verification"
         if getattr(owner, "pairwise_selection", "host") == "batched":
             return "pairwise_selection"
@@ -666,6 +672,13 @@ class DeviceRound:
             reason = "width"
         elif copies[0] is not None:
             reason = "prompt_copy"
+        elif (getattr(owner, "exact_verification", "token") == "block"
+              and self.policy is not None and self.policy.sampled_drafts
+              and _temperature(cohort[0]) > 0):
+            # Device block rounds (``block_decide``) are not yet validated
+            # against the switch-off round under a device commit; such rounds
+            # commit on the host.  Greedy and point-mass rows are unaffected.
+            reason = "block_verification"
         else:
             reason = commit.lane_reason(owner, cohort[0])
         if reason is not None:
@@ -690,7 +703,10 @@ class DeviceRound:
         if owner.fly_verification.enabled:
             _decline(owner, "fly_verification", len(cohort))
             return owner._verify(cohort, blocks, logits)
-        if getattr(owner, "exact_verification", "token") != "token":
+        # ``exact_verification: "block"`` needs no decline here: these rows
+        # are greedy or point-mass, which the host verifies by those rules
+        # under either setting.
+        if getattr(owner, "exact_verification", "token") not in ("token", "block"):
             _decline(owner, "block_verification", len(cohort))
             return owner._verify(cohort, blocks, logits)
         mx = owner.mx
@@ -799,7 +815,8 @@ class DeviceRound:
             accepted = self._leading(mx, row.drafts == selected[:count], count)
             last = mx.take(selected, accepted.reshape(1))
         else:
-            plan.kind = "ratio" if row.ratio else "point_mass"
+            block = row.ratio and getattr(owner, "exact_verification", "token") == "block"
+            plan.kind = ("block" if block else "ratio") if row.ratio else "point_mass"
             transform = self._transform(lane)
             if _filters(lane):
                 plan.nucleus = True
@@ -839,6 +856,16 @@ class DeviceRound:
                 if int(logq.shape[-1]) < width:
                     pad = mx.full((count, width - int(logq.shape[-1])), -mx.inf, mx.float32)
                     logq = mx.concatenate([logq, pad], axis=-1)
+            if plan.kind == "block":
+                from .speculative_block_device import block_decide
+
+                uniform = mx.random.uniform(shape=(count,), key=keys[count])
+                accepted, last, _coverage = block_decide(
+                    mx, logp, logq, row.drafts.reshape(-1), uniform,
+                    keys[count + 1: 2 * count + 1], keys[2 * count + 1],
+                )
+                last = last.reshape(1)
+            elif plan.kind == "ratio":
                 idx = row.drafts.reshape(count, 1)
                 lp = mx.take_along_axis(logp[:count], idx, axis=-1).reshape(-1)
                 lq = mx.take_along_axis(logq, idx, axis=-1).reshape(-1)
@@ -918,6 +945,12 @@ class DeviceRound:
             elif plan.kind == "point_mass":
                 _bump(owner.scheduler_stats, "external_device_round_decide_point_mass_lanes")
                 self._lane_count(lane, "decide_point_mass_rounds")
+            elif plan.kind == "block":
+                _bump(owner.scheduler_stats, "external_device_round_decide_block_lanes")
+                self._lane_count(lane, "decide_block_rounds")
+                # The route receipt names exact block verification, as for
+                # host block rounds.
+                lane.block_verified_rounds = getattr(lane, "block_verified_rounds", 0) + 1
             else:
                 _bump(owner.scheduler_stats, "external_device_round_decide_ratio_lanes")
                 self._lane_count(lane, "decide_ratio_rounds")

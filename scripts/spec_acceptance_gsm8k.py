@@ -397,14 +397,18 @@ def served_model_name(status, checkpoint):
 
 
 def run_questions(client, model_name, prefix, items, *, chat, max_tokens, log=None, sampling=None,
-                  request_extra=None, chat_shots=None, instruction=CHAT_INSTRUCTION, deadline=None):
+                  request_extra=None, chat_shots=None, instruction=CHAT_INSTRUCTION, deadline=None,
+                  concurrency=1):
     """``sampling`` (optional) adds temperature/top_p/top_k and a per-question
     seed (``seed + test_index``, the law named ``SEED_LAW``) to every request;
     ``None`` keeps greedy.
     ``request_extra`` (an arm's ``request`` object, e.g. ``enable_thinking`` /
     ``reasoning_effort``) is merged into every request body.
     ``chat_shots`` (chat only) are worked-example turns sent before each
-    question (``few_shot_turns``); ``None`` keeps the zero-shot chat prompt."""
+    question (``few_shot_turns``); ``None`` keeps the zero-shot chat prompt.
+    ``concurrency`` > 1 keeps that many requests in flight (a B>1 arm); rows
+    come back in question order and seeds stay keyed by test index, so a B1
+    and a B4 arm can be compared row by row for batch-width parity."""
     request_extra = dict(request_extra or {})
     reserved = {"model", "temperature", "top_p", "top_k", "seed", "stream", "max_tokens",
                 "messages", "prompt", "stop"}
@@ -412,10 +416,13 @@ def run_questions(client, model_name, prefix, items, *, chat, max_tokens, log=No
         raise ValueError(f"arm request may not set {sorted(reserved & set(request_extra))}")
     if not chat and request_extra:
         raise ValueError("arm request fields apply to --chat runs only")
-    rows = []
-    for index, item in enumerate(items):
+    if type(concurrency) is not int or concurrency < 1:
+        raise ValueError("concurrency must be a positive integer")
+
+    def one(index, item):
         if deadline is not None and time.time() >= deadline:
-            break                               # no new question after --stop-at; the summary counts rows
+            return None                         # no new question after --stop-at; the summary counts rows
+        started_at = time.time()
         start = time.monotonic()
         # Seed by the question's test index, not its position in this run, so an
         # --indices / --offset rerun draws the same seed for the same question.
@@ -447,7 +454,7 @@ def run_questions(client, model_name, prefix, items, *, chat, max_tokens, log=No
                "finish_reason": choice.get("finish_reason"), "completion_tokens": completion,
                "prompt_tokens": usage.get("prompt_tokens"),
                "cached_tokens": (usage.get("prompt_tokens_details") or {}).get("cached_tokens"),
-               "elapsed_seconds": elapsed, "ttft_seconds": ttft,
+               "started_at": started_at, "elapsed_seconds": elapsed, "ttft_seconds": ttft,
                "decode_tps": ((completion - 1) / (elapsed - ttft)
                               if ttft and completion > 1 and elapsed > ttft else None),
                "route": extra.get("route"), "speculation": speculation_receipt(extra), "text": text,
@@ -459,10 +466,22 @@ def run_questions(client, model_name, prefix, items, *, chat, max_tokens, log=No
         if sampling:
             row["effective_sampling"] = find(result, "effective_sampling")
             row["sampling_filter"] = find(result, "sampling_filter")
-        rows.append(row)
         if log:
             log(row)
-    return rows
+        return row
+
+    if concurrency == 1:
+        rows = []
+        for index, item in enumerate(items):
+            row = one(index, item)
+            if row is None:
+                break
+            rows.append(row)
+        return rows
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=concurrency) as pool:
+        results = list(pool.map(lambda pair: one(*pair), enumerate(items)))
+    return [row for row in results if row is not None]
 
 
 def summarize(rows, draft_depth=None):
@@ -501,11 +520,15 @@ def write_atomic(path, document):
 
 def compact(row):
     keep = {k: row.get(k) for k in ("index", "test_index", "expected", "predicted", "correct", "finish_reason",
-                                     "completion_tokens", "decode_tps", "text", "route", "markers", "reasoning_markers",
+                                     "completion_tokens", "decode_tps", "started_at", "elapsed_seconds",
+                                     "text", "route", "markers", "reasoning_markers",
                                      "det_tiles")}
     spec = row.get("speculation") or {}
     keep["accept_hist"] = spec.get("verify_accept_hist")
     keep["depth_hist"] = spec.get("verify_depth_hist")
+    # Which verifier decided (e.g. "exact_block") and its round count.
+    keep["verification"] = spec.get("verification")
+    keep["block_verified_rounds"] = (spec.get("exact_verification") or {}).get("block_verified_rounds")
     for name in ("effective_sampling", "sampling_filter"):
         if name in row:
             keep[name] = row[name]
@@ -669,13 +692,17 @@ def main(argv=None):
                        "--max-context", str(args.max_context), "--cache-bytes", str(2 << 30),
                        "--cache-dir", str(out / "cache"), "--admin-token-file", str(token_file),
                        *arm.get("args", [])]
+            concurrency = int(arm.get("concurrency", 1))
             if "--max-lanes" not in arm.get("args", []):
-                command += ["--max-lanes", "1"]
+                command += ["--max-lanes", str(concurrency)]
+            if concurrency > 1 and "--max-inflight" not in arm.get("args", []):
+                command += ["--max-inflight", str(concurrency)]   # argparse: the last one wins
             log = (out / "server.log").open("w")
             env = {**os.environ, "PYTHONPATH": str(tree / "src"), **arm.get("env", {})}
             server = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT,
                                       process_group=0, env=env, cwd=tree)
             row = {"name": arm["name"], "tree": str(tree), "revision": revision(tree),
+                   "concurrency": concurrency,
                    "args": arm.get("args", []), "env": arm.get("env", {}), "request": arm_request,
                    "command": command}
             try:
@@ -698,7 +725,8 @@ def main(argv=None):
                 row["startup_status"] = status
                 rows = run_questions(client, served_model_name(status, receipt["checkpoint"]), prefix, items, chat=args.chat, chat_shots=chat_shots, instruction=instruction,
                                      max_tokens=args.max_tokens, log=progress(arm["name"]), sampling=sampling,
-                                     request_extra=arm_request, deadline=deadline)
+                                     request_extra=arm_request, deadline=deadline,
+                                     concurrency=concurrency)
                 time.sleep(1.5)
                 row["final_status"] = client.call("/v1/status")
                 (out / "metrics.prom").write_text(client.call("/metrics"))

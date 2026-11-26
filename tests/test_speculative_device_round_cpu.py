@@ -583,3 +583,50 @@ def test_copies_are_capped_to_the_lane_exact_width():
     assert DeviceRound._lane_exact_copy_cap(owner, [1]) is None
     owner.progressive_verification_fidelity = None
     assert DeviceRound._lane_exact_copy_cap(owner, [1, 2]) is None
+
+
+# -- exact block verification on the device ------------------------------------
+BLOCK = {**BOTH, "sampled_drafts": True}
+
+
+def test_block_verification_rounds_decide_on_the_device_with_the_target_law(pinned_law):
+    """``exact_verification: "block"`` with sampled drafts: ratio rounds take
+    the device block rule (no decline), the route receipt names exact block
+    verification, and every emitted token follows the pinned target law."""
+    target, draft = pinned_law
+    batch = _engine(target, draft, 4, device_round=BLOCK, exact_verification="block")
+    counts, tokens, receipts = np.zeros(3), 0, []
+    try:
+        for request in range(60):
+            uid = batch.insert([_prompt(request, 12)], max_tokens=[6],
+                               sampling_configs=[{"sampling_temp": 1.0}])[0]
+            lane = batch.lanes[uid]
+            for token in _run(batch, uid):
+                counts[LAW_TOKENS.index(token)] += 1
+                tokens += 1
+            receipts.append(getattr(lane, "block_verified_rounds", 0))
+        stats = dict(batch.scheduler_stats)
+    finally:
+        batch.close()
+    freq = counts / tokens
+    assert np.all(np.abs(freq - LAW) < 4 * np.sqrt(LAW * (1 - LAW) / tokens))
+    assert stats["external_device_round_decide_block_lanes"] > 0
+    assert stats.get("external_device_round_decide_ratio_lanes", 0) == 0
+    assert stats["external_device_round_declines"] == 0
+    assert sum(receipts) == stats["external_device_round_decide_block_lanes"]
+
+
+def test_block_verification_keeps_greedy_and_point_mass_rules(agreeing):
+    """Greedy rows under block verification are the greedy rule (bitwise the
+    token-wise device round), and point-mass rows keep their rule: neither
+    declines, as the host never sends those rows to the block verifier."""
+    target, draft = agreeing
+    plain, _, _ = _decode(target, draft, _prompt(5), 4, 20, device_round=BOTH)
+    block, _, stats = _decode(target, draft, _prompt(5), 4, 20, device_round=BOTH,
+                              exact_verification="block")
+    assert block == plain
+    assert stats["external_device_round_declines"] == 0
+    _, _, stats = _decode(target, draft, _prompt(5), 4, 20, {"sampling_temp": 1.0},
+                          device_round=BOTH, exact_verification="block")
+    assert stats["external_device_round_decide_point_mass_lanes"] > 0
+    assert stats["external_device_round_declines"] == 0

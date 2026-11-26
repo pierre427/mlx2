@@ -459,3 +459,36 @@ def test_external_route_distinguishes_target_from_composite_digest():
 def test_native_mtp_zero_round_histograms_are_evidence():
     receipt = gsm.speculation_receipt({"mtp": {"stats": {"verify_accept_hist": {}, "verify_depth_hist": {}}}})
     assert receipt["verify_accept_hist"] == receipt["verify_depth_hist"] == {}
+
+
+def test_concurrent_arm_keeps_question_order_and_test_index_seeds():
+    """A B4 arm keeps four requests in flight, returns rows in question order,
+    and seeds each request by its test index, so it compares row by row with
+    the B1 arm for batch-width parity."""
+    import time as _time
+    lock = threading.Lock()
+    state = {"inflight": 0, "peak": 0, "seeds": {}}
+
+    class Slow:
+        def call(self, path, payload, **k):
+            with lock:
+                state["inflight"] += 1
+                state["peak"] = max(state["peak"], state["inflight"])
+            _time.sleep(0.05)
+            question = payload["messages"][-1]["content"]
+            with lock:
+                state["inflight"] -= 1
+                state["seeds"][question.split()[0]] = payload["seed"]
+            answer = question.split()[0]
+            return {"choices": [{"message": {"content": f"#### {answer}"}, "finish_reason": "stop"}],
+                    "usage": {"completion_tokens": 3}}
+
+    items = [{"question": f"{n} q", "answer": f"#### {n}", "test_index": 100 + n} for n in range(8)]
+    rows = gsm.run_questions(Slow(), "m", "", items, chat=True, max_tokens=8,
+                             sampling={"temperature": 0.7, "seed": 5}, concurrency=4)
+    assert [r["test_index"] for r in rows] == [100 + n for n in range(8)]
+    assert all(r["correct"] for r in rows)
+    assert state["peak"] == 4
+    assert state["seeds"] == {str(n): 5 + 100 + n for n in range(8)}
+    with pytest.raises(ValueError, match="concurrency"):
+        gsm.run_questions(Slow(), "m", "", items, chat=True, max_tokens=8, concurrency=0)
