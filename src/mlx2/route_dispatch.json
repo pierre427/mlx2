@@ -36,6 +36,11 @@
       "sha256": "a076d71aec3c3bb894192ad7af18986d860c29bd61052b0adc1eb461b113d776",
       "targets": [],
       "reason": "Reviewed VLMBackend.load_processor (b0ebffe23, e5940bf5e; native Gemma 4 processor path). Its importlib.import_module(\"mlx_vlm.models.\" + self.family) registers the bound family's processor with AutoProcessor; the prefix is the literal external mlx_vlm.models package and self.family is the contract-bound family already checked by validate_model_dispatch and verify_contract, so it can never resolve an mlx2 module and adds nothing to the local closure. The other two loaders (mlx_vlm, mlx_vlm.utils) are literal external imports. mlx-vlm source stays bound by the per-family vlm_contracts pin. Restores route-scoped source identity, which had fallen back to full_source for every route."
+    },
+    "mlx2.runtime.native_extension": {
+      "sha256": "300e04bcfa00c864f5b605060f67f46e5719d5ef545d48187ed3e705581b5338",
+      "targets": [],
+      "reason": "Reviewed 2026-11-26: load_extension imports a compiled diagnostic extension (round_probe's opt-in Metal replay step_replay .so under build/) by file path. The target is native code outside the source tree, so it adds no local Python source; no targets."
     }
   }
 }

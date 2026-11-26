@@ -1538,7 +1538,7 @@ class Inkling2Adapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
         if policy.get("native_replay"):
             # The fixed-capacity step and the engine that may serve it.
             names += ("inkling2/capacity_state.py", "../replay/engine.py",
-                      "../replay/loader.py")
+                      "../replay/loader.py", "../native_extension.py")
         contract = {
             "operation": numerics_operation(policy),
             "kernel_policy": dict(getattr(self, "kernel_policy", {})),

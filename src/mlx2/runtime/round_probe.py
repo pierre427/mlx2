@@ -383,15 +383,12 @@ def _module_path():
 def _install_native():
     """Load step_replay, install its hooks and start the GPU timeline (P0/P3)."""
     global _native
-    import importlib.machinery
-    import importlib.util
+    from .native_extension import load_extension
+
     path = _module_path()
     _gpu["module"] = str(path)
     try:
-        loader = importlib.machinery.ExtensionFileLoader("mlx2_step_replay._step_replay", str(path))
-        spec = importlib.util.spec_from_file_location("mlx2_step_replay._step_replay", str(path), loader=loader)
-        module = importlib.util.module_from_spec(spec)
-        loader.exec_module(module)
+        module = load_extension("mlx2_step_replay._step_replay", str(path))
         hooks = module.install_hooks()
         if not hooks.get("installed"):
             raise RuntimeError(f"step_replay hooks not installed: {hooks.get('error')}")

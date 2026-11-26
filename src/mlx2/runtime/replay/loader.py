@@ -15,13 +15,13 @@ working with the engine reported unavailable.
 
 from __future__ import annotations
 
-import importlib.machinery
-import importlib.util
 import os
 import sys
 import sysconfig
 import threading
 from pathlib import Path
+
+from ..native_extension import load_extension
 
 API_VERSION = 1
 PACKAGE = "mlx2_step_replay"
@@ -119,11 +119,7 @@ def _load():
     if sys.implementation.cache_tag != "cpython-312":
         return None, "wrong_python"
     try:
-        loader = importlib.machinery.ExtensionFileLoader(f"{PACKAGE}.{MODULE}", str(path))
-        spec = importlib.util.spec_from_file_location(f"{PACKAGE}.{MODULE}", str(path),
-                                                      loader=loader)
-        module = importlib.util.module_from_spec(spec)
-        loader.exec_module(module)
+        module = load_extension(f"{PACKAGE}.{MODULE}", str(path))
     except Exception:  # noqa: BLE001 - admission never raises
         return None, "import_failed"
     reason = _admit(module)
