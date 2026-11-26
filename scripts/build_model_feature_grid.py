@@ -53,7 +53,7 @@ VARIANTS = {
 FEATURES = (
     "oq4e_conversion",
     # Raon-1-mini levers (2026-11-25): merged decode projections, fused mHC sites.
-    "merged_projections", "mhc_fused",
+    "merged_projections", "mhc_fused", "mla_flash_expanded", "moe_nax_gather_affine",
     # Hy4-flash (2026-11-18): embedded DFly2 drafter, chain-packed AST executor.
     "dfly2_embedded_draft", "hy4_chain_packed_tree_executor",
     "hy4_fp8_latent_kv", "engram_table_formats", "dfly2_conditioned_tree_tails",

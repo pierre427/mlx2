@@ -820,10 +820,15 @@ def test_mla_forward_keeps_no_query_block_on_the_module():
 
 def test_absorbed_flash_refuses_a_head_count_the_kernel_does_not_tile():
     from mlx2.runtime.models import kimi_linear_mla_flash as fl
-    qa, qs = mx.zeros((1,16,4,512), mx.bfloat16), mx.zeros((1,16,4,64), mx.bfloat16)
+    # 32 heads take Kimi's two-group kernel and up to 48 the head-group-
+    # generic one (zero-query padding); more than 3 groups cannot tile.
+    qa, qs = mx.zeros((1,64,4,512), mx.bfloat16), mx.zeros((1,64,4,64), mx.bfloat16)
     lat, sh = mx.zeros((1,1,9,512), mx.bfloat16), mx.zeros((1,1,9,64), mx.bfloat16)
     with pytest.raises(ValueError, match="geometry"):
-        fl.absorbed_geometry(qa, qs, lat, sh, "causal", heads=16)
+        fl.absorbed_geometry(qa, qs, lat, sh, "causal", heads=64)
+    with pytest.raises(ValueError, match="geometry"):
+        fl.absorbed_geometry(qa[:, :16], qs[:, :16], lat, sh, "causal", heads=32)
+    assert fl.absorbed_geometry(qa[:, :16], qs[:, :16], lat, sh, "causal", heads=16)[:3] == (1, 4, 9)
 
 
 def test_dense_weight_cache_follows_scales_and_biases():

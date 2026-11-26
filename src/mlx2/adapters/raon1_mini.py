@@ -36,7 +36,8 @@ PACK_REPOSITORY = "KRAFTON/Raon-1-mini-mlx"
 PACK_REVISION = "3804c11410aa9d3e51d7667d6d6d5de596d3cc41"
 CONVERSION_RECIPE = "raon1-mini-mxfp8e-v1"
 AFFINE_RECIPE = "raon1-mini-affine-a4g64-h8g64-v1"
-RECIPE_LAYOUTS = {CONVERSION_RECIPE: "mlx2_mxfp8e", AFFINE_RECIPE: "mlx2_affine"}
+MIX_RECIPE = "raon1-mini-affine-mix-v1"
+RECIPE_LAYOUTS = {CONVERSION_RECIPE: "mlx2_mxfp8e", AFFINE_RECIPE: "mlx2_affine", MIX_RECIPE: "mlx2_affine"}
 DEFAULT_CONTEXT = 262144
 CACHE_LAYOUT = "raon1-mini-mhc4-rda-fp32-nope-latent-mla-v1"
 EOS_TOKEN_IDS = (259202, 259200)
@@ -119,9 +120,17 @@ def validate_config(config: dict) -> str:
         layout = RECIPE_LAYOUTS[conversion["recipe"]]
         if layout == "mlx2_affine":
             quant = config.get("quantization") or {}
-            if ((quant.get("mode"), quant.get("bits"), quant.get("group_size")) != ("affine", 4, 64)
-                    or quant.get("lm_head") != {"group_size": 64, "bits": 8}):
-                raise ValueError("Raon affine artifact must declare a4g64 with an 8-bit g64 head")
+            if conversion["recipe"] == AFFINE_RECIPE:
+                if ((quant.get("mode"), quant.get("bits"), quant.get("group_size")) != ("affine", 4, 64)
+                        or quant.get("lm_head") != {"group_size": 64, "bits": 8}):
+                    raise ValueError("Raon affine artifact must declare a4g64 with an 8-bit g64 head")
+            else:
+                # Calibrated mixed recipe: affine everywhere, per-module 4/8-bit, group 32/64.
+                specs = [quant] + [v for v in quant.values() if isinstance(v, dict)]
+                if (quant.get("mode") != "affine"
+                        or any(v.get("bits", quant.get("bits")) not in (4, 8)
+                               or v.get("group_size", quant.get("group_size")) not in (32, 64) for v in specs)):
+                    raise ValueError("Raon mixed affine artifact must be affine 4/8-bit, group 32/64")
         return layout
     quant = config.get("quantization") or {}
     if (quant.get("mode"), quant.get("bits"), quant.get("group_size")) == ("nvfp4", 4, 16):
@@ -195,8 +204,8 @@ def inspect_artifact(model_path):
     return artifact
 
 
-NUMERIC_POLICY_KEYS = frozenset({"moe_nax", "mla", "mla_flash", "rda", "fused_norm", "reasoning_effort", "mhc",
-                                 "merged_projections", "rms_law", "mla_expanded_gib"})
+NUMERIC_POLICY_KEYS = frozenset({"moe_nax", "mla", "mla_flash", "mla_decode", "rda", "fused_norm",
+                                 "reasoning_effort", "mhc", "merged_projections", "rms_law", "mla_expanded_gib"})
 
 
 def split_policy(policy=None):
@@ -209,8 +218,8 @@ def parse_policy(policy=None):
     policy = dict(policy or {})
     # mla "auto": expanded fused-causal SDPA for prompt chunks, absorbed
     # one-pass latent for decode/verify rows (Kimi Linear's measured law).
-    # The NAX latent/flash192 kernels are fixed at Kimi's 32 heads and decline
-    # Raon's 40, so mla_flash stays off.  rda "kernel": the gated-delta vector
+    # Kimi's NAX latent kernel is fixed at 32 heads; Raon's 40 take the
+    # head-group-generic copy only under mla_decode.  rda "kernel": the gated-delta vector
     # Metal kernel; "chunk_wy" is a candidate prefill law (opt-in, unmeasured).
     # mhc "fused": two-launch mHC sites (runtime.models.raon1_mini_fused),
     # opt-in until the probe classifies it against the ops law and an A/B
@@ -220,9 +229,27 @@ def parse_policy(policy=None):
     # behind a 40-head probe; opt-in, not bitwise to the fused D256 SDPA law,
     # unmeasured.  moe_nax "gather": mlx2's segmented NAX sorted expert gather
     # (bit-identical to MLX's sorted gather) for prompt chunks; affine
-    # artifact only (it keys on QuantizedSwitchLinear); opt-in, unmeasured.
-    defaults = {"moe_nax": "off", "mla": "auto", "mla_flash": "off", "rda": "kernel", "fused_norm": False,
-                "reasoning_effort": None, "mhc": "ops",
+    # artifact only (it keys on QuantizedSwitchLinear).  NOT HELPFUL, left
+    # off (2026-11-25, NAX unit 56a957a87): engaged (6192 gathers) but no
+    # prefill gain at 2K-128K.  mla_flash expanded: +11-20 % prefill at
+    # 8K/32K and 2.55x at 128K on NVFP4, 128K needle found, but GSM8K30 one
+    # question flipped wrong (flash-c5fa61ac4); stays opt-in.
+    # mla_decode "nax_absorbed": the absorbed NAX latent flash for decode /
+    # verify rows (<= 16) at 40 heads (3 head groups, zero-query padding to
+    # 48), behind a memoized probe against absorbed_reference.  Replaces the
+    # latent_single law, which casts the whole cached latent to FP32 every
+    # token in all 7 MLA layers (week ladder 2026-11-25: 54 tok/s at 32K,
+    # 27.7 at 128K).  Opt-in, unmeasured: needs the GPU unit
+    # (scripts/raon1_mini_nax_decode_unit_20261125.sh) first.
+    defaults = {"moe_nax": "off", "mla": "auto", "mla_flash": "off", "mla_decode": "off", "rda": "kernel", "fused_norm": False,
+                # mhc "fused" (two-launch mHC sites for decode/verify rows,
+                # <= 8 rows) DEFAULT ON, Pierre 2026-11-25: +11 % decode on top
+                # of merged projections, teacher-forced top-1 100 %, KL 0.0024,
+                # one exact-tie greedy divergence with both continuations
+                # correct (qualification/runs/raon1-mini-20261125/
+                # levers-dc587def2/mhc-fused.json).  "fused_all" also fuses
+                # prompt chunks (opt-in, unmeasured); "ops" is the reference law.
+                "reasoning_effort": None, "mhc": "fused",
                 # One matmul for RDA q/k/v/b/f_a/g/w and MLP up/gate at <= 8
                 # rows (resident merged copy, ~0.6 GB on the NVFP4 pack).
                 # DEFAULT ON (2026-11-25, unqualified): bitwise-identical
@@ -253,7 +280,13 @@ def parse_policy(policy=None):
     if result["mla"] not in {"expanded", "latent_tiled", "latent_single", "auto"}:
         raise ValueError("unsupported Raon MLA law")
     if result["mla_flash"] not in {"off", "expanded"}:
-        raise ValueError("mla_flash must be off or expanded (the absorbed NAX decode kernel is 32-head only)")
+        raise ValueError("mla_flash must be off or expanded (absorbed decode rows: mla_decode)")
+    if result["mla_decode"] not in {"off", "nax_absorbed"}:
+        raise ValueError("mla_decode must name off or nax_absorbed")
+    if result["mla_decode"] != "off" and result["mla"] != "auto":
+        # Only the auto law asks the absorbed gate; an explicit latent law
+        # would leave the lever silently unused.
+        raise ValueError("mla_decode nax_absorbed needs mla auto")
     if result["moe_nax"] not in {"off", "gather"}:
         raise ValueError("moe_nax must name off or gather")
     if result["rda"] not in {"reference", "kernel", "chunk_wy"}:
@@ -262,8 +295,8 @@ def parse_policy(policy=None):
         raise ValueError("mla_expanded_gib must be an integer from 1 to 24")
     if result["rms_law"] not in {"mlx", "fp32"}:
         raise ValueError("rms_law must name mlx or fp32")
-    if result["mhc"] not in {"ops", "fused"}:
-        raise ValueError("mhc must name ops or fused")
+    if result["mhc"] not in {"ops", "fused", "fused_all"}:
+        raise ValueError("mhc must name ops, fused or fused_all")
     if type(result["merged_projections"]) is not bool:
         raise ValueError("merged_projections must be boolean")
     if type(result["fused_norm"]) is not bool:
@@ -478,6 +511,7 @@ class RaonAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
     def capability_receipts(self):
         status = self.model.mechanism_status()
         flash_calls = status["mla"].get("expanded_flash192", 0) + status["mla"].get("expanded_flash192_windows", 0)
+        decode_calls = int(status["mla"].get("decode_nax_absorbed", 0))
         external = getattr(self, "draft_model", None) is not None
         unq = {"qualified": False, "selection_authority": "serving_route_receipt"}
         return {
@@ -505,7 +539,16 @@ class RaonAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
                           "selected": self.policy["mla_flash"] != "off", "mode": self.policy["mla_flash"],
                           "qualified": False, "observed_used": flash_calls > 0, "calls": flash_calls,
                           "declined": int(status["mla"].get("flash_declined", 0)),
-                          "absorbed_decode": "not implemented: the NAX absorbed kernel's grid covers 32 heads"},
+                          "absorbed_decode": "see mla_decode"},
+            "mla_decode": {"implemented": True,
+                           "scope": "absorbed NAX latent flash for decode/verify rows, 40 heads (3 head groups, 8 pad heads)",
+                           "selected": self.policy["mla_decode"] != "off", "mode": self.policy["mla_decode"],
+                           "qualified": False, "observed_used": decode_calls > 0, "calls": decode_calls,
+                           "declined": int(status["mla"].get("decode_nax_declined", 0)),
+                           "declined_by_reason": {
+                               key[len("decode_nax_declined_"):]: int(value)
+                               for key, value in status["mla"].items()
+                               if key.startswith("decode_nax_declined_")}},
             "moe_nax_gather": {"implemented": True, "scope": "affine artifact only",
                                "selected": self.policy["moe_nax"] != "off", "mode": self.policy["moe_nax"],
                                "qualified": False},

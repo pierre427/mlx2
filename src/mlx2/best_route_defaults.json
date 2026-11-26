@@ -1177,7 +1177,7 @@
      "kind": "adapter_default"
     }
    ],
-   "reason": "decision row from another lane: Operator decision: Pierre 2026-11-25 asked for the official DFlash2 drafter by default. Route: ast drafter=Raon-1-mini-dflash2@sha256:61c18a66679a50bbb0a4cf66e78870fbbb96d87d560b8eb5a12bcd59b0a6036a adapter=RaonAdapter (on Raon --ast lowers to the external DFlash2 chain, adapter default num_draft 5). GSM8K30 greedy thinking off one lane: ordinary 96.7 % 75.3 tok/s vs DFlash2 nd5 96.7 % 108.7 tok/s (+44 %, MAL 4.08; quiet host, dc587def2). Near-tie gate (unit 56a957a87): all 10 completions that differ from ordinary first diverge at a near tie (margins 0.0-0.25 nat <= 0.5), both continuations co",
+   "reason": "decision row from another lane: Operator decision: Pierre 2026-11-25 asked for the official DFlash2 drafter by default and confirmed it directly ('dflash - yes, default for one at a time'). Route: ast drafter=Raon-1-mini-dflash2@sha256:61c18a66679a50bbb0a4cf66e78870fbbb96d87d560b8eb5a12bcd59b0a6036a adapter=RaonAdapter (on Raon --ast lowers to the external DFlash2 chain, adapter default num_draft 5). GSM8K30 greedy thinking off one lane: ordinary 96.7 % 75.3 tok/s vs DFlash2 nd5 96.7 % 108.7 tok/s (+44 %, MAL 4.08; quiet host, dc587def2). Near-tie gate (unit 56a957a87): all 10 completions that differ from ordinary first dive",
    "evidence": {
     "files": [
      "qualification/runs/raon1-mini-20261125/unit-56a957a87/classify.json",

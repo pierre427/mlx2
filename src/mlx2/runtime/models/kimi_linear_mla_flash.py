@@ -1347,6 +1347,52 @@ def _absorbed_kernels(variant="tiled"):
     return partial, combine
 
 
+# ---------------------------------------------------------------------------
+# Head-group-generic absorbed kernel (Raon-1-mini's 40 heads; opt-in).
+#
+# The tiled kernel above is fixed at 2 head groups x 16 heads = 32 heads (8
+# simdgroups).  This variant is the same source with the head-group count a
+# template constant HG sizing its threadgroup arrays; the threadgroup holds
+# HG x 4 simdgroups.  Heads that do not fill the last group are padded with
+# zero queries (finite uniform softmax rows), combined at the padded count
+# and dropped.  Kimi's 32 heads never take this kernel: ``absorbed`` keeps
+# the original kernel object, source, name, grid and template for them.
+# Threadgroup memory: p_tile HG x 8 KiB + red_max/red_sum HG x 512 B, so 3
+# groups (25.5 KiB) is the bound under Apple's 32 KiB.
+# ---------------------------------------------------------------------------
+GROUP_HEADS = 16
+MAX_HEAD_GROUPS = 3
+_GROUPED_DECLS = ("red_max[2][4][16]", "red_sum[2][4][16]", "p_tile[2][BK / 16][32 * 8]")
+
+
+def head_groups(heads):
+    """Head groups the absorbed kernel runs for ``heads``: 2 (the original
+    kernel) at 32, ceil(heads/16) for the grouped kernel, None if refused."""
+    heads = int(heads)
+    if heads == HEADS:
+        return 2
+    groups = -(-heads // GROUP_HEADS)
+    return groups if heads >= 1 and groups <= MAX_HEAD_GROUPS else None
+
+
+def _grouped_source():
+    source = _ABSORBED
+    for decl in _GROUPED_DECLS:
+        line = "threadgroup float " + decl + ";"
+        if source.count(line) != 1:
+            raise RuntimeError(f"absorbed kernel source drifted: {line}")
+        source = source.replace(line, "threadgroup float " + decl.replace("[2]", "[HG]", 1) + ";")
+    return source
+
+
+@cache
+def _absorbed_grouped_kernel():
+    return mx.fast.metal_kernel(name="mlx2_mla_latent_flash_tiled_hg_v1",
+        input_names=["q", "qs", "latent", "shared", "params", "scalep", "starts"],
+        output_names=["m_out", "l_out", "o_out"], header=_HEADER, source=_grouped_source(),
+        ensure_row_contiguous=True)
+
+
 def absorbed_geometry(q, qs, latent, shared, mask, heads=HEADS, width=None):
     if (q.dtype not in (mx.bfloat16, mx.float16)
             or any(z.dtype != q.dtype for z in (qs, latent, shared))):
@@ -1357,9 +1403,10 @@ def absorbed_geometry(q, qs, latent, shared, mask, heads=HEADS, width=None):
     cap = latent.shape[2]
     width = cap if width is None else int(width)
     # The partial kernel's grid has no head axis: one threadgroup covers all
-    # HEADS heads of a row, so any other head count reads or writes out of
-    # bounds (``heads`` reaches the combine kernel only).
-    if (h != heads or heads != HEADS or q.shape[-1] != LATENT or qs.shape != (b, h, t, SHARED)
+    # heads of a row.  32 heads run the original two-group kernel; any other
+    # count up to GROUP_HEADS * MAX_HEAD_GROUPS runs the head-group-generic
+    # kernel over zero-padded query heads (``head_groups``).
+    if (h != heads or head_groups(heads) is None or q.shape[-1] != LATENT or qs.shape != (b, h, t, SHARED)
             or latent.shape != (b, 1, cap, LATENT) or shared.shape != (b, 1, cap, SHARED)
             or t < 1 or width < 1 or width > cap):
         raise ValueError("Kimi latent flash geometry")
@@ -1407,6 +1454,9 @@ def absorbed(q, qs, latent, shared, mask, *, scale, heads=HEADS, split=None, off
         count = -(-width // split)
     cap = latent.shape[2]
     params = mx.array([t, width, offset, int(causal), split, count, cap], mx.int32)
+    if heads != HEADS:
+        return _absorbed_grouped(q, qs, latent, shared, params, b, t, count, cap, heads,
+                                 scale=scale, variant=variant, stage=stage, starts=starts)
     partial, _ = _absorbed_kernels(variant)
     template = [("T", q.dtype), ("H", heads)]
     if variant != "tiled":
@@ -1421,6 +1471,32 @@ def absorbed(q, qs, latent, shared, mask, *, scale, heads=HEADS, split=None, off
     if stage == "partial":
         return m, l, o
     return combine_partials(m, l, o, params, b, t, heads, q.dtype)
+
+
+def _absorbed_grouped(q, qs, latent, shared, params, b, t, count, cap, heads, *, scale, variant,
+                      stage, starts):
+    """``absorbed`` at a non-32 head count: pad the query heads with zeros to
+    whole 16-head groups, run the HG-group kernel, combine at the padded
+    count and drop the padded heads.  ``stage="partial"`` returns the partials
+    at the padded head count (combine them with ``heads`` = the padded count)."""
+    if variant != "tiled":
+        raise ValueError("the head-group-generic latent flash has the tiled variant only")
+    groups = head_groups(heads)
+    padded = groups * GROUP_HEADS
+    if padded != heads:
+        pad = [(0, 0), (0, padded - heads), (0, 0), (0, 0)]
+        q, qs = mx.pad(q, pad), mx.pad(qs, pad)
+    m, l, o = _absorbed_grouped_kernel()(
+        inputs=[q, qs, latent.reshape(b, cap, LATENT), shared.reshape(b, cap, SHARED),
+                params, mx.array([scale*_LOG2E], mx.float32), _starts(starts, b)],
+        template=[("T", q.dtype), ("H", padded), ("HG", groups)],
+        grid=(t*groups*128, count, b), threadgroup=(groups*128, 1, 1),
+        output_shapes=[(b*t*count*padded,), (b*t*count*padded,), (b*t*count*padded, LATENT)],
+        output_dtypes=[mx.float32]*3)
+    if stage == "partial":
+        return m, l, o
+    out = combine_partials(m, l, o, params, b, t, padded, q.dtype)
+    return out if padded == heads else out[:, :heads]
 
 
 def combine_partials(m, l, o, params, b, t, heads, dtype):

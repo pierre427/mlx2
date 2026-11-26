@@ -516,13 +516,99 @@ def expanded_flash_available(heads: int, dtype) -> bool:
     return _EXPANDED_FLASH_OK[key]
 
 
+_ABSORBED_FLASH_OK: dict = {}
+# Heads the head-group-generic absorbed decode kernel is admitted at: Raon's
+# 40 (three 16-head groups, 8 zero-query pad heads).  Any other count
+# declines even when the kernel would take it, so a new head count needs its
+# own probe and A/B before it is listed.
+NAX_DECODE_HEADS = frozenset({40})
+
+
+def absorbed_flash_available(heads: int, dtype) -> bool:
+    """Memoized probe of the head-group-generic absorbed NAX latent flash
+    (kimi_linear_mla_flash.absorbed at ``heads`` != 32) against its FP32 ops
+    law (``absorbed_reference``) on an M5 GPU, with Kimi's 2e-2 relative
+    bound: one decode row and an 8-row verify block over two key splits with
+    an in-place capacity buffer.  Any refusal or mismatch declines."""
+    key = (int(heads), str(dtype))
+    if key not in _ABSORBED_FLASH_OK:
+        from . import kimi_linear_mla_flash as fl
+
+        ok = False
+        if mx.default_device() == mx.gpu and fl._device_is_m5() and fl.head_groups(heads):
+            try:
+                ok = absorbed_flash_canary(heads, dtype)["ok"]
+            except Exception as exc:  # noqa: BLE001 - compile failure / refusal declines cleanly
+                from .served_exp import is_device_fault
+
+                if is_device_fault(exc):
+                    raise
+                ok = False
+        _ABSORBED_FLASH_OK[key] = ok
+    return _ABSORBED_FLASH_OK[key]
+
+
+def absorbed_flash_canary(heads: int, dtype, *, seed: int = 20261125, bound: float = 2e-2) -> dict:
+    """The absorbed-flash canary at ``heads``: kernel vs ``absorbed_reference``
+    (relative L2 per case, FP32 law bound).  GPU only; returns the cases."""
+    from . import kimi_linear_mla_flash as fl
+
+    cases = []
+    k1, k2, k3, k4 = mx.random.split(mx.random.key(seed), 4)
+    scale = (fl.NOPE + fl.SHARED) ** -0.5
+    for rows, width, cap, split in ((1, 4100, 4100, None), (8, 2300, 2560, 2048), (1, 130, 130, None)):
+        q = (mx.random.normal((1, heads, rows, fl.LATENT), key=k1) * 0.05).astype(dtype)
+        qs = (mx.random.normal((1, heads, rows, fl.SHARED), key=k4) * 0.5).astype(dtype)
+        lat = mx.random.normal((1, 1, cap, fl.LATENT), key=k2).astype(dtype)
+        sh = mx.random.normal((1, 1, cap, fl.SHARED), key=k3).astype(dtype)
+        got = fl.absorbed(q, qs, lat, sh, "causal", scale=scale, heads=heads, split=split, width=width)
+        ref = fl.absorbed_reference(q, qs, lat, sh, "causal", scale=scale, heads=heads, width=width)
+        rel, finite = fl._rel(ref, got)
+        cases.append({"rows": rows, "width": width, "capacity": cap, "split": split,
+                      "rel_l2": rel, "finite": finite, "shape": list(got.shape)})
+    ok = all(c["finite"] and c["rel_l2"] < bound and c["shape"][1] == heads for c in cases)
+    return {"heads": int(heads), "dtype": str(dtype), "bound": bound, "ok": ok, "cases": cases}
+
+
 class MLA(kimi.MultiLatentAttention):
     """Kimi's NoPE latent attention with a low-rank query and a sigmoid output gate."""
 
+    # "off" (default): absorbed decode rows take Kimi's latent_single law.
+    # "nax_absorbed": the head-group-generic absorbed NAX latent flash for
+    # decode/verify rows (<= auto_rows) at NAX_DECODE_HEADS behind its probe.
+    decode_nax = "off"
+
+    def _decode_nax_admits(self, q_rows, mask, starts):
+        a = self.args
+        reason = None
+        if a.num_attention_heads not in NAX_DECODE_HEADS:
+            reason = "heads"
+        elif (a.qk_nope_head_dim, a.qk_rope_head_dim, a.v_head_dim, a.kv_lora_rank) != (128, 64, 128, 512):
+            reason = "geometry"
+        elif q_rows.shape[1] > self.auto_rows:
+            reason = "rows"
+        elif starts is not None:
+            reason = "padded_batch"
+        elif not (mask is None or (isinstance(mask, str) and mask == "causal")):
+            reason = "mask"
+        elif q_rows.dtype not in (mx.bfloat16, mx.float16):
+            reason = "dtype"
+        elif not absorbed_flash_available(a.num_attention_heads, q_rows.dtype):
+            reason = "probe"
+        if reason is not None:
+            self.calls["decode_nax_declined"] += 1
+            self.calls["decode_nax_declined_" + reason] += 1
+            return False
+        self.calls["decode_nax_absorbed"] += 1
+        return True
+
     def _flash_admits(self, kind, q_rows, mask, starts=None):
-        """Raon admits only the expanded (flash192 / key-window) prompt-chunk
-        kernel, at its own head count; the absorbed decode kernel's grid
-        covers exactly 32 heads and stays declined (counted)."""
+        """Raon admits the expanded (flash192 / key-window) prompt-chunk
+        kernel at its own head count under mla_flash "expanded", and the
+        head-group-generic absorbed decode kernel under mla_decode
+        "nax_absorbed" (both counted when declined)."""
+        if kind == "absorbed" and self.decode_nax == "nax_absorbed":
+            return self._decode_nax_admits(q_rows, mask, starts)
         if self.flash == "off":
             return False
         a = self.args
@@ -664,7 +750,8 @@ class DecoderLayer(nn.Module):
         return self.is_moe and "reasoning_effort_steering" in self.moe
 
     def __call__(self, stream, mask=None, cache=None):
-        if self.__dict__.get("_mhc_fused"):
+        fused = self.__dict__.get("_mhc_fused")
+        if fused and (fused == "all" or stream.shape[0] * stream.shape[1] <= MERGED_ROWS):
             from . import raon1_mini_fused as F
 
             if F.admits(stream):
@@ -865,7 +952,8 @@ class Model(nn.Module):
             if isinstance(module, RaonRMSNorm):
                 module.law = law
         for layer in self.layers:
-            object.__setattr__(layer, "_mhc_fused", policy.get("mhc", "ops") == "fused")
+            mhc = policy.get("mhc", "ops")
+            object.__setattr__(layer, "_mhc_fused", {"fused": "rows", "fused_all": "all"}.get(mhc))
             merge = bool(policy.get("merged_projections", False))
             if not layer.is_global:
                 layer.self_attn.merge(merge)
@@ -874,6 +962,7 @@ class Model(nn.Module):
             if layer.is_global:
                 attn.policy = policy.get("mla", "auto")
                 attn.flash = policy.get("mla_flash", "off")
+                attn.decode_nax = policy.get("mla_decode", "off")
                 attn.expanded_bytes = int(policy.get("mla_expanded_gib", 4)) << 30
             else:
                 kda = policy.get("rda", "vector")

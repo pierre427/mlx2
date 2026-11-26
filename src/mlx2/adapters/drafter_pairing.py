@@ -167,6 +167,7 @@ def pair_drafter(
     archs = draft["architectures"]
     policy: dict = {"draft_model": dpath}
     pins: dict = {}
+    identity_only = None
     record = None
     if adapter in {"Qwen3827BAdapter", "Qwen3627BAdapter", "Qwen3635BA3BAdapter",
                    "Qwen359BAdapter"}:
@@ -293,10 +294,14 @@ def pair_drafter(
             target_fingerprint=target["identity"]["fingerprint"])
         # Identity only: the Raon external policy pins its drafter inside the
         # adapter (config + weight sha256), so no revision keys are added.
-        pins["draft_revision"] = dflash2.content_revision(record)
+        # It must not be a pin: finish_best_route_default merges pins into the
+        # policy, and the Raon policy refuses draft_revision (2026-11-25: every
+        # no-flag one-lane Raon server failed to load).
+        identity_only = dflash2.content_revision(record)
     else:
         raise ValueError(f"{adapter} declares no external-draft route")
-    identity = pins.get("draft_revision") or (record or {}).get("draft_revision") \
+    identity = pins.get("draft_revision") or identity_only \
+        or (record or {}).get("draft_revision") \
         or (record or {}).get("fingerprint")
     return {
         "draft": f"{draft['name']}@sha256:{identity}" if identity else draft.get("checkpoint"),

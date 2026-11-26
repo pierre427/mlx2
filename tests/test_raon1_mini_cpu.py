@@ -407,3 +407,105 @@ def test_nax_receipts_distinguish_selection_from_calls():
     mla["expanded_flash192_windows"] = 2
     flash = adapter.capability_receipts()["mla_flash"]
     assert flash["observed_used"] is True and flash["calls"] == 2
+
+
+def test_decode_depth_near_tie_classifier_clauses():
+    import importlib.util
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    spec = importlib.util.spec_from_file_location("dd", root / "scripts/raon1_mini_decode_depth_ab.py")
+    dd = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(dd)
+
+    def arm(tokens, margins, tops):
+        return {"tokens": tokens, "margins": margins, "top5": tops}
+
+    # Exact tie in B between 7 and 9; A picked 9 at 0.125 -> exact-tie clause.
+    a = arm([1, 9], [1.0, 0.125], [[[1, -0.1]], [[9, -0.5], [7, -0.625], [3, -4.0]]])
+    b = arm([1, 7], [1.0, 0.0], [[[1, -0.1]], [[7, -0.6], [9, -0.6], [3, -4.0]]])
+    assert dd.classify(a, b, 1)["verdict"] == "near_tie_candidate"
+    # A large gap fails.
+    b2 = arm([1, 7], [1.0, 2.0], [[[1, -0.1]], [[7, -0.1], [3, -2.1], [9, -3.5]]])
+    a2 = arm([1, 9], [1.0, 2.0], [[[1, -0.1]], [[9, -0.1], [3, -2.1], [7, -3.5]]])
+    assert dd.classify(a2, b2, 1)["verdict"] == "high_margin"
+
+
+def test_hq_mixed_affine_recipe_end_to_end_on_tiny_model(monkeypatch):
+    from mlx.utils import tree_flatten
+
+    from mlx2.adapters import raon1_mini as A
+    from mlx2.conversion import raon1_mini_hq as HQ
+    from mlx2.runtime.models import raon1_mini as R
+
+    # Tiny geometry fits group 32 only.
+    monkeypatch.setattr(HQ, "FORMATS", {"a4g32": (4, 32, 5.0), "a8g32": (8, 32, 9.0)})
+    model = _model(seed=3, scale=0.2)
+    model.configure(A.parse_policy({"merged_projections": False, "mhc": "ops"}))
+    mx.random.seed(7)
+    seqs = [mx.random.randint(1, 96, (24,)).tolist() for _ in range(6)]
+    hessians, rows, counts = HQ.calibrate(model, seqs, log=lambda *_: None)
+    assert rows["1.moe_in"] == 6 * 24 and int(counts["1.moe_in"].sum()) == 6 * 24 * 2
+    assert type(model.layers[1].moe.gate).__name__ == "Router"  # recorders removed
+    settings = HQ.HQSettings(formats=("a4g32", "a8g32"), budget_bpw=7.0, dense_bits=8, dense_group=32)
+    planes, quant, receipt = HQ.plan_and_quantize(model, hessians, counts, settings, log=lambda *_: None)
+    assert receipt["moe_mean_bpw"] <= 7.0 and set(receipt["schedule"].values()) <= {"a4g32", "a8g32"}
+    # Knapsack: an 8-bit layer is the most-distorted-at-4-bit one.
+    if "a8g32" in receipt["schedule"].values():
+        worst = max(receipt["distortion"], key=lambda k: receipt["distortion"][k]["a4g32"])
+        assert receipt["schedule"][worst] == "a8g32"
+    tensors = {**HQ._untouched(model, planes), **planes}
+    reference = model(mx.array([seqs[0]]))
+    fresh = R.Model(R.ModelArgs.from_dict(tiny_config()))
+    config = {"quantization": {"group_size": 32, "bits": 8, "mode": "affine", **quant}}
+    R.install_affine(fresh, config, tensors.keys())
+    fresh.load_weights(list(fresh.sanitize(dict(tensors)).items()), strict=True)
+    fresh.configure(A.parse_policy({"merged_projections": False, "mhc": "ops"}))
+    got = fresh(mx.array([seqs[0]]))
+    agree = float((mx.argmax(got, -1) == mx.argmax(reference, -1)).astype(mx.float32).mean())
+    assert agree >= 0.9, agree
+    assert not any(k.endswith(".conv.weight") for k in tensors)
+
+
+def test_hq_knapsack_respects_budget_and_floors():
+    from mlx2.conversion.raon1_mini_hq import knapsack
+
+    d = {0: {"a4g64": 10.0, "a4g32": 6.0, "a8g64": 1.0}, 1: {"a4g64": 2.0, "a4g32": 1.9, "a8g64": 1.8},
+         2: {"a4g64": 5.0, "a4g32": 3.0, "a8g64": 0.5}}
+    # Budget 14.55 bits over 3 layers: the two best gains per bit (layer 0 at
+    # 8/bit, layer 2 at 4/bit) fit; layer 1's 0.2/bit upgrade does not.
+    choice = knapsack(d, budget_bpw=4.85)
+    assert sum({"a4g64": 4.5, "a4g32": 5.0, "a8g64": 8.5}[f] for f in choice.values()) / 3 <= 4.85
+    assert choice == {0: "a4g32", 1: "a4g64", 2: "a4g32"}
+    with pytest.raises(ValueError):
+        knapsack(d, budget_bpw=4.6, floors={0: "a8g64"})
+
+
+def test_raon_auto_pairing_adds_no_policy_pins(monkeypatch):
+    """2026-11-25: the paired drafter's revision was a pin, so the best-route
+    seam merged ``draft_revision`` into the policy and every no-flag one-lane
+    Raon server refused to load. The revision is identity only."""
+    from mlx2 import best_route_defaults
+    from mlx2.adapters import dflash2, drafter_pairing, raon1_mini, raon1_mini_dflash2
+    from mlx2.adapters.raon1_mini import RaonAdapter, split_policy
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(raon1_mini, "inspect_artifact",
+                        lambda path: {"config": {}, "identity": {"fingerprint": "t" * 64}})
+    monkeypatch.setattr(raon1_mini_dflash2, "inspect_drafter", lambda *a, **k: {"fingerprint": "w"})
+    monkeypatch.setattr(dflash2, "content_revision", lambda record: "d" * 64)
+    pairing = drafter_pairing.pair_drafter(
+        {"adapter": "RaonAdapter", "path": "/target"},
+        {"path": "/draft", "architectures": ["DFlash2DraftModel"], "name": "Raon-1-mini-dflash2"},
+        target_revision=False)
+    assert pairing["pins"] == {} and pairing["identity"] == "d" * 64
+    assert pairing["execution_policy"] == {"draft_model": "/draft"}
+    assert pairing["draft"] == "Raon-1-mini-dflash2@sha256:" + "d" * 64
+    # The seam leaves the policy as the adapter accepts it.
+    record = {"applied": True, "route": {}, "drafter": {"path": "/draft", "pins": pairing["pins"]}}
+    args = SimpleNamespace(route_default_selection=record)
+    policy = best_route_defaults.finish_best_route_default(args, {"draft_model": "/draft"})
+    _, speculative = split_policy(policy)
+    adapter = object.__new__(RaonAdapter)
+    assert adapter._parse_external_policy(speculative, family="Raon-1-mini")
+    assert adapter.external_policy == {"draft_model": "/draft"}
