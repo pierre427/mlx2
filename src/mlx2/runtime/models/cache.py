@@ -456,7 +456,7 @@ class _RollbackRecord(tuple):
     "how much can I trim?" question every existing reader is asking.
     """
 
-    def __new__(cls, num_tokens, fn, snapshot, per_row_fn=None, depths=None):
+    def __new__(cls, num_tokens, fn, snapshot, per_row_fn=None, depths=None, device_fn=None):
         if depths is not None and all((d == num_tokens for d in depths)):
             depths = None
         replayable = num_tokens if depths is None else min(depths)
@@ -464,13 +464,17 @@ class _RollbackRecord(tuple):
         record.num_tokens = num_tokens
         record.per_row_fn = per_row_fn
         record.depths = depths
+        # ``device_fn(m: mx.array) -> list``: ``fn`` for a device-held count
+        # (spec-round DC-2; ``ArraysCache.device_rollback``).
+        record.device_fn = device_fn
         return record
 
     def __getnewargs__(self):
         # tuple's default reconstruction passes one tuple to __new__, while
         # this record needs the original forward width and its replay state.
         # In a ragged record self[0] is only the minimum remaining depth.
-        return (self.num_tokens, self.fn, self.snapshot, self.per_row_fn, self.depths)
+        return (self.num_tokens, self.fn, self.snapshot, self.per_row_fn, self.depths,
+                self.device_fn)
 
     @property
     def fn(self):
@@ -492,7 +496,7 @@ class _RollbackRecord(tuple):
 
     def with_depths(self, depths: List[int]):
         return _RollbackRecord(
-            self.num_tokens, self.fn, self.snapshot, self.per_row_fn, depths
+            self.num_tokens, self.fn, self.snapshot, self.per_row_fn, depths, self.device_fn
         )
 
     def exhausted(self) -> bool:
@@ -2964,7 +2968,7 @@ class ArraysCache(_BaseCache):
         return depths
 
     def record_rollback(
-        self, num_tokens, fn, snapshot, *, per_row_fn=None, depths=None
+        self, num_tokens, fn, snapshot, *, per_row_fn=None, depths=None, device_fn=None
     ):
         """Recorded by the owning layer during a forward while ``speculating``.
 
@@ -3004,7 +3008,7 @@ class ArraysCache(_BaseCache):
             ]
         self._rollback_invalid_reason = None
         self._rollbacks.append(
-            _RollbackRecord(num_tokens, fn, snapshot, per_row_fn, depths)
+            _RollbackRecord(num_tokens, fn, snapshot, per_row_fn, depths, device_fn)
         )
         total = sum((r.span for r in self._rollbacks))
         while (
@@ -3119,6 +3123,30 @@ class ArraysCache(_BaseCache):
         ``record_rollback`` combines it (see ``Qwen4ArraysCache``) must
         override this, or the stale half survives a membership change.
         """
+
+    def device_rollback(self, count):
+        """Keep the first ``count`` (device int32) rows of this window's one forward.
+
+        Spec-round DC-2 (default off): the device-count form of ``trim`` for
+        a B1 speculation window holding exactly one recorded forward whose
+        layer staged a ``device_fn`` (Kimi/Raon RDA). The cache entries become
+        those the forward held after ``count`` rows (``device_fn``: a gathered
+        conv window and a masked full-width replay, where masked steps leave
+        the state unchanged), and the window is closed: speculation stops,
+        because the host no longer knows the rewind depth.
+        """
+        if not self.speculating:
+            raise RuntimeError("ArraysCache device rollback needs an active speculation window")
+        if self.batch_size != 1 or len(self._rollbacks) != 1:
+            raise RuntimeError(
+                "ArraysCache device rollback needs one row and exactly one recorded forward"
+            )
+        record = self._rollbacks[0]
+        if record.device_fn is None or record.depths is not None:
+            raise RuntimeError("the recorded forward staged no device rollback")
+        self.cache = list(record.device_fn(count))
+        self.stop_speculation()
+        return self
 
     def trim(self, n):
         if n <= 0:

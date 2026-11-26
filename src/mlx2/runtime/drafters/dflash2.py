@@ -708,6 +708,11 @@ def _append_context(self, hidden, cache):
                 raise TypeError("FOLD context append requires FOLDKVCache")
             entry.append_raw_keys(keys)
         rope = self.rope if getattr(attn, "use_rope", True) else NO_ROPE
+        from .device_ring_kv import DeviceRingKVCache
+
+        if isinstance(entry, DeviceRingKVCache):  # spec-round DC-3 (default off)
+            entry.append(rope(keys, offset=entry.rope_offset()), values)
+            continue
         keys = rope(keys, offset=entry.offset)
         append_context_kv(entry, keys, values)
         if hasattr(entry, "max_size") and entry.keys.shape[2] > entry.max_size:

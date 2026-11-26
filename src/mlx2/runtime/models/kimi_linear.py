@@ -320,7 +320,23 @@ class KimiDeltaAttention(ling.KimiDeltaAttention):
             _, replayed = self._recurrence(*rows, initial, None if mask is None else mask[:, :m])
             return [*convs, replayed]
 
-        cache.record_rollback(t, rollback, snapshot, depths=spans or None)
+        def device_rollback(m, padded=padded, scan=(q, k, v, decay, beta), initial=state,
+                            mask=mask, t=t):
+            """``rollback`` for a device-held ``m`` (spec-round DC-2): the conv
+            window gathered at ``m`` and the recurrence replayed over all ``t``
+            rows with steps ``>= m`` masked (a masked step keeps the state)."""
+            self.calls["rollback_device_replays"] += 1
+            # Clamped: mx.take is not bounds-checked on the GPU.
+            m = mx.clip(m.reshape(()).astype(mx.int32), 0, t)
+            window = m + mx.arange(keep, dtype=mx.int32)
+            convs = [mx.contiguous(mx.take(item, window, axis=1)) for item in padded]
+            steps = (mx.arange(t, dtype=mx.int32) < m)[None, :]
+            step_mask = steps if mask is None else (mask & steps)
+            _, replayed = self._recurrence(*scan, initial, step_mask)
+            return [*convs, replayed]
+
+        cache.record_rollback(t, rollback, snapshot, depths=spans or None,
+                              device_fn=device_rollback)
         self.calls["rollback_records"] += 1
 
 

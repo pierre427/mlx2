@@ -100,6 +100,31 @@ class DFlashAttention(nn.Module):
             mask = mask & (key[None, :] > query[:, None] - self.sliding_window)
         return mask[None, None]
 
+    def _device_ring_attend(self, rope, entry, queries, ctx_keys, ctx_values, prop_keys,
+                            prop_values):
+        """One row against a ``DeviceRingKVCache`` (spec-round DC-3, default off).
+
+        The host path's law with device offsets: context keys rotate at the
+        device fill, proposals and queries at the fill after this append, and
+        attention sees the ring's last ``window`` committed rows plus the
+        whole (bidirectional) proposal block."""
+        if self.is_causal or getattr(self, "fold_policy", None) is not None:
+            raise ValueError("device ring drafter caches serve the bidirectional non-FOLD law only")
+        ck = rope(ctx_keys, offset=entry.rope_offset())
+        keys, values, visible = entry.append(ck, ctx_values)
+        end = entry.rope_offset()
+        q = rope(queries, offset=end)
+        pk = rope(prop_keys, offset=end)
+        rows = int(queries.shape[2])
+        mask = mx.concatenate([
+            mx.broadcast_to(visible[None, :], (rows, int(visible.shape[0]))),
+            mx.ones((rows, rows), dtype=mx.bool_),
+        ], axis=1)[None, None]
+        return mx.fast.scaled_dot_product_attention(
+            q, mx.concatenate([keys, pk], axis=2), mx.concatenate([values, prop_values], axis=2),
+            scale=self.scale, mask=mask, sinks=self._sinks(q),
+        )
+
     def _sinks(self, queries):
         sinks = getattr(self, "attention_sink_bias", None)
         return None if sinks is None else sinks.astype(queries.dtype)
@@ -166,8 +191,15 @@ class DFlashAttention(nn.Module):
             0, 2, 1, 3
         )
         if hasattr(cache, "rows"):
+            from .device_ring_kv import DeviceRingKVCache
+
             outputs = []
             for row, entry in enumerate(cache.rows):
+                if isinstance(entry, DeviceRingKVCache):
+                    outputs.append(self._device_ring_attend(
+                        rope, entry, queries[row:row+1], ctx_keys[row:row+1],
+                        ctx_values[row:row+1], prop_keys[row:row+1], prop_values[row:row+1]))
+                    continue
                 if getattr(self, "fold_policy", None) is not None:
                     from .fold import FOLDKVCache, fold_attention
 
@@ -197,6 +229,12 @@ class DFlashAttention(nn.Module):
                 outputs.append(mx.fast.scaled_dot_product_attention(q, mx.concatenate([keys,pk],axis=2), mx.concatenate([values,prop_values[row:row+1]],axis=2), scale=self.scale,mask=self._proposal_mask(keys.shape[2], L), sinks=self._sinks(q)))
             o = mx.concatenate(outputs,axis=0)
             return self.o_proj(o.transpose(0,2,1,3).reshape(B,L,-1))
+        from .device_ring_kv import DeviceRingKVCache
+
+        if isinstance(cache, DeviceRingKVCache):
+            o = self._device_ring_attend(rope, cache, queries, ctx_keys, ctx_values,
+                                         prop_keys, prop_values)
+            return self.o_proj(o.transpose(0, 2, 1, 3).reshape(B, L, -1))
         if getattr(self, "fold_policy", None) is not None:
             from .fold import FOLDKVCache, fold_attention
 

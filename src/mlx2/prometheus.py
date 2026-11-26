@@ -1966,7 +1966,7 @@ def _add_execution(builder: PrometheusBuilder, execution: Mapping[str, Any]) -> 
                 "fused_norm", "norm_fla_fp32", "norm_qwen_bf16", "multirow_calls", "single_row_calls",
                 "multirow_tokens", "single_row_tokens",
                 # Speculative rollback and packed-tree verify (Kimi KDA).
-                "rollback_records", "rollback_replays", "rollback_unstaged",
+                "rollback_records", "rollback_replays", "rollback_device_replays", "rollback_unstaged",
                 "tree_calls", "tree_nodes", "tree_levels"),
         "mla": ("expanded_sdpa", "latent_tiled", "latent_single", "latent_single_tiled",
                 "auto_expanded", "auto_latent", "expanded_fused_d256", "training_padded_sdpa", "segmented_rows",
