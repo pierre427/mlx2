@@ -1175,9 +1175,16 @@ class Attention(nn.Module):
             key = "calls" if reason is None else "declined:" + reason
             counts[key] = counts.get(key, 0) + 1
             if reason is None:
+                # inkling2_prefill_lazy_rescale: passed only when on, so the
+                # off path calls the kernel exactly as before.
+                extra = {}
+                if self.__dict__.get("_prefill_lazy_rescale"):
+                    extra["lazy_rescale"] = True
+                if extra or tiled.TILED_LAZY_RESCALE:
+                    counts["lazy_rescale_calls"] = counts.get("lazy_rescale_calls", 0) + 1
                 out = tiled.tiled_prefill_attention(
                     q, k, v, r @ rel_proj, sink, offset=offset, left_padding=left_padding,
-                    window=self.sliding, scale=self.scale,
+                    window=self.sliding, scale=self.scale, **extra,
                 )
                 return self._finish(out, gate, b, length, x.dtype)
         if (
@@ -2193,7 +2200,8 @@ class Model(nn.Module):
                           moe_nax_mxfp8=False, prefill_handover=False, pass_messages=False,
                           stage_a_kernel=False, gate_merge=False, attn_output_kernel=False,
                           embed_kernel=False, prefill_onelaunch_attention=False,
-                          native_replay=False, moe_logdomain_renorm=False):
+                          native_replay=False, moe_logdomain_renorm=False,
+                          prefill_lazy_rescale=False):
         """Adapter-owned opt-in execution switches (all default off).
 
         ``loop_passes`` None keeps the trained count.  ``moe_weighted_sum``
@@ -2235,6 +2243,8 @@ class Model(nn.Module):
             declines[nax_mxfp8_decline] = declines.get(nax_mxfp8_decline, 0) + 1
         if head_kernel_wide and not head_kernel:
             raise ValueError("Inkling 2 head_kernel_wide requires head_kernel")
+        if prefill_lazy_rescale and not prefill_tiled_attention:
+            raise ValueError("Inkling 2 prefill_lazy_rescale requires prefill_tiled_attention")
         if prefill_tiled_attention and flash_prefill:
             raise ValueError("Inkling 2 prefill_tiled_attention and flash_prefill are alternatives")
         if prefill_onelaunch_attention and (prefill_tiled_attention or flash_prefill):
@@ -2313,6 +2323,7 @@ class Model(nn.Module):
                                bool(prefill_mask_bf16_budget))
             object.__setattr__(layer.self_attn, "_mask_with_sink", bool(prefill_mask_with_sink))
             object.__setattr__(layer.self_attn, "_prefill_tiled", bool(prefill_tiled_attention))
+            object.__setattr__(layer.self_attn, "_prefill_lazy_rescale", bool(prefill_lazy_rescale))
             object.__setattr__(layer.self_attn, "_onelaunch_prefill",
                                bool(prefill_onelaunch_attention))
             object.__setattr__(layer.self_attn, "_attn_decode", bool(attn_decode_kernel))
@@ -2388,6 +2399,7 @@ class Model(nn.Module):
              "prefill_mask_with_sink": bool(prefill_mask_with_sink),
              "head_kernel_wide": bool(head_kernel_wide),
              "prefill_tiled_attention": bool(prefill_tiled_attention),
+             "prefill_lazy_rescale": bool(prefill_lazy_rescale),
              "attn_decode_kernel": bool(attn_decode_kernel),
              "verify_deferred_commit": bool(verify_deferred_commit),
              "batched_lane_attention": bool(batched_lane_attention),

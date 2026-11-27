@@ -256,9 +256,18 @@ _TILED_SOURCE = r"""
         rsum += simd_shuffle_xor(rsum, 8);
         l = l * factor + rsum;
         m = m_new;
+        // LAZY_RESCALE: a row whose running max did not move has factor
+        // 1.0f, and x * 1.0f == x bit for bit for finite, infinite, -0 and
+        // NaN x (only a subnormal accumulator under fast-math flushing could
+        // differ, which needs a max jump of > 126 in log2 units). l keeps
+        // its own update. Per thread: the accumulators are its registers.
+        if (!LAZY_RESCALE || factor != 1.0f) {
+            for (int db = 0; db < D / 8; ++db) {
+                Of[db].thread_elements()[0] *= factor;
+                Of[db].thread_elements()[1] *= factor;
+            }
+        }
         for (int db = 0; db < D / 8; ++db) {
-            Of[db].thread_elements()[0] *= factor;
-            Of[db].thread_elements()[1] *= factor;
             for (int kb = 0; kb < BK / 8; ++kb) {
                 simdgroup_matrix<ST, 8, 8> Vm;
                 simdgroup_load(Vm, Vs + kb * 8 * LDV + db * 8, LDV);
@@ -280,8 +289,22 @@ _TILED_SOURCE = r"""
 # state; 8 halves the K/V tile passes again if the pipeline admits 256
 # threads (the Metal timing test records both).
 TILED_NSG = 4
+# ``inkling2_prefill_lazy_rescale``: skip the O-accumulator rescale for rows
+# whose running max did not move (factor exactly 1). Bitwise identical by
+# construction in practice (see the kernel comment for the subnormal caveat);
+# idea from gufo-org/gufo#1420 (reimplemented, no code copied).
+# Default off until its A/B is reviewed. Serving: the adapter option
+# ``inkling2_prefill_lazy_rescale`` (per call); ``set_lazy_rescale`` is the
+# process-wide research switch the probes use.
+TILED_LAZY_RESCALE = False
 _tiled_kernel = None
 LOG2E = 1.4426950408889634
+
+
+def set_lazy_rescale(enabled):
+    """Switch ``inkling2_prefill_lazy_rescale`` process-wide (bitwise-neutral)."""
+    global TILED_LAZY_RESCALE
+    TILED_LAZY_RESCALE = bool(enabled)
 
 
 def tiled_block_keys(dtype):
@@ -305,7 +328,8 @@ def decline_reason(q, k, v, *, n_heads, n_kv, head_dim, device=None):
     return None
 
 
-def tiled_prefill_attention(q, k, v, rel, sinks, *, offset, left_padding, window, scale):
+def tiled_prefill_attention(q, k, v, rel, sinks, *, offset, left_padding, window, scale,
+                            lazy_rescale=None):
     """Prefill attention with Inkling's relative bias, window, padding and sink.
 
     q: [B, H, L, D]; k, v: [B, Hk, S, D] (any strides); rel: [B, L, H, E],
@@ -338,7 +362,9 @@ def tiled_prefill_attention(q, k, v, rel, sinks, *, offset, left_padding, window
                 mx.array([float(scale)], dtype=mx.float32)],
         template=[("T", q.dtype), ("ST", mx.float16 if half else mx.float32), ("D", dim),
                   ("HQ", hq), ("HKV", hkv), ("E", rel.shape[-1]), ("WINDOW", int(window)),
-                  ("NSG", nsg), ("BK", tiled_block_keys(q.dtype)), ("VEC_OK", int(half))],
+                  ("NSG", nsg), ("BK", tiled_block_keys(q.dtype)), ("VEC_OK", int(half)),
+                  ("LAZY_RESCALE", int(TILED_LAZY_RESCALE if lazy_rescale is None
+                                       else bool(lazy_rescale)))],
         grid=(tiles * nsg * 32, hkv, b),
         threadgroup=(nsg * 32, 1, 1),
         output_shapes=[(b, hq, length, dim)],

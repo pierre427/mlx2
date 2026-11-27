@@ -379,7 +379,8 @@ def test_policy_parsing():
          "moe_act_quant": False, "kv_q8": False,
          "prefill_mask_bf16_budget": False,
          "prefill_mask_with_sink": False, "head_kernel_wide": False,
-         "prefill_tiled_attention": True, "attn_decode_kernel": False,
+         "prefill_tiled_attention": True, "prefill_lazy_rescale": True,
+         "attn_decode_kernel": False,
          "verify_deferred_commit": False, "visit_length_check": False,
          "batched_lane_attention": False,
          "prefill_handover": False,
@@ -419,6 +420,7 @@ def test_fused_projection_toggle_round_trip():
                                    "prefill_mask_with_sink": False,
                                    "head_kernel_wide": False,
                                    "prefill_tiled_attention": False,
+                                   "prefill_lazy_rescale": False,
                                    "attn_decode_kernel": False,
                                    "verify_deferred_commit": False, "batched_lane_attention": False,
                                    "visit_length_check": False,
@@ -980,3 +982,16 @@ def test_split_fixed256_switch_only_changes_direct_split_counts(monkeypatch):
         else:
             assert got == ns
     assert splitk._splits(32768, 8, direct=True) == 128
+
+
+def test_lazy_rescale_default_follows_tiled_prefill():
+    from mlx2.adapters.inkling2 import validate_policy
+
+    kernels = validate_policy(None)[0]
+    assert kernels["prefill_tiled_attention"] and kernels["prefill_lazy_rescale"]
+    kernels = validate_policy({"inkling2_prefill_tiled_attention": False})[0]
+    assert kernels["prefill_lazy_rescale"] is False
+    kernels = validate_policy({"inkling2_flash_prefill": True})[0]
+    assert kernels["prefill_tiled_attention"] is False and kernels["prefill_lazy_rescale"] is False
+    kernels = validate_policy({"inkling2_prefill_lazy_rescale": False})[0]
+    assert kernels["prefill_tiled_attention"] and kernels["prefill_lazy_rescale"] is False

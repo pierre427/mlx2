@@ -131,7 +131,8 @@ FEATURES = (
     "inkling2_loop_passes", "inkling2_row_invariant_controllers", "inkling2_flash_prefill",
     "inkling2_verify_splitk",
     "inkling2_dspark_prefill_reclaim", "inkling2_prefill_mask_mb", "inkling2_hard_no_thinking",
-    "inkling2_prefill_tiled_attention", "inkling2_prefill_onelaunch_attention",
+    "inkling2_prefill_tiled_attention", "inkling2_prefill_lazy_rescale",
+    "inkling2_prefill_onelaunch_attention",
     "inkling2_command_buffers_ops100_v1", "inkling2_composed_ordinary", "inkling2_composed_dspark",
     # Inkling 2 community DFlash2 drafter (opt-in, 2026-11-25).
     "inkling2_external_dflash2", "inkling2_dflash2_embed_norm",

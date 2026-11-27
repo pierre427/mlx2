@@ -308,6 +308,28 @@ def test_tiled_kernel_scalar_path_matches_vector_path():
     assert mx.array_equal(a, b)
 
 
+@pytest.mark.parametrize("dtype", [mx.float32, mx.bfloat16])
+@pytest.mark.parametrize("case", range(len(TILED_CASES)))
+def test_tiled_kernel_lazy_rescale_is_bitwise_neutral(case, dtype):
+    """``inkling2_prefill_lazy_rescale`` only skips multiplies by exactly 1:
+    every output bit equals the eager kernel's."""
+    from mlx2.runtime.models.inkling2 import prefill_attention as pa
+
+    spec = TILED_CASES[case]
+    args, kw = _attention_case(case, dtype=dtype, **spec)
+    try:
+        pa.set_lazy_rescale(False)
+        eager = pa.tiled_prefill_attention(*args, **kw)
+        mx.eval(eager)
+        pa.set_lazy_rescale(True)
+        lazy = pa.tiled_prefill_attention(*args, **kw)
+        mx.eval(lazy)
+    finally:
+        pa.set_lazy_rescale(False)
+    bits = mx.uint32 if dtype == mx.float32 else mx.uint16
+    assert mx.array_equal(eager.view(bits), lazy.view(bits))
+
+
 def _fp32_law(q, k, v, rel, sinks, **kw):
     """The composed law in FP32, rounded once to q's dtype: the most accurate
     BF16 attention output there is (the chaos control's attention)."""

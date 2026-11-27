@@ -521,6 +521,16 @@ KERNEL_OPTIONS = {
     # argmax 31/32 and 32/32 (flips near ties). Unset, it steps aside for
     # inkling2_prefill_onelaunch_attention or inkling2_flash_prefill.
     "inkling2_prefill_tiled_attention": "prefill_tiled_attention",
+    # Lazy O rescale in that kernel (prefill_attention LAZY_RESCALE; idea
+    # gufo-org/gufo#1420, provenance/inkling2-gufo-lazy-rescale.json): skip
+    # the accumulator multiply for rows whose running max did not move
+    # (factor 1.0f, a bitwise identity). Needs inkling2_prefill_tiled_attention.
+    # DEFAULT ON (Pierre 2026-11-27, "Yes, default on"; selected unqualified,
+    # bitwise): A/B af420c858 (Inkling-2-Mini@440956c8) logits bitwise across
+    # ABBA 64K prefills, prefill -8% total (-10% at 32-64K), kernel -20..-25%
+    # from 14K keys. Unset, it follows inkling2_prefill_tiled_attention; the
+    # reference policy turns it off; opt out with false.
+    "inkling2_prefill_lazy_rescale": "prefill_lazy_rescale",
     # Prompt attention (rows > 1, sliding and global visits) in one Metal
     # launch per visit and chunk (runtime/models/inkling2/prefill_onelaunch.py,
     # clean-room implementation 2026-11-23 of the one-launch spec; no MTPLX
@@ -707,7 +717,7 @@ KERNEL_DEFAULTS = {"moe_fused": True, "moe_weighted_sum": None, "moe_nax_gather"
                    "fuse_controllers": True, "fuse_residual": True, "fuse_sconv": True,
                    "fuse_attention": True, "fuse_sconv_kernel": True, "head_kernel": True,
                    "moe_decode_kernel": True, "fuse_residual_kernel": True,
-                   "prefill_tiled_attention": True}
+                   "prefill_tiled_attention": True, "prefill_lazy_rescale": True}
 # The policy that selects the reference path for every switch the defaults
 # turn on (comparison scripts and the ladder's reference arm start from it).
 REFERENCE_POLICY = {key: False for key, name in KERNEL_OPTIONS.items()
@@ -901,6 +911,8 @@ def validate_policy(value):
     if "prefill_tiled_attention" in defaulted and (kernels["prefill_onelaunch_attention"]
                                                    or kernels["flash_prefill"]):
         kernels["prefill_tiled_attention"] = False  # the default yields to an alternative
+    if "prefill_lazy_rescale" in defaulted and not kernels["prefill_tiled_attention"]:
+        kernels["prefill_lazy_rescale"] = False  # the default follows prefill_tiled_attention
     if "fuse_sconv_kernel" in defaulted and not kernels["fuse_sconv"]:
         kernels["fuse_sconv_kernel"] = False  # the default follows fuse_sconv
     if kernels["fuse_sconv_kernel"] and not kernels["fuse_sconv"]:
