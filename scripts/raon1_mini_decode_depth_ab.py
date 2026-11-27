@@ -89,11 +89,20 @@ def main():
     parser.add_argument("--decode", type=int, default=96)
     parser.add_argument("--chunk", type=int, default=2048)
     parser.add_argument("--lever", default="mla_decode=nax_absorbed")
+    # MLX's allocator pool is unbounded by default. A chunked prefill frees
+    # buffers of ever-growing sizes (the KV/latent cache grows each chunk, and
+    # the score tiles widen with it); none is reused, so the pool keeps them
+    # until macOS pages them out (the 128K cells' one-way swap write-out,
+    # 2026-11-26/27). Bound the pool and return it after every chunk. Values only
+    # change allocation, never results.
+    parser.add_argument("--cache-limit-gib", type=float, default=8.0)
     args = parser.parse_args()
     if args.out.exists() and any(args.out.iterdir()):
         raise SystemExit(f"{args.out} is not empty")
     args.out.mkdir(parents=True, exist_ok=True)
     import mlx.core as mx
+
+    mx.set_cache_limit(int(args.cache_limit_gib * (1 << 30)))
     from transformers import AutoTokenizer
 
     from mlx2.adapters import raon1_mini as A
@@ -122,7 +131,8 @@ def main():
               "lever": args.lever, "arms": arms, "thermal_hold": False,
               "mlx2_revision": subprocess.run(["git", "-C", str(ROOT), "rev-parse", "HEAD"],
                                               capture_output=True, text=True).stdout.strip(),
-              "mlx": mx.__version__, "decode_tokens": args.decode, "cells": []}
+              "mlx": mx.__version__, "cache_limit_gib": args.cache_limit_gib,
+              "decode_tokens": args.decode, "cells": []}
     needle_cells = {int(c) for c in args.needle_cells.split(",") if c}
     offset = 0
 
@@ -166,10 +176,14 @@ def main():
         for name in order:
             model.configure(arms[name])
             cache = model.make_cache()
+            mx.clear_cache()
+            mx.reset_peak_memory()
             t0 = time.perf_counter()
             for start, stop in zip(bounds, bounds[1:]):
                 logits = model(mx.array([ids[start:stop]]), cache)[:, -1]
                 mx.eval(logits, _arrays([getattr(c, "state", None) for c in cache], mx))
+                mx.clear_cache()
+            prefill_peak_gib = mx.get_peak_memory() / (1 << 30)
             prefill_s = time.perf_counter() - t0
             before = mla_counts()
             out, margins, tops = [], [], []
@@ -198,7 +212,8 @@ def main():
             out, margins, tops = out[:eos + 1], margins[:eos + 1], tops[:eos + 1]
             answer = tok.decode(out)
             row["arms"][name] = {
-                "prefill_s": round(prefill_s, 2), "timed_tokens": args.decode - 1, "answer_tokens": len(out),
+                "prefill_s": round(prefill_s, 2), "prefill_peak_gib": round(prefill_peak_gib, 2),
+                "peak_gib": round(mx.get_peak_memory() / (1 << 30), 2), "timed_tokens": args.decode - 1, "answer_tokens": len(out),
                 "decode_tok_s": round((args.decode - 1) / elapsed, 2) if args.decode > 1 else None,
                 "tokens": out, "margins": [round(m, 4) for m in margins], "top5": tops, "text": answer[:300],
                 "mla_counter_delta": delta,
