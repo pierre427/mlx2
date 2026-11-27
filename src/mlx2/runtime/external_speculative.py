@@ -5350,9 +5350,17 @@ class ExternalDraftBatchGenerator:
                             tree_options["processor_histories"] = extra[
                                 "processor_histories"
                             ]
-                        trees = self.draft.propose_tree(
-                            *arguments[:4], forbidden_token_ids=forbidden, **tree_options
-                        )
+                        device_tree = getattr(self, "_device_tree_active", None)
+                        if device_tree is not None:
+                            # ``device_round.tree_lazy``: the same tree, its
+                            # tokens left on the device (speculative_device_tree).
+                            trees = device_tree.propose(
+                                self, lanes, arguments, forbidden, tree_options
+                            )
+                        else:
+                            trees = self.draft.propose_tree(
+                                *arguments[:4], forbidden_token_ids=forbidden, **tree_options
+                            )
                     tokens = [tree[0] for tree in trees]
                     q = [
                         TreeDraftRow(
@@ -13347,6 +13355,10 @@ class ExternalDraftBatchGenerator:
             # round, which appends the draft context and publishes the
             # sidecar; the ordinary path reported ordinary_fallback for it.
             self._probe_branch("tree15")
+            if device_round is not None and device_round.tree:
+                # ``device_round.tree_lazy`` (default off): declines counted,
+                # then the host tree round.
+                return device_round.run_tree(self, cohort)
             return self._tree_round(cohort)
         if (self.adaptive_policy is not None and self.adaptive_policy.mode == "per_request"
                 and self.adaptive_policy.costs(1) is not None
@@ -14416,7 +14428,79 @@ class ExternalDraftBatchGenerator:
             raise
         finally: self._open = False
 
-    def _tree_round(self, cohort):
+    def _tree_verify(self, cohort, blocks, logits, features, phase):
+        """The host decision of a ``tree15`` round: row-wise or batched laws."""
+
+        batched = [
+            self.tree_gates["batched_laws"]
+            and self._batched_law_contract(lane)
+            for lane in cohort
+        ]
+        states = [None] * len(cohort)
+        fences = []
+        if all(batched) and self.tree_gates["single_fence"]:
+            # Every lane keeps its own law transform and RNG, but all lazy
+            # target rows land at one cohort fence.
+            for row, (lane, block) in enumerate(zip(cohort, blocks)):
+                fence, states[row] = self._launch_tree_laws(
+                    lane, block, logits[row : row + 1]
+                )
+                fences.extend(fence)
+            if phase is not None:
+                phase("tree_target_launch")
+            self._presnapshot_draft(cohort)
+            self.mx.eval(*fences)
+            _bump(
+                self.scheduler_stats,
+                "external_tree_single_fence_rounds",
+                len(cohort),
+            )
+            if phase is not None:
+                phase("tree_target_wait")
+        else:
+            if phase is not None:
+                phase("tree_target_launch")
+            self._presnapshot_draft(cohort)
+            self.mx.eval(logits, features)
+            if phase is not None:
+                phase("tree_target_wait")
+            for row, (lane, block, enabled) in enumerate(
+                zip(cohort, blocks, batched)
+            ):
+                if enabled:
+                    fence, states[row] = self._launch_tree_laws(
+                        lane, block, logits[row : row + 1]
+                    )
+                    fences.extend(fence)
+            if fences:
+                self.mx.eval(*fences)
+        decisions = []
+        for row, (lane, block, enabled) in enumerate(
+            zip(cohort, blocks, batched)
+        ):
+            if enabled:
+                decision = self._verify_tree_batched(
+                    lane, block, states[row]
+                )
+                _bump(self.scheduler_stats, "external_tree_batched_law_rounds")
+            else:
+                decision = self._verify_tree(
+                    lane, block, logits[row : row + 1]
+                )
+                if self.tree_gates["batched_laws"]:
+                    _bump(self.scheduler_stats, "external_tree_row_law_rounds")
+            decisions.append(decision)
+        if phase is not None:
+            phase("tree_target_law")
+        return decisions
+
+    def _tree_round(self, cohort, *, device_tree=None):
+        """One ``tree15`` round.
+
+        ``device_tree`` (``speculative_device_tree.DeviceTree``, device_round
+        ``tree_lazy``; default off): the proposal stays on the device, the
+        verify input is built there, and the round reads tokens with the
+        verify result once; ``tree_decide`` also selects the path there."""
         if not cohort:
             return
         if len(cohort) > 1 and self.target_execution != "provider":
@@ -14462,7 +14546,11 @@ class ExternalDraftBatchGenerator:
         transaction = None
         self._tree_clock = phase
         try:
-            blocks = self._propose(cohort)
+            self._device_tree_active = device_tree
+            try:
+                blocks = self._propose(cohort)
+            finally:
+                self._device_tree_active = None
             if any(not isinstance(block, TreeDraftRow) for block in blocks):
                 raise RuntimeError("tree15 proposal did not return a tree")
             # The decision the proposal path made: priced at the active lane
@@ -14484,84 +14572,38 @@ class ExternalDraftBatchGenerator:
                 physical_nodes = [max(physical_nodes)] * len(cohort)
             for nodes in physical_nodes:
                 _bump_map(self.scheduler_stats, "external_tree_verified_nodes", nodes)
-            inputs = [
-                [lane.anchor] + list(block.tokens)
-                for lane, block in zip(cohort, blocks)
-            ]
-            parents = [self._target_tree_parents(block) for block in blocks]
-            if phase is not None:
-                phase("tree_inputs")
-            logits, features, transaction = self._target_tree_forward_many(
-                cohort, inputs, parents
-            )
-            self._det_round_rows = max(len(row_inputs) for row_inputs in inputs)
-            if _VERIFY_TRACE_PATH is not None:
-                _VERIFY_TRACE_STATE["forward"] += 1
-                for row, lane in enumerate(cohort):
-                    _verify_trace(row, lane, inputs[row], logits, parents=parents[row], kind="tree")
-            if phase is not None:
-                phase("tree_target_forward_build")
-            batched = [
-                self.tree_gates["batched_laws"]
-                and self._batched_law_contract(lane)
-                for lane in cohort
-            ]
-            states = [None] * len(cohort)
-            fences = []
-            if all(batched) and self.tree_gates["single_fence"]:
-                # Every lane keeps its own law transform and RNG, but all lazy
-                # target rows land at one cohort fence.
-                for row, (lane, block) in enumerate(zip(cohort, blocks)):
-                    fence, states[row] = self._launch_tree_laws(
-                        lane, block, logits[row : row + 1]
-                    )
-                    fences.extend(fence)
-                if phase is not None:
-                    phase("tree_target_launch")
-                self._presnapshot_draft(cohort)
-                self.mx.eval(*fences)
-                _bump(
-                    self.scheduler_stats,
-                    "external_tree_single_fence_rounds",
-                    len(cohort),
+            if device_tree is not None:
+                # Device verify input; the transaction is the caller's to
+                # abort below as soon as it exists.
+                inputs, logits, features, transaction = device_tree.forward(
+                    self, cohort, blocks
                 )
+                self._det_round_rows = max(len(row_inputs) for row_inputs in inputs)
                 if phase is not None:
-                    phase("tree_target_wait")
+                    phase("tree_target_forward_build")
+                blocks, decisions = device_tree.decide(
+                    self, cohort, blocks, logits, features, transaction, phase
+                )
             else:
+                inputs = [
+                    [lane.anchor] + list(block.tokens)
+                    for lane, block in zip(cohort, blocks)
+                ]
+                parents = [self._target_tree_parents(block) for block in blocks]
                 if phase is not None:
-                    phase("tree_target_launch")
-                self._presnapshot_draft(cohort)
-                self.mx.eval(logits, features)
+                    phase("tree_inputs")
+                logits, features, transaction = self._target_tree_forward_many(
+                    cohort, inputs, parents
+                )
+                self._det_round_rows = max(len(row_inputs) for row_inputs in inputs)
+                if _VERIFY_TRACE_PATH is not None:
+                    _VERIFY_TRACE_STATE["forward"] += 1
+                    for row, lane in enumerate(cohort):
+                        _verify_trace(row, lane, inputs[row], logits, parents=parents[row],
+                                      kind="tree")
                 if phase is not None:
-                    phase("tree_target_wait")
-                for row, (lane, block, enabled) in enumerate(
-                    zip(cohort, blocks, batched)
-                ):
-                    if enabled:
-                        fence, states[row] = self._launch_tree_laws(
-                            lane, block, logits[row : row + 1]
-                        )
-                        fences.extend(fence)
-                if fences:
-                    self.mx.eval(*fences)
-            decisions = []
-            for row, (lane, block, enabled) in enumerate(
-                zip(cohort, blocks, batched)
-            ):
-                if enabled:
-                    decision = self._verify_tree_batched(
-                        lane, block, states[row]
-                    )
-                    _bump(self.scheduler_stats, "external_tree_batched_law_rounds")
-                else:
-                    decision = self._verify_tree(
-                        lane, block, logits[row : row + 1]
-                    )
-                    if self.tree_gates["batched_laws"]:
-                        _bump(self.scheduler_stats, "external_tree_row_law_rounds")
-                decisions.append(decision)
-            if phase is not None:
-                phase("tree_target_law")
+                    phase("tree_target_forward_build")
+                decisions = self._tree_verify(cohort, blocks, logits, features, phase)
             pipelined = self._draft_pipelines()
             if tile_started is not None:
                 # Observed at the verified boundary, before the commit: the

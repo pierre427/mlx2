@@ -691,6 +691,62 @@ class NativeMTPDraftModel:
         """
         import mlx.core as mx
 
+        pending = self._lazy_tree_pending(anchors, hidden, cache, pattern, context_tokens)
+        mx.eval([token for branch_tokens in pending for token in branch_tokens])
+        return [
+            [tuple(int(token) for token in path.reshape(-1).tolist()) for path in branch_tokens]
+            for branch_tokens in pending
+        ]
+
+    # ``speculative_device_tree`` (device_round ``tree_lazy``, default off).
+    draft_tree_lazy_options = frozenset({"topology", "context_tokens", "mark"})
+    # The host methods the lazy tree mirrors: a subclass overriding any of
+    # them (without its own ``draft_tree_lazy``) keeps the host tree round.
+    draft_tree_lazy_host_twins = ("propose_tree", "_lazy_tree_paths", "_lazy_tree_pending",
+                                  "_step", "_rows")
+
+    def draft_tree_lazy(self, anchor, hidden, cache, max_nodes, *, topology=None,
+                        context_tokens=None, mark=None):
+        """One lane's ``propose_tree`` as a lazy tree: no host read.
+
+        The tokens are ``_lazy_tree_paths``' own arrays, unread, in the node
+        order ``paths_to_tree`` gives them; the parents are static.  That is
+        exact for an unprocessed lane: the branches have distinct roots (an
+        ``argpartition`` of one row), so ``paths_to_tree`` never merges a
+        ``(parent, token)`` key, the fitted pattern never exceeds
+        ``max_nodes``, and no root is forbidden.  Anything else (cycle hooks,
+        no verified seed yet) raises ``LazyDecline`` before touching state,
+        and the host tree round serves it.
+        """
+        import mlx.core as mx
+
+        from ..ast_tree_proposals import pattern_for_budget
+        from ..proposal_composition import LazyDecline
+        from ..speculative_device_tree import LazyTreeProposal, chain_branch_parents
+
+        if hidden.shape[0] != 1:
+            raise ValueError("native MTP lazy trees run one lane at a time")
+        if callable(getattr(self.target, "mtp_start_cycle", None)) or callable(
+                getattr(self.target, "mtp_end_cycle", None)):
+            raise LazyDecline("native_mtp_cycle_hooks")
+        pattern = tuple(
+            min(depth, self.config.block_size - 1)
+            for depth in pattern_for_budget(topology, int(max_nodes))
+        )
+        if not pattern or hidden.shape[1] == 0 or min(pattern) < 1:
+            # The host proposes an empty tree (an ordinary round) here.
+            raise LazyDecline("native_mtp_no_seed")
+        pending = self._lazy_tree_pending([int(anchor)], hidden, cache, pattern,
+                                          context_tokens)[0]
+        if mark is not None:
+            mark("tree_draft_build")
+        tokens = mx.concatenate([path.reshape(-1) for path in pending]).astype(mx.int32)
+        return LazyTreeProposal(tokens, chain_branch_parents(pattern))
+
+    def _lazy_tree_pending(self, anchors, hidden, cache, pattern, context_tokens):
+        """``_lazy_tree_paths``' branch token arrays per row, unread."""
+        import mlx.core as mx
+
         if context_tokens is None:
             if hidden.shape[1] != 1:
                 raise ValueError("native MTP draft needs pairing for a multi-feature tail")
@@ -752,11 +808,7 @@ class NativeMTPDraftModel:
                         end(private)
                 branch_tokens.append(mx.concatenate(path, axis=1))
             pending.append(branch_tokens)
-        mx.eval([token for branch_tokens in pending for token in branch_tokens])
-        return [
-            [tuple(int(token) for token in path.reshape(-1).tolist()) for path in branch_tokens]
-            for branch_tokens in pending
-        ]
+        return pending
 
     # -- complete paths for the continuation pool ------------------------------
     def _stash_key(self, history, anchor, processors):

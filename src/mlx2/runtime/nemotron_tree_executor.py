@@ -60,6 +60,9 @@ class NemotronTreeTransaction(TreeLaneTransaction):
 class NemotronTreeExecutor(HybridTreeExecutor):
     protocol = PROTOCOL
     maximum_cohort_width = 1
+    # ``forward`` takes a device int32 token row as ``inputs`` as well as a
+    # host list (``speculative_device_tree``, device_round ``tree_lazy``).
+    device_tree_inputs = True
     _identity_style = "relative"
     _source_root = Path(__file__).parent
     _revision_error = "Nemotron tree source changed"
@@ -102,9 +105,11 @@ class NemotronTreeExecutor(HybridTreeExecutor):
                     raise ValueError("Nemotron tree tokens/parents differ")
                 tree = NemotronTree(ancestry, cache)
                 trees.append(tree)
-                output, taps = model.forward_tree_with_taps(
-                    mx.array([list(tokens)], dtype=mx.uint32), tree, layers
-                )
+                # A device round's verify input is a lazy int32 row (the
+                # same token ids, ``device_tree_inputs``).
+                row = (tokens.reshape(1, -1).astype(mx.uint32) if isinstance(tokens, mx.array)
+                       else mx.array([list(tokens)], dtype=mx.uint32))
+                output, taps = model.forward_tree_with_taps(row, tree, layers)
                 logits.append(output)
                 features.append(taps)
                 self.rows += len(tokens)

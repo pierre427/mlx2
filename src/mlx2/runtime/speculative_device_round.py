@@ -105,6 +105,19 @@ calls into this module.  Switches (``device_round`` policy object):
     (DC-6) is applied to all rows by ``DeviceHistory.apply_rows``.
     This slice fixes shapes; it does not wrap the round in ``mx.compile``.
 
+``tree_lazy`` (slice 1b-a, design section 4.10; ``speculative_device_tree``)
+    ``tree15`` rounds at width one draft their tree lazily
+    (``draft_tree_lazy``: device tokens, static parents) and verify a
+    device-built input; one read of tokens with the verify output, the host
+    decision and commit unchanged.  Independent of the chain switches; other
+    tree rounds keep the host round (counted under
+    ``external_device_tree_decline_reasons``).
+``tree_decide`` (needs ``tree_lazy``; slice 1b-b)
+    A greedy tree round's longest accepted path is selected on the device
+    (first-matching child per node, the host walk's tie-break) and read in
+    the same single read; the host walks only that path (stops, RNG,
+    finiteness) and builds the host verifier's ``RoundDecision``.
+
 KV-sharing drafters (``requires_target_caches``: Hy4 DFly2) take part only
 if they declare ``draft_lazy_target_caches``; the lazy draft then receives
 ``target_caches=[lane.cache]``, the lane's committed target cache that the
@@ -148,7 +161,9 @@ import numpy as np
 VERSION = "speculative-device-round-v1"
 POLICY_KEY = "device_round"
 _SWITCHES = ("lazy_draft", "decide", "sampled_drafts", "nucleus", "processors", "submit_drafts",
-             "device_commit", "lagged_width", "pipeline", "fixed_shape", "lagged_composition")
+             "device_commit", "lagged_width", "pipeline", "fixed_shape", "lagged_composition",
+             # ``tree15`` rounds (slices 1b-*): speculative_device_tree.py.
+             "tree_lazy", "tree_decide")
 _SEED_SCALE = float(1 << 53)
 
 # Present in ``scheduler_stats`` only when the option is configured.
@@ -192,6 +207,8 @@ class DeviceRoundPolicy:
     pipeline: bool = False
     fixed_shape: bool = False
     lagged_composition: bool = False
+    tree_lazy: bool = False
+    tree_decide: bool = False
 
     @classmethod
     def from_value(cls, value):
@@ -230,6 +247,8 @@ class DeviceRoundPolicy:
             raise ValueError(f"{POLICY_KEY}.lagged_composition requires pipeline")
         if policy.fixed_shape and not (policy.lazy_draft and policy.decide):
             raise ValueError(f"{POLICY_KEY}.fixed_shape requires lazy_draft and decide")
+        if policy.tree_decide and not policy.tree_lazy:
+            raise ValueError(f"{POLICY_KEY}.tree_decide requires tree_lazy")
         if not any(getattr(policy, key) for key in _SWITCHES):
             return None
         return policy
@@ -298,8 +317,27 @@ class DeviceRound:
         if self.fixed_shape:
             stats.update(dict.fromkeys(FIXED_SHAPE_COUNTERS, 0))
             stats[FIXED_SHAPE_SKIPS] = {}
+        if self.tree:
+            from . import speculative_device_tree as tree
+
+            stats.update(dict.fromkeys(tree.COUNTERS, 0))
+            stats[tree.DECLINES] = {}
+            if self.policy.tree_decide:
+                stats[tree.DECIDE_SKIPS] = {}
         if self.copy is not None:
             self.copy.install_counters(stats)
+
+    @property
+    def tree(self):
+        """Whether ``tree15`` rounds go through ``run_tree`` (slices 1b-*)."""
+        return bool(self.policy is not None and self.policy.tree_lazy)
+
+    def run_tree(self, owner, cohort):
+        """Serve one ``tree15`` round: on the device where eligible, else the
+        host tree round (decline counted); always served."""
+        from . import speculative_device_tree as tree
+
+        return tree.run(self, owner, cohort)
 
     @property
     def device_commit(self):

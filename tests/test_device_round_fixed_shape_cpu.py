@@ -255,7 +255,10 @@ def test_every_switch_is_either_compatible_or_refused():
     # speculative_device_pipeline.dispatch/book/serve) handles them. Refused: none today.
     compatible = {"lazy_draft", "decide", "fixed_shape", "processors", "submit_drafts",
                   "sampled_drafts", "nucleus", "device_commit", "lagged_width", "pipeline",
-                  "lagged_composition"}
+                  "lagged_composition",
+                  # Tree switches (speculative_device_tree) act on tree15 rounds only,
+                  # which never reach the chain's fixed path.
+                  "tree_lazy", "tree_decide"}
     refused = set()
     unknown = set(_SWITCHES) - compatible - refused
     assert not unknown, f"classify new device_round switches for fixed_shape: {sorted(unknown)}"
