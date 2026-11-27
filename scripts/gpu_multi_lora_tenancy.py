@@ -99,6 +99,9 @@ def parse():
     p.add_argument("--lora-dir", help="where adapters are written (default: temp, removed at the end)")
     p.add_argument("--delta-precision", choices=("fp32", "adapter"),
                    help="multi-LoRA slot/delta precision (default: engine default, fp32)")
+    p.add_argument("--delta-kernel", choices=("gather", "take", "auto"),
+                   help="sets MLX2_MULTI_LORA_DELTA_KERNEL for this process (default: unset = gather)")
+    p.add_argument("--take-max-rows", type=int, help="sets MLX2_MULTI_LORA_TAKE_MAX_ROWS (auto only)")
     p.add_argument("--phases", default="throughput,longtail,churn",
                    help="comma list of throughput,longtail,churn (startup/reference/reload always run)")
     p.add_argument("--i-own-the-gpu", action="store_true")
@@ -109,7 +112,14 @@ def parse():
 
 # ------------------------------------------------------------------ engine
 def build_engine(args, lora_root):
+    import os
+
     from mlx2.serving import ServingEngine
+
+    if args.delta_kernel:
+        os.environ["MLX2_MULTI_LORA_DELTA_KERNEL"] = args.delta_kernel
+    if args.take_max_rows is not None:
+        os.environ["MLX2_MULTI_LORA_TAKE_MAX_ROWS"] = str(args.take_max_rows)
 
     kwargs = dict(
         qualification_mode=True, mtp=False, lora_root=str(lora_root),
@@ -486,12 +496,17 @@ def main():
             m = modules[key]
             out_dims, packed = m.weight.shape
             dims[key] = (packed * 32 // m.bits if isinstance(m, nn.QuantizedLinear) else packed, out_dims)
+        # A random rank-r delta grows ~sqrt(r): scale 2.0 at rank 8 gave coherent
+        # text, but rank 32 produced gibberish (2026-11-27), which makes output
+        # comparisons meaningless. Keep every rank at rank 8's delta strength.
+        adapter_scale = 2.0 * (8 / args.rank) ** 0.5
+        report["adapter_scale"] = adapter_scale
         n_spares = int(args.phase_s // args.churn_s) + 2 if "churn" in args.phases.split(",") else 0
         dtype = None if args.tiny_cpu_smoke else mx.bfloat16
         t0 = time.perf_counter()
         names = []
         for i in range(args.adapters + n_spares):
-            write_adapter(lora_root / f"t{i:04d}", keys=keys, dims=dims, rank=args.rank, scale=2.0,
+            write_adapter(lora_root / f"t{i:04d}", keys=keys, dims=dims, rank=args.rank, scale=adapter_scale,
                           seed=1000 + i, dtype=dtype)
         write_s = time.perf_counter() - t0
         t0 = time.perf_counter()
@@ -585,7 +600,10 @@ def summarize(d: Path):
         a = r["args"]
         lines += [f"## {r['label']}: rank {a['rank']}, {a['adapters']} adapters, {a['slots']} slots", "",
                   f"- checkpoint `{r['checkpoint']}`, mlx2 `{r['source_revision']}`, {r['started']} → {r.get('finished')}",
-                  f"- delta precision `{(r.get('multi_lora_settings') or {}).get('delta_precision', a.get('delta_precision') or 'adapter')}`, slot dtype `{r.get('slot_dtype')}`"]
+                  f"- delta precision `{(r.get('multi_lora_settings') or {}).get('delta_precision', a.get('delta_precision') or 'adapter')}`, slot dtype `{r.get('slot_dtype')}`, "
+                  f"delta kernel `{(r.get('multi_lora_settings') or {}).get('delta_kernel', 'gather')}`, "
+                  f"adapter scale {fmt(r.get('adapter_scale', 2.0))}, "
+                  f"take applications {((r.get('multi_lora_status') or {}).get('counts') or {}).get('take_applications', 0)}"]
         if r.get("fatal"):
             lines.append(f"- **FATAL:** {r['fatal']}")
         if r.get("skipped"):

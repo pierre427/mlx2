@@ -902,6 +902,7 @@ _MULTI_LORA_EVENTS = frozenset(
         "slot_loads", "slot_evictions", "slot_deferred", "registrations",
         "unregistrations", "structural_wraps", "materializations",
         "delta_applications", "delta_skips", "program_delta_applications",
+        "take_applications",
     }
 )
 

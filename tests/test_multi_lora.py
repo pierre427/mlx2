@@ -931,3 +931,75 @@ def test_qwen4_fused_projection_tables_decline_lora_wrapped_projections(
     x = mx.random.normal((1, 3, 32), key=mx.random.key(1))
     projected = attn._project_segmented_qsa(x)
     assert mx.array_equal(projected[0], attn.q_proj(x)).item()
+
+
+@pytest.mark.parametrize("kernel,max_rows,expect_take", [
+    ("take", None, True), ("auto", "8", True), ("auto", "3", False), ("gather", None, False),
+])
+def test_take_delta_kernel_matches_gather(adapters, monkeypatch, kernel, max_rows, expect_take):
+    root, paths = adapters
+    rows = [None, "sql", "chat", "sql"]
+    uids = [10, 11, 12, 13]
+    monkeypatch.delenv("MLX2_MULTI_LORA_DELTA_KERNEL", raising=False)
+    monkeypatch.delenv("MLX2_MULTI_LORA_TAKE_MAX_ROWS", raising=False)
+    gather_model = tiny_model()
+    gather_manager = MultiLoRAManager(gather_model, max_loras=2, max_lora_rank=8)
+    for name in ("sql", "chat"):
+        gather_manager.register(name, paths[name])
+    expected = mixed_logits(gather_manager, gather_model, rows, uids=uids)
+    monkeypatch.setenv("MLX2_MULTI_LORA_DELTA_KERNEL", kernel)
+    if max_rows is None:
+        monkeypatch.delenv("MLX2_MULTI_LORA_TAKE_MAX_ROWS", raising=False)
+    else:
+        monkeypatch.setenv("MLX2_MULTI_LORA_TAKE_MAX_ROWS", max_rows)
+    model = tiny_model()
+    manager = MultiLoRAManager(model, max_loras=2, max_lora_rank=8)
+    for name in ("sql", "chat"):
+        manager.register(name, paths[name])
+    logits = mixed_logits(manager, model, rows, uids=uids)
+    mx.eval(expected, logits)
+    # Same math, different matmul grouping: equal to float32 rounding.
+    assert mx.allclose(logits, expected, atol=1e-5, rtol=1e-5)
+    status = manager.status()
+    assert (status["counts"]["take_applications"] > 0) is expect_take
+    assert status["counts"]["take_applications"] in (0, status["counts"]["delta_applications"])
+    if kernel == "gather":
+        assert "delta_kernel" not in manager.settings()
+    else:
+        assert manager.settings()["delta_kernel"] == kernel
+
+
+@pytest.mark.parametrize("env", [
+    {"MLX2_MULTI_LORA_DELTA_KERNEL": "sgmv"},
+    {"MLX2_MULTI_LORA_DELTA_KERNEL": "auto", "MLX2_MULTI_LORA_TAKE_MAX_ROWS": "0"},
+    {"MLX2_MULTI_LORA_DELTA_KERNEL": "auto", "MLX2_MULTI_LORA_TAKE_MAX_ROWS": "x"},
+])
+def test_delta_kernel_policy_fails_closed(env):
+    from mlx2.runtime.multi_lora import delta_kernel_policy
+
+    with pytest.raises(ValueError):
+        delta_kernel_policy(env)
+    assert delta_kernel_policy({}) == ("gather", 8)
+    # The row cap is read only under auto.
+    assert delta_kernel_policy({"MLX2_MULTI_LORA_TAKE_MAX_ROWS": "0"}) == ("gather", 8)
+
+
+@pytest.mark.parametrize("round_once", [False, True])
+@pytest.mark.parametrize("shape", [(4, 16), (4, 1, 16), (4, 7, 16)])
+def test_take_wrapper_matches_gather_on_every_input_shape(shape, round_once):
+    from mlx2.runtime.multi_lora import _RowState, multi_lora_linear_class
+
+    wrapper = multi_lora_linear_class()
+    base = nn.Linear(16, 12)
+    outputs = []
+    for kernel in ("gather", "take"):
+        rows = _RowState()
+        module = wrapper(base, slots=3, rank=4, dtype=mx.float32, rows=rows,
+                         round_once=round_once, delta_kernel=kernel)
+        module.lora_a = mx.random.normal((3, 16, 4), key=mx.random.key(1))
+        module.lora_b = mx.random.normal((3, 4, 12), key=mx.random.key(2))
+        rows.ids = mx.array([0, 1, 2, 1], dtype=mx.uint32)
+        outputs.append(module(mx.random.normal(shape, key=mx.random.key(3))))
+    mx.eval(outputs)
+    assert outputs[0].shape == outputs[1].shape
+    assert mx.allclose(outputs[0], outputs[1], atol=1e-5, rtol=1e-5)

@@ -36,6 +36,37 @@ DELTA_PRECISIONS = ("adapter", "fp32")
 # "adapter" keeps the earlier bf16-slot arithmetic.
 SERVING_DELTA_PRECISION = "fp32"
 _MANAGER_ATTRIBUTE = "_mlx2_multi_lora"
+# Delta kernel (opt-in, Pierre 2026-11-27 "Yes, try it"): "gather" is the
+# shipped gather_mm BGMV; "take" gathers each row's A/B with mx.take and runs a
+# batched matmul; "auto" uses take only when the bound rows are at most
+# MLX2_MULTI_LORA_TAKE_MAX_ROWS (default 8). On the 27B decode shapes take beat
+# gather in most microbench cells at batch <= 8 and lost at batch 32 with rank
+# 32 (output/multi-lora-precision-20261127). Default stays "gather" until an
+# end-to-end A/B says otherwise.
+DELTA_KERNEL_ENV = "MLX2_MULTI_LORA_DELTA_KERNEL"
+TAKE_MAX_ROWS_ENV = "MLX2_MULTI_LORA_TAKE_MAX_ROWS"
+DELTA_KERNELS = ("gather", "take", "auto")
+
+
+def delta_kernel_policy(environ=None):
+    """(kernel, take_max_rows) from the environment; fail closed on bad values."""
+    import os
+
+    env = os.environ if environ is None else environ
+    kernel = (env.get(DELTA_KERNEL_ENV) or "gather").strip().lower()
+    if kernel not in DELTA_KERNELS:
+        raise ValueError(f"{DELTA_KERNEL_ENV} must be one of {DELTA_KERNELS}, got {kernel!r}")
+    raw = env.get(TAKE_MAX_ROWS_ENV)
+    if kernel != "auto":
+        # Only auto reads the row cap; a stray value must not stop a gather server.
+        return kernel, 8
+    try:
+        max_rows = 8 if raw in (None, "") else int(raw)
+    except ValueError:
+        raise ValueError(f"{TAKE_MAX_ROWS_ENV} must be a positive integer, got {raw!r}") from None
+    if max_rows < 1:
+        raise ValueError(f"{TAKE_MAX_ROWS_ENV} must be a positive integer, got {raw!r}")
+    return kernel, max_rows
 
 
 def multi_lora_manager(model):
@@ -70,6 +101,7 @@ class _RowState:
     __slots__ = (
         "delta_applications",
         "delta_skips",
+        "take_applications",
         "ids",
         "program_applications",
         "program_delta_applications",
@@ -83,6 +115,7 @@ class _RowState:
         self.rows = None  # bound row count, or None when nothing is bound
         self.delta_applications = 0
         self.delta_skips = 0
+        self.take_applications = 0
         self.uids = ()
         self.slots = ()
         self.program_applications = {}
@@ -121,7 +154,8 @@ def _make_wrapper_class():
         # Row/program counts are per call; compiled sites replay them.
         records_compiled_calls = True
 
-        def __init__(self, base, *, slots, rank, dtype, rows, round_once=False):
+        def __init__(self, base, *, slots, rank, dtype, rows, round_once=False,
+                     delta_kernel="gather", take_max_rows=8):
             super().__init__()
             input_dims, output_dims = _linear_dims(base)
             self.base = base
@@ -131,6 +165,8 @@ def _make_wrapper_class():
             # delta_precision "fp32": add the fp32 delta to the base output
             # and round once, instead of rounding the delta and then the sum.
             self._round_once = round_once
+            self._delta_kernel = delta_kernel
+            self._take_max_rows = take_max_rows
             self._program_slots = frozenset()
 
         @property
@@ -161,6 +197,8 @@ def _make_wrapper_class():
                 rows.delta_skips += 1
                 return
             rows.delta_applications += 1
+            if self._uses_take(rows.ids):
+                rows.take_applications += 1
             # Only a called target covered by this compiled program counts as
             # engagement. Binding an adapter row alone proves no tensor use.
             if self._program_slots:
@@ -168,6 +206,10 @@ def _make_wrapper_class():
                     if slot in self._program_slots:
                         rows.program_applications[uid] = rows.program_applications.get(uid, 0) + 1
                         rows.program_delta_applications += 1
+
+        def _uses_take(self, ids):
+            kernel = self._delta_kernel
+            return kernel == "take" or (kernel == "auto" and ids.shape[0] <= self._take_max_rows)
 
         def __call__(self, x):
             y = self.base(x)
@@ -186,8 +228,14 @@ def _make_wrapper_class():
                     f"input {tuple(x.shape)} vs {ids.shape[0]} bound rows"
                 )
             value = value.astype(self.lora_a.dtype)
-            hidden = mx.gather_mm(value, self.lora_a, None, ids)
-            delta = mx.gather_mm(hidden, self.lora_b, None, ids)
+            if self._uses_take(ids):
+                # (B, L, in) @ (B, in, R) @ (B, R, out): per-row adapter copies,
+                # one batched matmul each. Same math as the gather path.
+                hidden = value @ mx.take(self.lora_a, ids, axis=0)
+                delta = hidden @ mx.take(self.lora_b, ids, axis=0)
+            else:
+                hidden = mx.gather_mm(value, self.lora_a, None, ids)
+                delta = mx.gather_mm(hidden, self.lora_b, None, ids)
             if squeeze:
                 delta = delta[:, 0, :]
             count_covered_call(self._count_call)
@@ -265,6 +313,7 @@ class MultiLoRAManager:
                 raise ValueError("multi-LoRA delta_precision fp32 needs float32 slots")
             dtype = mx.float32
         self.delta_precision = delta_precision
+        self.delta_kernel, self.take_max_rows = delta_kernel_policy()
         self.base_checkpoint = base_checkpoint
         self.model = model
         self.max_loras = max_loras
@@ -300,6 +349,10 @@ class MultiLoRAManager:
         # Present only when not the default, so default receipts are unchanged.
         if self.delta_precision != "adapter":
             settings["delta_precision"] = self.delta_precision
+        if self.delta_kernel != "gather":
+            settings["delta_kernel"] = self.delta_kernel
+            if self.delta_kernel == "auto":
+                settings["take_max_rows"] = self.take_max_rows
         return settings
 
     def detach(self):
@@ -466,6 +519,8 @@ class MultiLoRAManager:
                     dtype=self.dtype or _default_lora_dtype(base),
                     rows=self.rows,
                     round_once=self.delta_precision == "fp32",
+                    delta_kernel=self.delta_kernel,
+                    take_max_rows=self.take_max_rows,
                 )
                 replacements.append((key, module))
                 self.wrapped[key] = module
@@ -733,6 +788,7 @@ class MultiLoRAManager:
                     **dict(self.counts),
                     "delta_applications": self.rows.delta_applications,
                     "delta_skips": self.rows.delta_skips,
+                    "take_applications": self.rows.take_applications,
                     "program_delta_applications": self.rows.program_delta_applications,
                 },
                 "rows_by_adapter": dict(self.rows_by_adapter),
