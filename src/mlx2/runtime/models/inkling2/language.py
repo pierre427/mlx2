@@ -2042,7 +2042,7 @@ class TextModel(nn.Module):
                     # mix as the residuals, one launch (near-exact).
                     from . import fuse_kernels
 
-                    messages = fuse_kernels.softmax_mix(self, bank, query)
+                    messages = fuse_kernels.softmax_mix(self, bank, query, law="message")
                     if messages is None:
                         states = mx.stack(bank, axis=-2)
                         bank = mx.fast.rms_norm(states.astype(mx.float32), None, 1e-6)

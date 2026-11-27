@@ -98,7 +98,9 @@ IO_SWITCHES = {"io:sink_slot_spare": ("language", "SINK_SLOT_SPARE"),
                "io:ring_direct": ("splitk", "RING_DIRECT"),
                "io:vector_loads": ("splitk", "VECTOR_LOADS"),
                # Near-exact, not bit-identical (oMLX #5620 split count A/B).
-               "io:split_fixed256": ("splitk", "SPLIT_FIXED256")}
+               "io:split_fixed256": ("splitk", "SPLIT_FIXED256"),
+               # Candidate bitwise residual kernel (MLX 0.32.5 reduction orders).
+               "io:residual_mlx_order": ("fuse_kernels", "RESIDUAL_MLX_ORDER")}
 
 
 class Toggle:
@@ -112,9 +114,9 @@ class Toggle:
         self.base = {k: v for k, v in model.kernel_policy.items()}
 
     def __call__(self, on):
-        from mlx2.runtime.models.inkling2 import language, splitk
+        from mlx2.runtime.models.inkling2 import fuse_kernels, language, splitk
 
-        modules = {"language": language, "splitk": splitk}
+        modules = {"language": language, "splitk": splitk, "fuse_kernels": fuse_kernels}
         for module, name in self.switches:
             setattr(modules[module], name, bool(on))
         self.model.configure_kernels(

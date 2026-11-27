@@ -20,6 +20,12 @@ bit-identical; ``tests/test_inkling2_fuse_metal.py`` measures the gap.
   of a stack, casts, an RMS norm, two GEMVs, the scale and a four-op
   softmax.  The loop messages (the same law over the previous pass's bank)
   use it too.
+
+``RESIDUAL_MLX_ORDER`` (module switch, default ON since 2026-11-26, Pierre)
+swaps the residual and message mix for a launch that sums in the order of
+the MLX kernels the reference dispatches, bit-identical to them on the
+checkpoint (unit @981e86bcb); see the comment above ``mlx_order_plan``.
+False restores the earlier near-exact kernel.
 """
 
 from __future__ import annotations
@@ -201,15 +207,25 @@ LOADS
 """.replace("LOADS", loads)
 
 
-def softmax_mix(module, states, query):
+def softmax_mix(module, states, query, law="residual"):
     """``softmax(rms(S) q^T / sqrt(D), over S) rms(S)`` for one row.
 
     states: arrays of D elements (one row each), the last one any dtype;
-    query: [nq, D] or [D].  Returns [1, 1, nq, D] FP32, or ``None``."""
+    query: [nq, D] or [D].  Returns [1, 1, nq, D] FP32, or ``None``.
+    ``law`` names the reference the call replaces (``"residual"``:
+    ``language._attention_residual``; ``"message"``: the decoder's loop
+    messages); only the ``RESIDUAL_MLX_ORDER`` candidate reads it."""
     width = states[-1].shape[-1]
     n = len(states)
     if n > 16 or any(s.size != width for s in states):
         return _decline(module, "layout")
+    if RESIDUAL_MLX_ORDER:
+        out = _softmax_mix_mlx_order(module, states, query, law)
+        if out is not None:
+            return out
+        # A shape (or release) the MLX-order plan does not restate keeps the
+        # earlier near-exact kernel, the default before 2026-11-26, rather
+        # than dropping to the composed ops (counted mlx_order:<reason>).
     kernel = _res_kernels.get((n, SAFE_MATH))
     if kernel is None:
         kernel = _res_kernels[(n, SAFE_MATH)] = mx.fast.metal_kernel(
@@ -244,6 +260,515 @@ def residual(module, blocks, partial):
     out = softmax_mix(module, [*blocks, partial], module.query)
     if out is not None:
         _fuse.count(module, "residual_kernel")
+    return out
+
+
+# ----- MLX-order residual / message mix (candidate, module switch) --------
+#
+# ``RESIDUAL_MLX_ORDER`` (default True since 2026-11-26, Pierre: probe @79920fe96
+# bitwise 64/64 cells, checkpoint @981e86bcb logits bitwise against the
+# reference ops at 1K/16K, decode +3-5% over them and ~3% under the earlier
+# near-exact kernel in a sanity A/B; False restores that kernel): the
+# same one-launch mix as ``_residual_source``, but every reduction sums in
+# the order of the MLX 0.32.5 kernel the composed reference dispatches for
+# the call's shape (idea: oMLX #5557, "repeat the arithmetic of the MLX ops
+# they replace", description only; the orders below are restated from the
+# MLX v0.32.5 source, MIT, see provenance/inkling2-residual-mlx-order.json).
+# One threadgroup of ``32 * ceil(ceil(D / 4) / 32)`` threads (576 at D 2304)
+# runs all four stages for all query rows:
+#
+# (a) keys = ``mx.fast.rms_norm(S, None, 1e-6)``: MLX ``rms_single_row``
+#     (rms_norm.metal:12-81; normalization.cpp:57-80 picks it for rows of at
+#     most 4096 with exactly this threadgroup): four consecutive values per
+#     thread squared and summed in order, ``simd_sum``, the per-simdgroup
+#     sums ``simd_sum``-ed over a zeroed 32-slot array,
+#     ``precise::rsqrt(sum / D + eps)``, key = ``x * inv`` (the weight is
+#     ``array(1)``, fast.cpp:110).
+# (b) scores: one dot per (state, query) row pair when either side has one
+#     row (matmul.cpp:1659 ``gemv``; gemv_axbpy 1277-1295 picks
+#     ``bm1_bn8_sm1_sn32_tn4`` for D >= 16 * rows: thread t of 256 sums k =
+#     4t + j + 1024 i in order, ``simd_shuffle_down`` 16..1, then the eight
+#     simdgroup partials in order, gemv.h:107-245); otherwise split-K
+#     (matmul.cpp:970-990, 520-675: 16x16 tiles, ``P = min(max(2,
+#     next_pow2(K / 16)), 32)`` partitions of ``(K / 16) / P`` 16-wide
+#     iterations, the last partition also takes the rest; each partition an
+#     8x8x8 ``simdgroup_multiply_accumulate`` chain from zero
+#     (steel_gemm_splitk.h, mma.h:513-539), then ``0 + P0 + P1 + ...``
+#     (gemm_splitk_accum)). FP32 never takes ``gemv_wide`` (FP16/BF16 only,
+#     matmul.cpp:1446). Then ``* D**-0.5`` as its own rounding.
+# (c) residual: ``mx.softmax(axis=-2)`` is not the Softmax primitive
+#     (ops.cpp:4276-4305: max, ``precise::exp`` (unary_ops.h:177), sum,
+#     divide); the sum is ``row_reduce_small`` for one query (sequential,
+#     reduce_row.h:199-235) and ``col_reduce_small`` for several
+#     (reduce_col.h:4-80; reduce.cpp:586-650: ``Y = min(8, N)`` row
+#     strides, then the Y partials in order).  message: ``axis=-1`` is the
+#     primitive, ``softmax_single_row`` (softmax.h:10-100, softmax.cpp:56-70:
+#     one simdgroup, four values per lane, ``fast::exp``, ``simd_sum`` twice,
+#     ``x * (1 / sum)``).
+# (d) mix: one query row is ``gemv_t`` (gemv_axbpy 1243-1276:
+#     ``bm1_bn16_sm8_sn4_tm4_tn4``; gemv.h:297-430: lane row c sums k = 4c..
+#     4c + 3 in order, then ``(r0 + r4 + r2 + r6) + (r1 + r5 + r3 + r7)`` by
+#     shuffles); several rows are the regular steel GEMM (K <= 16, one BK
+#     tile, BK 32 on 'd' devices else 16, matmul.cpp:91-176; the unaligned K
+#     tile first, steel_gemm_fused.h:133), an 8x8x8 MMA chain from zero.
+#
+# Products that MLX writes as ``acc += a * b`` go through ``MO_MAC`` so the
+# probe can test the compiler's contraction choice (``RESIDUAL_MLX_MAC``:
+# "source" keeps MLX's expression, "fma" forces ``fma``, "nocontract" adds
+# ``fp contract(off)``).  Routes are restated, not read from MLX at run time:
+# ``mlx_order_plan`` declines (counted ``mlx_order:<reason>``) any shape
+# whose route it does not restate, and the caller then runs the reference.
+# FP32 GEMMs take TF32/NAX routes when ``MLX_ENABLE_TF32`` is on (mlx2 pins
+# it off, process_env.py), so those routes decline under TF32.
+RESIDUAL_MLX_ORDER = True
+RESIDUAL_MLX_MAC = "source"
+_MO_MACS = {
+    "source": ("", "acc += (a) * (b)"),
+    "fma": ("", "acc = metal::fma((a), (b), acc)"),
+    "nocontract": ("#pragma METAL fp contract(off)\n", "acc += (a) * (b)"),
+}
+_mo_kernels = {}
+_ARCH = []
+# The MLX release whose dispatch and orders are restated here. Two things
+# this module cannot see (review 2026-11-26): MLX latches MLX_ENABLE_TF32 at
+# its first FP32 matmul, so the pin must be applied before any (mlx2's
+# process_env does; the plan reads the environment), and this kernel is
+# compiled by the OS Metal compiler while MLX's come prebuilt, so a macOS
+# update could change a contraction choice. Re-run
+# scripts/research/inkling2_residual_bitwise_probe.py after either changes.
+MLX_ORDER_VERSION = "0.32.5"
+# A threadgroup MLX would refuse at eval time (above the pipeline's
+# maxTotalThreadsPerThreadgroup) cannot fall back, so the plan stays well
+# under 1024 threads (D <= 3072; the checkpoint's 2304 takes 576).
+MLX_ORDER_MAX_THREADS = 768
+
+
+def _architecture():
+    if not _ARCH:
+        try:
+            info = (getattr(mx, "device_info", None) or mx.metal.device_info)()
+            _ARCH.append(str(info.get("architecture", "")))
+        except Exception:  # noqa: BLE001 - no device info: declined (see the plan)
+            _ARCH.append("")
+    return _ARCH[0]
+
+
+def _ceil_div(a, b):
+    return -(-a // b)
+
+
+def _next_pow2(n):
+    p = 1
+    while p < n:
+        p *= 2
+    return p
+
+
+def mlx_order_plan(law, n, nq, width, *, tf32=None, arch=None):
+    """MLX 0.32.5's routes for one ``law`` call of ``n`` states, ``nq``
+    query rows and width ``width``: ``(plan, None)`` or ``(None, reason)``."""
+    if law not in ("residual", "message"):
+        return None, "law"
+    if not 1 <= n <= 16:
+        return None, "states"
+    if not 1 <= nq <= 8:
+        return None, "queries"
+    if mx.__version__ != MLX_ORDER_VERSION:
+        # The orders are MLX 0.32.5's; another release may dispatch other
+        # kernels or tiles, so it runs the reference ops rather than a
+        # near-exact launch that would still count as MLX-order.
+        return None, "mlx_version"
+    d = width
+    tg = 32 * _ceil_div(_ceil_div(d, 4), 32)
+    if d % 8 or not 256 <= tg <= MLX_ORDER_MAX_THREADS:
+        return None, "width"
+    if tf32 is None:
+        from mlx2.process_env import tf32_enabled
+
+        tf32 = tf32_enabled()
+    arch = _architecture() if arch is None else arch
+    if not arch:
+        # The mix GEMM's K tile depends on the device class ('d' takes BK
+        # 32); without device info the route is not known.
+        return None, "architecture"
+    sa, sb = (n, nq) if law == "residual" else (nq, n)
+    plan = {"law": law, "n": n, "nq": nq, "d": d, "tg": tg, "sa": sa, "sb": sb}
+    if min(sa, sb) == 1:
+        # One dot per row pair. sa == sb == 1 is MLX's dot_product; the
+        # weight is then exp(s - s) / 1 = 1 for any finite score, so the
+        # order of that one dot does not reach the output.
+        if d <= 64 or d < 16 * max(sa, sb):
+            return None, "scores_gemv_tiles"
+        plan["scores"] = "dot" if sa == sb == 1 else "gemv"
+    else:
+        if tf32:
+            return None, "tf32"
+        tk = d // 16
+        threshold = 2048 if arch[-1:] in ("s", "d") else 1024
+        if _ceil_div(sa, 16) * _ceil_div(sb, 16) > threshold or tk < 8 or d < max(sa, sb):
+            return None, "scores_route"
+        if d % 16:
+            return None, "scores_k"
+        parts = min(max(2, _next_pow2(tk // (_ceil_div(sa, 32) * _ceil_div(sb, 32)))), 32)
+        iters = tk // parts
+        plan.update(scores="splitk", parts=parts, iters=iters,
+                    iters_last=tk - (parts - 1) * iters)
+    if law == "residual":
+        if nq > 4:
+            return None, "softmax_cols"
+        plan["softmax"] = "row_small" if nq == 1 else "col_small"
+        plan["col_rows"] = min(8, n)
+    else:
+        plan["softmax"] = "block"
+    if nq == 1:
+        plan["mix"] = "gemv_t"
+    else:
+        if tf32:
+            return None, "tf32"
+        plan["mix"] = "gemm"
+        plan["bk"] = 32 if arch.endswith("d") else 16
+    return plan, None
+
+
+def _mo_defines(plan, x, q, key):
+    """``#define`` lines for the stage snippets: ``x(i, d)`` a raw state
+    value, ``q(j, d)`` a query value, ``key(i, d)`` a normed state value."""
+    a, b = ("MO_KEY", "MO_Q") if plan["law"] == "residual" else ("MO_Q", "MO_KEY")
+    return "\n".join([
+        f"#define MO_X(i, d) ({x})", f"#define MO_Q(j, d) ({q})", f"#define MO_KEY(i, d) ({key})",
+        f"#define MO_A(r, k) {a}(r, k)", f"#define MO_B(r, k) {b}(r, k)",
+    ])
+
+
+_MO_DECL = r"""
+    constexpr int MO_N = {n};
+    constexpr int MO_D = {d};
+    constexpr int MO_TG = {tg};
+    constexpr int MO_NS = MO_TG / 32;
+    constexpr int MO_NQ = {nq};
+    constexpr int MO_SA = {sa};
+    constexpr int MO_SB = {sb};
+    const uint tid = thread_position_in_threadgroup.x;
+    const uint lane = thread_index_in_simdgroup;
+    const uint sg = simdgroup_index_in_threadgroup;
+    const short mo_qid = short(lane / 4);
+    const short mo_fm = (mo_qid & 4) + short((lane / 2) % 4);
+    const short mo_fn = (mo_qid & 2) * 2 + short(lane % 2) * 2;
+    threadgroup float mo_lsum[MO_N * 32];
+    threadgroup float mo_inv[MO_N];
+    threadgroup float mo_red[{red}];
+    threadgroup float mo_s[MO_SA * MO_SB];
+    threadgroup float mo_w[MO_NQ * MO_N];
+    (void)mo_fm; (void)mo_fn; (void)mo_lsum; (void)mo_red;
+"""
+
+_MO_RMS = r"""
+    if (sg == 0) {
+        for (int i = 0; i < MO_N; ++i) mo_lsum[i * 32 + lane] = 0;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (int i = 0; i < MO_N; ++i) {
+        float acc = 0;
+        float xv[4];
+        const uint base = tid * 4;
+        if (base + 4 <= uint(MO_D)) {
+            for (int j = 0; j < 4; j++) {
+                xv[j] = MO_X(i, base + j);
+                MO_MAC(acc, xv[j], xv[j]);
+            }
+        } else {
+            for (int j = 0; j < 4; j++) {
+                xv[j] = (base + j < uint(MO_D)) ? MO_X(i, base + j) : 0;
+                MO_MAC(acc, xv[j], xv[j]);
+            }
+        }
+        acc = simd_sum(acc);
+        if (lane == 0) mo_lsum[i * 32 + sg] = acc;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (sg == 0) {
+        for (int i = 0; i < MO_N; ++i) {
+            float acc = simd_sum(mo_lsum[i * 32 + lane]);
+            if (lane == 0) mo_inv[i] = metal::precise::rsqrt(acc / uint(MO_D) + eps[0]);
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+"""
+
+# gemv (bm1_bn8_sm1_sn32_tn4): threads 0..255 are MLX's 8 x 32 lanes.
+_MO_SCORES_GEMV = r"""
+    if (tid < 256) {
+        for (int a = 0; a < MO_SA; ++a) {
+            for (int b = 0; b < MO_SB; ++b) {
+                float r = 0;
+                int bn = int(tid) * 4;
+                for (int it = 0; it < MO_D / 1024; ++it) {
+                    float vc[4];
+                    float mv[4];
+                    for (int j = 0; j < 4; ++j) vc[j] = MO_B(b, bn + j);
+                    for (int j = 0; j < 4; ++j) mv[j] = MO_A(a, bn + j);
+                    for (int j = 0; j < 4; ++j) MO_MAC(r, mv[j], vc[j]);
+                    bn += 1024;
+                }
+                if (MO_D % 1024 > 0) {
+                    float vc[4];
+                    float mv[4];
+                    for (int j = 0; j < 4; ++j) vc[j] = (bn + j < MO_D) ? MO_B(b, bn + j) : 0.0f;
+                    for (int j = 0; j < 4; ++j) mv[j] = (bn + j < MO_D) ? MO_A(a, bn + j) : 0.0f;
+                    for (int j = 0; j < 4; ++j) MO_MAC(r, mv[j], vc[j]);
+                }
+                for (ushort sn = 16; sn >= 1; sn >>= 1) r += simd_shuffle_down(r, sn);
+                if (lane == 0) mo_red[(a * MO_SB + b) * 8 + sg] = r;
+            }
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (int e = int(tid); e < MO_SA * MO_SB; e += MO_TG) {
+        float r = mo_red[e * 8];
+        for (int g = 1; g < 8; ++g) r += mo_red[e * 8 + g];
+        mo_s[e] = r * scale[0];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+"""
+
+# split-K (bm16_bn16_bk16_wm2_wn2): one simdgroup per (8x8 tile, partition).
+_MO_SCORES_SPLITK = r"""
+    {
+        constexpr int FA = (MO_SA + 7) / 8;
+        constexpr int FB = (MO_SB + 7) / 8;
+        constexpr int NP = {parts};
+        for (int task = int(sg); task < FA * FB * NP; task += MO_NS) {
+            const int kp = task % NP;
+            const int fa = (task / NP) / FB;
+            const int fb = (task / NP) % FB;
+            const int ar = fa * 8 + mo_fm;
+            const int bc = fb * 8 + mo_fn;
+            const int k0 = kp * {iters} * 16;
+            const int iters = (kp == NP - 1) ? {iters_last} : {iters};
+            simdgroup_matrix<float, 8, 8> mc;
+            mc.thread_elements()[0] = 0.0f;
+            mc.thread_elements()[1] = 0.0f;
+            for (int it = 0; it < iters; ++it) {
+                for (int kk = 0; kk < 16; kk += 8) {
+                    const int k = k0 + it * 16 + kk;
+                    simdgroup_matrix<float, 8, 8> ma;
+                    simdgroup_matrix<float, 8, 8> mb;
+                    ma.thread_elements()[0] = ar < MO_SA ? MO_A(ar, k + mo_fn) : 0.0f;
+                    ma.thread_elements()[1] = ar < MO_SA ? MO_A(ar, k + mo_fn + 1) : 0.0f;
+                    mb.thread_elements()[0] = bc < MO_SB ? MO_B(bc, k + mo_fm) : 0.0f;
+                    mb.thread_elements()[1] = bc + 1 < MO_SB ? MO_B(bc + 1, k + mo_fm) : 0.0f;
+                    simdgroup_multiply_accumulate(mc, ma, mb, mc);
+                }
+            }
+            if (ar < MO_SA && bc < MO_SB)
+                mo_red[(kp * MO_SA + ar) * MO_SB + bc] = mc.thread_elements()[0];
+            if (ar < MO_SA && bc + 1 < MO_SB)
+                mo_red[(kp * MO_SA + ar) * MO_SB + bc + 1] = mc.thread_elements()[1];
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (int e = int(tid); e < MO_SA * MO_SB; e += MO_TG) {
+        float o = 0;
+        for (int kp = 0; kp < {parts}; ++kp) o += mo_red[kp * MO_SA * MO_SB + e];
+        mo_s[e] = o * scale[0];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+"""
+
+# residual softmax over the states (axis -2 of [.., N, NQ]): composed ops.
+_MO_SOFTMAX_COMPOSED = r"""
+    for (int qr = int(tid); qr < MO_NQ; qr += MO_TG) {
+        float m = mo_s[qr];
+        for (int i = 1; i < MO_N; ++i) m = metal::max(m, mo_s[i * MO_NQ + qr]);
+        float e[MO_N];
+        for (int i = 0; i < MO_N; ++i) e[i] = metal::precise::exp(mo_s[i * MO_NQ + qr] - m);
+        float total;
+SUM
+        for (int i = 0; i < MO_N; ++i) mo_w[qr * MO_N + i] = e[i] / total;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+"""
+_MO_SUM_ROW = r"""
+        total = 0;
+        for (int i = 0; i < MO_N; ++i) total = e[i] + total;
+"""
+_MO_SUM_COL = r"""
+        float part[{y}];
+        for (int y = 0; y < {y}; ++y) {
+            part[y] = 0;
+            for (int i = y; i < MO_N; i += {y}) part[y] = e[i] + part[y];
+        }
+        total = part[0];
+        for (int y = 1; y < {y}; ++y) total = part[y] + total;
+"""
+
+# message softmax over the bank (axis -1 of [.., NQ, N]): softmax_single_row.
+_MO_SOFTMAX_BLOCK = r"""
+    if (sg == 0) {
+        for (int qr = 0; qr < MO_NQ; ++qr) {
+            float ld[4];
+            for (int j = 0; j < 4; ++j) {
+                const int c = int(lane) * 4 + j;
+                ld[j] = c < MO_N ? mo_s[qr * MO_N + c] : -INFINITY;
+            }
+            float mval = -metal::numeric_limits<float>::max();
+            for (int j = 0; j < 4; ++j) mval = (mval < ld[j]) ? ld[j] : mval;
+            mval = simd_max(mval);
+            float nrm = 0;
+            for (int j = 0; j < 4; ++j) {
+                float ex = metal::fast::exp(ld[j] - mval);
+                ld[j] = ex;
+                nrm += ex;
+            }
+            nrm = simd_sum(nrm);
+            nrm = simd_sum(lane == 0 ? nrm : 0.0f);
+            nrm = 1 / nrm;
+            for (int j = 0; j < 4; ++j) {
+                const int c = int(lane) * 4 + j;
+                if (c < MO_N) mo_w[qr * MO_N + c] = ld[j] * nrm;
+            }
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+"""
+
+# gemv_t (bm1_bn16_sm8_sn4_tm4_tn4), one query row: per output, the eight
+# lane rows' partials and MLX's shuffle tree.
+_MO_MIX_GEMV_T = r"""
+    for (int d = int(tid); d < MO_D; d += MO_TG) {
+        float r[8];
+        for (int c = 0; c < 8; ++c) {
+            r[c] = 0;
+            int bm = 4 * c;
+            for (int it = 0; it < MO_N / 32; ++it) {
+                for (int tm = 0; tm < 4; ++tm) {
+                    const float vc = mo_w[bm + tm];
+                    const float mv = MO_KEY(bm + tm, d);
+                    MO_MAC(r[c], vc, mv);
+                }
+                bm += 32;
+            }
+            if (MO_N % 32 > 0) {
+                for (int tm = 0; tm < 4 && bm + tm < MO_N; ++tm) {
+                    const float vc = mo_w[bm + tm];
+                    const float mv = MO_KEY(bm + tm, d);
+                    MO_MAC(r[c], vc, mv);
+                }
+            }
+        }
+        for (int c = 0; c < 4; ++c) r[c] += r[c + 4];
+        for (int c = 0; c < 2; ++c) r[c] += r[c + 2];
+        r[0] += r[1];
+        out[d] = r[0];
+    }
+"""
+
+# steel GEMM, several query rows: one simdgroup per 8-column tile.
+_MO_MIX_GEMM = r"""
+    for (int fd = int(sg); fd < MO_D / 8; fd += MO_NS) {
+        simdgroup_matrix<float, 8, 8> mc;
+        mc.thread_elements()[0] = 0.0f;
+        mc.thread_elements()[1] = 0.0f;
+        const int col = fd * 8 + mo_fn;
+        for (int c = 0; c < {bk} / 8; ++c) {
+            const int k = c * 8;
+            simdgroup_matrix<float, 8, 8> ma;
+            simdgroup_matrix<float, 8, 8> mb;
+            ma.thread_elements()[0] = (mo_fm < MO_NQ && k + mo_fn < MO_N) ? mo_w[mo_fm * MO_N + k + mo_fn] : 0.0f;
+            ma.thread_elements()[1] = (mo_fm < MO_NQ && k + mo_fn + 1 < MO_N) ? mo_w[mo_fm * MO_N + k + mo_fn + 1] : 0.0f;
+            mb.thread_elements()[0] = (k + mo_fm < MO_N) ? MO_KEY(k + mo_fm, col) : 0.0f;
+            mb.thread_elements()[1] = (k + mo_fm < MO_N) ? MO_KEY(k + mo_fm, col + 1) : 0.0f;
+            simdgroup_multiply_accumulate(mc, ma, mb, mc);
+        }
+        if (mo_fm < MO_NQ) {
+            out[mo_fm * MO_D + col] = mc.thread_elements()[0];
+            out[mo_fm * MO_D + col + 1] = mc.thread_elements()[1];
+        }
+    }
+"""
+
+
+def _mo_red_size(plan):
+    if plan["scores"] == "splitk":
+        return plan["parts"] * plan["sa"] * plan["sb"]
+    return plan["sa"] * plan["sb"] * 8
+
+
+def mo_phase(plan, phase):
+    """The Metal text of one stage (``rms``, ``scores``, ``softmax``,
+    ``mix``) for ``plan``; the probe builds single-stage kernels from it."""
+    if phase == "rms":
+        return _MO_RMS
+    if phase == "scores":
+        if plan["scores"] == "splitk":
+            return (_MO_SCORES_SPLITK.replace("{parts}", str(plan["parts"]))
+                    .replace("{iters_last}", str(plan["iters_last"]))
+                    .replace("{iters}", str(plan["iters"])))
+        return _MO_SCORES_GEMV
+    if phase == "softmax":
+        if plan["softmax"] == "block":
+            return _MO_SOFTMAX_BLOCK
+        total = (_MO_SUM_ROW if plan["softmax"] == "row_small"
+                 else _MO_SUM_COL.replace("{y}", str(plan["col_rows"])))
+        return _MO_SOFTMAX_COMPOSED.replace("SUM", total.strip("\n"))
+    if phase == "mix":
+        if plan["mix"] == "gemm":
+            return _MO_MIX_GEMM.replace("{bk}", str(plan["bk"]))
+        return _MO_MIX_GEMV_T
+    raise ValueError(phase)
+
+
+def mo_source(plan, phases, defines, pre="", post="", mac=None):
+    """``(header, source)`` for ``phases`` of ``plan`` between ``pre`` and
+    ``post`` glue; ``defines`` from ``_mo_defines``."""
+    pragma, mac_expr = _MO_MACS[mac or RESIDUAL_MLX_MAC]
+    decl = _MO_DECL
+    for key in ("n", "d", "tg", "nq", "sa", "sb"):
+        decl = decl.replace("{" + key + "}", str(plan[key]))
+    decl = decl.replace("{red}", str(_mo_red_size(plan)))
+    body = "\n".join([defines, f"#define MO_MAC(acc, a, b) {mac_expr}", decl, pre,
+                      *(mo_phase(plan, p) for p in phases), post])
+    return pragma, body
+
+
+def _mo_state_expr(n):
+    expr = "float(p[(d)])"
+    for i in range(n - 2, -1, -1):
+        expr = f"(i) == {i} ? float(b{i}[(d)]) : ({expr})"
+    return expr
+
+
+def _softmax_mix_mlx_order(module, states, query, law):
+    width = states[-1].shape[-1]
+    n = len(states)
+    q = query.reshape(-1, width)
+    nq = q.shape[0]
+    plan, reason = mlx_order_plan(law, n, nq, width)
+    if plan is None:
+        return _decline(module, "mlx_order:" + reason)
+    mac = RESIDUAL_MLX_MAC
+    key = (law, n, nq, width, tuple(sorted(plan.items())), mac)
+    kernel = _mo_kernels.get(key)
+    if kernel is None:
+        defines = _mo_defines(plan, _mo_state_expr(n), "float(q[(j) * MO_D + (d)])",
+                              "MO_X(i, d) * mo_inv[(i)]")
+        header, source = mo_source(plan, ("rms", "scores", "softmax", "mix"), defines, mac=mac)
+        kernel = _mo_kernels[key] = mx.fast.metal_kernel(
+            name=f"inkling2_fuse_residual_mlx_{law}_{n}_{nq}_{mac}",
+            input_names=[f"b{i}" for i in range(n - 1)] + ["p", "q", "scale", "eps"],
+            output_names=["out"],
+            source=source,
+            header=header,
+        )
+    out = kernel(
+        inputs=[*(s.reshape(width) for s in states[:-1]), states[-1].reshape(width), q,
+                mx.array([width ** -0.5], mx.float32), mx.array([1e-6], mx.float32)],
+        grid=(plan["tg"], 1, 1),
+        threadgroup=(plan["tg"], 1, 1),
+        output_shapes=[(1, 1, nq, width)],
+        output_dtypes=[mx.float32],
+    )[0]
+    _fuse.count(module, "mlx_order_kernel:" + law)
     return out
 
 

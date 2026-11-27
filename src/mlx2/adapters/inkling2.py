@@ -683,6 +683,10 @@ KERNEL_OPTIONS = {
 # 1K / +7% at 16K, prefill bitwise, decode argmax 249/256 with all 7 flips near
 # ties (margin <= 0.29 nat). Functional check f06cd567a (2026-11-26, one-lane
 # DFlash2 GSM8K 10 q): 10/10, texts identical to off 10/10, 63.4 vs 62.1 tok/s.
+# Since 2026-11-26 (Pierre) the kernel runs in MLX's own reduction orders
+# (fuse_kernels.RESIDUAL_MLX_ORDER, default True): checkpoint logits bitwise
+# against the reference ops at 1K/16K (unit @981e86bcb), decode +3-5% over
+# them; False restores the near-exact kernel above.
 # W4A4 (moe_act_quant) stays off.
 # head_kernel is DEFAULT ON (Pierre 2026-11-25, after the Rapid-MLX gap A/B
 # qualification/runs/inkling2-gpu-20261125/566479abc-gaplevers): it reads the
