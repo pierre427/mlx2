@@ -80,6 +80,31 @@ calls into this module.  Switches (``device_round`` policy object):
     (counted under ``external_device_round_device_commit_skips``). Refused
     beside ``prompt_copy_round``.
 
+``fixed_shape`` (needs ``lazy_draft`` and ``decide``; slice 1a-5, design
+    sections 3.5 and 4.7)
+    Every round of a greedy cohort verifies the same number of rows, the
+    menu width ``num_draft + 1``: drafts shorter than that (a composed
+    backend, a budget-capped round) are padded on the device, the transaction
+    keeps each lane's real length, and the decision runs vectorized over all
+    rows with a draft-count mask instead of one op chain per row. A presence
+    penalty (``presence_window``) becomes a fixed-shape row mask with the same
+    ``logit - penalty`` arithmetic. So the round's kernel sequence and
+    bindings no longer depend on the draft count (Metal replay P6b counted 17
+    capture layouts in 24 rounds); only grids and inline values change.
+    Padded rows change the verify read width, so outputs agree with the
+    unpadded round only up to near ties on the GPU (DC-1/DC-5: the read
+    width moves the attention law). A sampled lane, any other processor kind,
+    or a prompt copy wider than the menu keeps the variable-width round for
+    that cohort (counted under ``external_device_round_fixed_shape_skips``).
+    With ``device_commit`` (and the DC-5 pipeline) the device-commit
+    transaction holds the menu width too, so the commit side (KV fill, the
+    drafter rings fed every verify row, the masked full-width recurrent
+    replay) has one shape as well; the serial and pipelined rounds write the
+    same ``menu + 1`` rows, so their shared read width (``lagged_width``)
+    stays identical. A pipelined round's presence history on the device
+    (DC-6) is applied to all rows by ``DeviceHistory.apply_rows``.
+    This slice fixes shapes; it does not wrap the round in ``mx.compile``.
+
 ``prompt_copy_round`` (separate policy object, ``prompt_copy_round.py``)
     replaces a round's drafter proposals with a long copy from the prompt.
 
@@ -97,7 +122,7 @@ import numpy as np
 VERSION = "speculative-device-round-v1"
 POLICY_KEY = "device_round"
 _SWITCHES = ("lazy_draft", "decide", "sampled_drafts", "nucleus", "processors", "submit_drafts",
-             "device_commit")
+             "device_commit", "lagged_width", "pipeline", "fixed_shape", "lagged_composition")
 _SEED_SCALE = float(1 << 53)
 
 # Present in ``scheduler_stats`` only when the option is configured.
@@ -122,6 +147,9 @@ DEVICE_COMMIT_COUNTERS = (
     "external_device_round_device_commit_leaves",
 )
 DEVICE_COMMIT_SKIPS = "external_device_round_device_commit_skips"
+# Installed only when ``fixed_shape`` is on.
+FIXED_SHAPE_COUNTERS = ("external_device_round_fixed_shape_rounds",)
+FIXED_SHAPE_SKIPS = "external_device_round_fixed_shape_skips"
 
 
 @dataclass(frozen=True)
@@ -133,6 +161,10 @@ class DeviceRoundPolicy:
     processors: bool = False
     submit_drafts: bool = False
     device_commit: bool = False
+    lagged_width: bool = False
+    pipeline: bool = False
+    fixed_shape: bool = False
+    lagged_composition: bool = False
 
     @classmethod
     def from_value(cls, value):
@@ -158,6 +190,19 @@ class DeviceRoundPolicy:
             raise ValueError(f"{POLICY_KEY}.processors requires lazy_draft or decide")
         if policy.device_commit and not (policy.lazy_draft and policy.decide):
             raise ValueError(f"{POLICY_KEY}.device_commit requires lazy_draft and decide")
+        if policy.lagged_width and not policy.device_commit:
+            raise ValueError(f"{POLICY_KEY}.lagged_width requires device_commit")
+        if policy.pipeline and not (policy.device_commit and policy.lagged_width):
+            # The serial and the pipelined round must read the same width to
+            # agree bitwise (DC-5 GPU 2026-11-26: a slack-width read moved a
+            # near-tied GSM8K token).
+            raise ValueError(f"{POLICY_KEY}.pipeline requires device_commit and lagged_width")
+        if policy.lagged_composition and not policy.pipeline:
+            # DC-6: a following round plans its proposal source from the
+            # lagged host state (one round behind); near-tie gated, opt-in.
+            raise ValueError(f"{POLICY_KEY}.lagged_composition requires pipeline")
+        if policy.fixed_shape and not (policy.lazy_draft and policy.decide):
+            raise ValueError(f"{POLICY_KEY}.fixed_shape requires lazy_draft and decide")
         if not any(getattr(policy, key) for key in _SWITCHES):
             return None
         return policy
@@ -218,6 +263,14 @@ class DeviceRound:
         if self.device_commit:
             stats.update(dict.fromkeys(DEVICE_COMMIT_COUNTERS, 0))
             stats[DEVICE_COMMIT_SKIPS] = {}
+        if self.pipeline:
+            from . import speculative_device_pipeline as pipe
+
+            stats.update(dict.fromkeys(pipe.COUNTERS, 0))
+            stats[pipe.SKIPS] = {}
+        if self.fixed_shape:
+            stats.update(dict.fromkeys(FIXED_SHAPE_COUNTERS, 0))
+            stats[FIXED_SHAPE_SKIPS] = {}
         if self.copy is not None:
             self.copy.install_counters(stats)
 
@@ -225,10 +278,51 @@ class DeviceRound:
     def device_commit(self):
         return bool(self.policy is not None and self.policy.device_commit)
 
+    @property
+    def pipeline(self):
+        return bool(self.policy is not None and self.policy.pipeline)
+
+    @property
+    def fixed_shape(self):
+        return bool(self.policy is not None and self.policy.fixed_shape)
+
+    def _fixed_width(self, owner, cohort, rows):
+        """The menu verify width for this cohort, or None (skip counted)."""
+        reason = None
+        menu = int(owner.num_draft)
+        if any(_temperature(row.lane) > 0 for row in rows):
+            reason = "sampled_lane"
+        elif any(row.count > menu for row in rows):
+            reason = "wider_than_menu"
+        else:
+            for row in rows:
+                for processor in getattr(row.lane, "processors", None) or ():
+                    if getattr(processor, "presence_window", None) is None:
+                        reason = "processor_kind"
+        if reason is not None:
+            skips = owner.scheduler_stats[FIXED_SHAPE_SKIPS]
+            skips[reason] = skips.get(reason, 0) + len(cohort)
+            return None
+        return menu + 1
+
+    def abort_pipeline(self, owner, uids=None):
+        """Discard an unread pipelined round (DC-5) of these lanes (all: None)."""
+        inflight = getattr(owner, "_device_inflight", None)
+        if inflight is None or (uids is not None and int(inflight.lane.uid) not in uids):
+            return False
+        from . import speculative_device_pipeline as pipe
+
+        return pipe.abort(owner)
+
     def leave_device_form(self, owner, lanes):
         """Return every device-form lane in ``lanes`` to its exact host form."""
         from . import speculative_device_commit as commit
 
+        lanes = list(lanes)
+        # A round still in flight is undone first (it was never read).
+        inflight = getattr(owner, "_device_inflight", None)
+        if inflight is not None and any(lane is inflight.lane for lane in lanes):
+            self.abort_pipeline(owner)
         for lane in lanes:
             if commit.leave(owner, lane):
                 _bump(owner.scheduler_stats, "external_device_round_device_commit_leaves")
@@ -466,6 +560,11 @@ class DeviceRound:
 
         mx = owner.mx
         on_device = self._enter_device_commit(owner, cohort, copies)
+        if self.pipeline:
+            from . import speculative_device_pipeline as pipe
+
+            if on_device and pipe.serve(self, owner, cohort, draft_depth):
+                return
         recovery = owner._snapshot_round(cohort)
         owner.scheduler_stats["recovery_checkpoint_captures"] += len(recovery)
         stats_snapshot = owner._snapshot_scheduler_stats()
@@ -561,6 +660,9 @@ class DeviceRound:
             )
             counts = [row.count for row in rows]
             width = max(counts) + 1
+            fixed = self._fixed_width(owner, cohort, rows) if self.fixed_shape else None
+            if fixed is not None:
+                width = fixed
             inputs = mx.stack([
                 mx.concatenate([
                     mx.array([int(row.lane.anchor)], dtype=mx.int32),
@@ -572,14 +674,30 @@ class DeviceRound:
             if on_device:
                 from .hybrid_verify_rows import DeviceCommitTransaction
 
-                transaction = DeviceCommitTransaction(cohort[0].cache, [counts[0] + 1])
+                # Under ``fixed_shape`` the device round writes the menu width
+                # (padded rows are always-rejected drafts, as on the host form).
+                transaction = DeviceCommitTransaction(
+                    cohort[0].cache, [fixed if fixed is not None else counts[0] + 1])
+                if self.policy.lagged_width:
+                    from .speculative_device_commit import lagged_base, set_read_base
+
+                    set_read_base(cohort[0], lagged_base(cohort[0]))
             else:
                 target = owner._target_owner([lane.cache for lane in cohort])
-                transaction = target.begin(lengths=[count + 1 for count in counts])
+                # Under ``fixed_shape`` every lane holds the menu width: padded
+                # rows are drafts the decision always rejects (trimmed at
+                # commit; causal, so they never reach the real rows).
+                transaction = target.begin(lengths=[fixed] * len(counts) if fixed is not None
+                                           else [count + 1 for count in counts])
             logits, features = owner._cohort_target_forward(
                 inputs, transaction, cohort, site="standard_verify"
             )
-            plans = self._plan(owner, cohort, rows, logits) if device_decide else None
+            plans = (self._plan(owner, cohort, rows, logits, fixed=fixed)
+                     if device_decide else None)
+            if fixed is not None and plans is not None:
+                _bump(owner.scheduler_stats, "external_device_round_fixed_shape_rounds")
+                for lane in cohort:
+                    self._lane_count(lane, "fixed_shape_rounds")
             if self.policy is not None and self.policy.decide and not device_decide:
                 _decline(owner, "sampling_filters", len(cohort))
             if plans is not None:
@@ -741,15 +859,21 @@ class DeviceRound:
         mx.eval(*[plan.packet for plan in plans])
         return self._finish(owner, plans, logits)
 
-    def _plan(self, owner, cohort, rows, logits):
-        """Lazy per-lane decisions, or None (counted) when a lane needs the host."""
+    def _plan(self, owner, cohort, rows, logits, fixed=None):
+        """Lazy per-lane decisions, or None (counted) when a lane needs the host.
+
+        ``fixed``: the menu verify width; every lane's decision then runs over
+        all ``fixed`` rows (``_lane_plan_fixed``)."""
         for lane in cohort:
             if _temperature(lane) > 0 and _filters(lane) and not self.policy.nucleus:
                 _decline(owner, "sampling_filters", len(cohort))
                 return None
         plans = []
         for index, row in enumerate(rows):
-            plans.append(self._lane_plan(owner, row, logits[index, : row.count + 1]))
+            if fixed is not None:
+                plans.append(self._lane_plan_fixed(owner, row, logits[index, :fixed]))
+            else:
+                plans.append(self._lane_plan(owner, row, logits[index, : row.count + 1]))
         _bump(owner.scheduler_stats, "external_device_round_decide_rounds")
         return plans
 
@@ -782,6 +906,10 @@ class DeviceRound:
         mx = owner.mx
         value = rows_logits[j][None].astype(mx.float32)
         lane = row.lane
+        history = getattr(row, "device_history", None)
+        if getattr(lane, "processors", None) and history is not None:
+            # A pipelined round's history is partly on the device (DC-6).
+            return history.apply(lane.processors, row.drafts.reshape(-1)[:j], value)
         if getattr(lane, "processors", None):
             prefix = getattr(row, "processor_prefix", None)
             if prefix is None:  # built once per lane-round, not per verify row
@@ -791,6 +919,89 @@ class DeviceRound:
             for processor in lane.processors:
                 value = processor(tokens, value)
         return value
+
+    @staticmethod
+    def _fixed_values(owner, row, rows_logits):
+        """All verify rows as ``_row_value`` builds them, in one fixed shape.
+
+        Row ``j`` is the target law after ``history + [anchor] + drafts[:j]``
+        (``j`` clipped to the draft count; later rows are discarded). Each
+        ``presence_window`` processor becomes a ``[rows, vocab]`` mask of the
+        tokens in that row's window: the host tokens scattered once, the
+        lazy drafts through a one-hot and a host-built row/draft range mask.
+        ``where(mask, v - penalty, v)`` is the same arithmetic as the
+        processor's ``logits[:, tokens] -= penalty`` (duplicates included)."""
+        mx = owner.mx
+        lane, count = row.lane, row.count
+        width, vocab = int(rows_logits.shape[0]), int(rows_logits.shape[-1])
+        menu = width - 1
+        values = rows_logits.astype(mx.float32)
+        processors = getattr(lane, "processors", None) or ()
+        if not processors:
+            return values
+        drafts = row.drafts.reshape(-1).astype(mx.int32)
+        if count < menu:
+            drafts = mx.concatenate([drafts, mx.zeros((menu - count,), dtype=mx.int32)])
+        history = getattr(row, "device_history", None)
+        if history is not None:
+            # A pipelined round's history is partly on the device (DC-6).
+            return history.apply_rows(processors, drafts, count, values)
+        onehot = drafts[:, None] == mx.arange(vocab, dtype=mx.int32)[None, :]
+        host = [*lane.history, int(lane.anchor)]
+        for processor in processors:
+            penalty, context, start = processor.presence_window
+            start = 0 if start is None else int(start)
+            flat, ranges = [], np.zeros((width, menu), dtype=bool)
+            for j in range(width):
+                d = min(j, count)
+                total = len(host) + d
+                lo = slice(start, None).indices(total)[0]
+                lo += slice(-int(context), None).indices(total - lo)[0]
+                # Host tokens of row j's window, then its drafts [lo - len(host), d).
+                flat.extend(j * vocab + int(t) for t in set(host[lo:]) if lo < len(host))
+                first = max(0, lo - len(host))
+                ranges[j, first:d] = True
+            mask = mx.zeros((width * vocab,), dtype=mx.bool_)
+            if flat:
+                mask[mx.array(flat, dtype=mx.int32)] = True
+            mask = mask.reshape(width, vocab)
+            if count:
+                drafted = mx.any(mx.array(ranges)[:, :, None] & onehot[None, :, :], axis=1)
+                mask = mask | drafted
+            values = mx.where(mask, values - penalty, values)
+        return values
+
+    def _lane_plan_fixed(self, owner, row, rows_logits):
+        """``_lane_plan`` (greedy) over every menu row, with a draft-count mask.
+
+        The same per-row float32 argmax and normalizer; the leading-match
+        count is taken over the padded drafts with rows past ``count``
+        masked off, so the decision equals the variable-width plan's."""
+        mx = owner.mx
+        lane, count = row.lane, row.count
+        int32 = mx.int32
+        width = int(rows_logits.shape[0])
+        menu = width - 1
+        emit = lane.sampling.get("emit_logprobs", True)
+        plan = SimpleNamespace(row=row, kind="greedy", response=None, fits=None, deferred=None)
+        values = self._fixed_values(owner, row, rows_logits)
+        norms = mx.logsumexp(values, axis=-1)
+        selected = mx.argmax(values, axis=-1).astype(int32)
+        valid = mx.arange(width) <= count
+        finite = mx.all(mx.where(valid, mx.isfinite(norms), True)).astype(int32)
+        if emit:
+            logp = values - norms[:, None]
+            plan.response = [logp[j] for j in range(count + 1)]
+        drafts = row.drafts.reshape(-1).astype(int32)
+        if count < menu:
+            drafts = mx.concatenate([drafts, mx.zeros((menu - count,), dtype=int32)])
+        matches = (drafts == selected[:menu]) & (mx.arange(menu) < count)
+        accepted = mx.sum(mx.cumprod(matches.astype(int32))).astype(int32)
+        last = mx.take(selected, accepted.reshape(1))
+        plan.accepted = accepted.reshape(1).astype(int32)
+        plan.last = last.reshape(1).astype(int32)
+        plan.packet = mx.concatenate([plan.accepted, finite.reshape(1), plan.last, drafts])
+        return plan
 
     def _lane_plan(self, owner, row, rows_logits, *, redo=False):
         mx = owner.mx
@@ -884,6 +1095,7 @@ class DeviceRound:
                 outcomes = mx.stack([*corrections, bonus])
                 last = mx.take(outcomes, accepted.reshape(1))
         plan.accepted = accepted.reshape(1).astype(int32)
+        plan.last = last.reshape(1).astype(int32)
         parts = [accepted.reshape(1).astype(int32), finite.reshape(1), last.reshape(1),
                  row.drafts.reshape(-1).astype(int32)]
         if plan.fits is not None:
@@ -989,4 +1201,5 @@ def install(owner, device_round, prompt_copy_round):
 
 
 __all__ = ["COUNTERS", "DECLINE_REASONS", "DEVICE_COMMIT_COUNTERS", "DEVICE_COMMIT_SKIPS",
-           "VERSION", "DeviceRound", "DeviceRoundPolicy", "install"]
+           "FIXED_SHAPE_COUNTERS", "FIXED_SHAPE_SKIPS", "VERSION", "DeviceRound",
+           "DeviceRoundPolicy", "install"]

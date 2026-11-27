@@ -1972,7 +1972,7 @@ def _add_execution(builder: PrometheusBuilder, execution: Mapping[str, Any]) -> 
                 "auto_expanded", "auto_latent", "expanded_fused_d256", "training_padded_sdpa", "segmented_rows",
                 "fused_mla_decode", "fused_mla_declined",
                 "expanded_flash192", "expanded_flash192_windows", "latent_flash",
-                "latent_flash_padded", "flash_declined",
+                "latent_flash_padded", "latent_flash_device_offset", "flash_declined",
                 "multirow_calls", "single_row_calls", "multirow_tokens", "single_row_tokens",
                 "tree_calls", "tree_nodes"),
     }

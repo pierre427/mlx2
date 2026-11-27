@@ -10154,11 +10154,21 @@ class ExternalDraftBatchGenerator:
             lane.cache = rows[row]
             if committed_rngs is not None:
                 lane.rng = committed_rngs[row]
-            if decision.commit_rows is None and device_commit:
+            if decision.commit_rows is None and device_commit and getattr(
+                    transaction, "pipelined", False):
+                # ``device_round.pipeline`` (DC-5): the dispatch already set the
+                # tail and staged the rings; a following round may have
+                # replaced the tail since. Only the committed count is booked.
+                tail = lane.tail
+                lane.device_commit_tail_rows = int(consumed[row])
+            elif decision.commit_rows is None and device_commit:
                 from .speculative_device_commit import stage_tail
+
+                from .speculative_device_commit import book_round
 
                 tail = features[row:row+1]
                 stage_tail(lane, transaction.count_for(consumed[row]), consumed[row])
+                book_round(lane, transaction.lengths[0], consumed[row])
             elif decision.commit_rows is None:
                 tail = features[row:row+1,:consumed[row]]
             elif decision.committed_tail is not None:
@@ -16302,6 +16312,9 @@ class ExternalDraftBatchGenerator:
         inflight = getattr(self, "_parked_inflight", None)
         if inflight is not None and any(item.uid == uid for item in tuple(inflight.lanes)):
             return None
+        device_inflight = getattr(self, "_device_inflight", None)
+        if device_inflight is not None and getattr(device_inflight.lane, "uid", None) == uid:
+            return None  # a dispatched, unread pipelined device round (DC-5)
         for key in tuple(getattr(self, "_prelaunched", None) or ()):
             members = key[1:] if isinstance(key, tuple) and key[:1] == ("cohort",) else (key,)
             if uid in members:
@@ -16354,6 +16367,10 @@ class ExternalDraftBatchGenerator:
             self._abort_parked_inflight()
         # A kept plain-step owner pins its lanes' caches and joined views.
         self._parked_owner = None
+        device_round = getattr(self, "device_round", None)
+        if device_round is not None:
+            # An unread pipelined device round (DC-5) was never published.
+            device_round.abort_pipeline(self, requested_uids)
         ordinary_inflight = getattr(self, "_ordinary_inflight", None)
         if ordinary_inflight is not None and any(
             int(lane.uid) in requested_uids for lane in ordinary_inflight.lanes

@@ -65,6 +65,11 @@ class DeviceOffsetKVCache(KVCache):
     _last_write = None
     # Device mode: whether ``bound`` is the exact fill (observed, no write since).
     _exact = True
+    # Device mode: the host read base of the next forward (``read_base``), or
+    # None for the bound. A shared read width (``device_round.lagged_width``,
+    # DC-5): every device-commit round reads ``read_base + rows`` columns, the
+    # same in the serial and the pipelined round, whatever the bound is.
+    read_base = None
     # Recovery snapshots borrow K/V below ``recovery_fill`` (module note).
     _RECOVERY_APPEND_ONLY_FIELDS = (
         ("keys", -2, "recovery_fill"), ("values", -2, "recovery_fill"),
@@ -142,10 +147,31 @@ class DeviceOffsetKVCache(KVCache):
         self.pos = mx.array([length], dtype=mx.int32)
         self._last_write = None
         self._exact = True
+        self.read_base = None
         from .cache import _note_recovery_rewind
 
         # Rows of a borrowed recovery prefix above ``length`` may be rewritten.
         _note_recovery_rewind(self)
+        return self
+
+    def settle(self, length: int, pending: int = 0):
+        """The host read the exact committed fill ``length`` while ``pending``
+        more rows (a dispatched, already device-committed round) may follow it.
+
+        ``pending == 0`` is ``observe``. Otherwise the device ``pos`` stays (it
+        includes the pending round's commit) and only the host bound tightens to
+        ``length + pending``: the slack of a pipelined round (spec-round DC-5).
+        """
+        length, pending = int(length), int(pending)
+        if pending == 0:
+            return self.observe(length)
+        if self._last_write is not None:
+            raise RuntimeError("settle a device-mode KV cache only after its last write committed")
+        if length < 0 or pending < 0 or length + pending > self.bound:
+            raise ValueError("settled KV length exceeds the cache's host bound")
+        self.bound = length + pending
+        self.offset = self.bound
+        self._exact = False
         return self
 
     def leave_device_mode(self, length: int):
@@ -157,8 +183,24 @@ class DeviceOffsetKVCache(KVCache):
         return self
 
     # -- device-mode ops ----------------------------------------------------------
+    def _base(self):
+        """The column count before this forward's rows: the read base or the bound."""
+        if self.read_base is None:
+            return self.bound
+        base = int(self.read_base)
+        if base < self.bound:
+            raise ValueError("a device KV read base below the host bound would hide written rows")
+        return base
+
+    def set_read_base(self, base):
+        """Read ``base + rows`` columns in the next forward (None: the bound)."""
+        if base is not None and int(base) < self.bound:
+            raise ValueError("a device KV read base below the host bound would hide written rows")
+        self.read_base = None if base is None else int(base)
+        return self
+
     def _ensure_capacity(self, keys, values, rows: int):
-        need = self.bound + rows
+        need = self._base() + rows
         if self.keys is not None and need <= self.keys.shape[2]:
             return
         (b, heads, _, k_dim) = keys.shape
@@ -180,6 +222,7 @@ class DeviceOffsetKVCache(KVCache):
         if keys.shape[0] != 1:
             raise ValueError("device-mode KV caches hold one row (B=1)")
         rows = int(keys.shape[2])
+        width = self._base() + rows
         self._ensure_capacity(keys, values, rows)
         self.keys = mx.slice_update(self.keys, keys, self.pos, axes=(2,))
         self.values = mx.slice_update(self.values, values, self.pos, axes=(2,))
@@ -187,14 +230,14 @@ class DeviceOffsetKVCache(KVCache):
         self._exact = False
         self.bound += rows
         self.offset = self.bound
-        return self.keys[..., : self.bound, :], self.values[..., : self.bound, :]
+        return self.keys[..., :width, :], self.values[..., :width, :]
 
     def make_mask(self, N, return_array=False, window_size=None, **kwargs):
         if not self.device_mode:
             return super().make_mask(N, return_array=return_array, window_size=window_size, **kwargs)
         if window_size is not None:
             raise ValueError("device-mode KV caches have no sliding window")
-        width = self.bound + int(N)  # the fetch that follows returns this many rows
+        width = self._base() + int(N)  # the fetch that follows returns this many rows
         columns = mx.arange(width, dtype=mx.int32)[None, :]
         rows = mx.arange(int(N), dtype=mx.int32)[:, None]
         return columns <= (self.pos + rows)
@@ -207,6 +250,7 @@ class DeviceOffsetKVCache(KVCache):
         count = mx.minimum(mx.maximum(count.reshape(1).astype(mx.int32), 0), rows)
         self.pos = base + count
         self._last_write = None
+        self.read_base = None  # one forward's read width
         return self
 
     def trim(self, n):

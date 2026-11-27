@@ -805,6 +805,10 @@ class Model(nn.Module):
     # RDA layers record exact conv/recurrent rollback (Kimi's law); MLA
     # layers are plain KV caches that trim.
     supports_speculative_rollback = True
+    # Every KV layer is the NoPE MLA latent: no layer reads a position from
+    # ``cache.offset``, so a pipelined device round (DC-5) may verify while
+    # the KV bound still carries slack.
+    device_commit_kv_position_free = True
     apc_v2_layout = "raon1-mini-mhc4-rda-fp32-nope-latent-mla-v1"
 
     def __init__(self, args: ModelArgs):

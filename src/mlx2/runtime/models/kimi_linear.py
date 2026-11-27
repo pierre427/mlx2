@@ -70,6 +70,23 @@ class SegmentedCausal:
     array: mx.array
 
 
+@dataclass(frozen=True)
+class DeviceCausal:
+    """A device-mode ``DeviceOffsetKVCache``'s verify mask with its device fill.
+
+    ``array`` is the cache's own ``j <= pos + i`` mask over its host read
+    width (spec-round DC-1/DC-5): columns at or past the fill are slack.
+    ``offset`` is ``pos`` (int32 [1] on the device). The absorbed NAX latent
+    flash takes it as its causal offset (``params``) and so reads only the
+    true length, the keys before ``pos + i + 1``, however wide the slack;
+    its split combine gives empty splits weight 0, so the result does not
+    depend on the read width. Every other law receives ``array`` unchanged.
+    """
+
+    array: mx.array
+    offset: mx.array
+
+
 # Kimi Linear's KDA laws: FLA's unbounded softplus log-decay gate, fp32 l2
 # q/k (epsilon on the SUM, no bf16 round before the scan), separate q/k/v
 # short convolutions, a vector gate and the finite log decay for chunk_wy.
@@ -391,11 +408,13 @@ class MultiLatentAttention(nn.Module):
             return mla(self, x, cache)
         b, t, _ = x.shape
         h, v = self.args.num_attention_heads, self.args.v_head_dim
-        starts, causal_rows = None, False
+        starts, causal_rows, device_offset = None, False, None
         if isinstance(mask, LeftPaddedCausal):
             mask, starts = mask.array, mask.starts
         elif isinstance(mask, SegmentedCausal):
             mask, causal_rows = mask.array, True
+        elif isinstance(mask, DeviceCausal):
+            mask, device_offset = mask.array, mask.offset
         shape_kind = "multirow" if t > 1 else "single_row"
         self.calls[shape_kind+"_calls"] += 1
         self.calls[shape_kind+"_tokens"] += b*t
@@ -428,7 +447,7 @@ class MultiLatentAttention(nn.Module):
             return self.o_proj(out.transpose(0, 2, 1, 3).reshape(b, t, h*v))
         latent, shared, buffers = self._write(cache, latent, shared, b)
         out = self.attend(q, latent, shared, mask, x.itemsize, q_rows=q_rows, buffers=buffers,
-                          starts=starts)
+                          starts=starts, device_offset=device_offset)
         return self.o_proj(out.transpose(0, 2, 1, 3).reshape(b, t, h*v))
 
     @staticmethod
@@ -516,7 +535,8 @@ class MultiLatentAttention(nn.Module):
         # "rope" names in the config describe a shared key slice. No rotation.
         return q, self.kv_a_layernorm(latent)[:, None], shared[:, None], q_rows
 
-    def attend(self, q, latent, shared, mask, itemsize, *, q_rows=None, buffers=None, starts=None):
+    def attend(self, q, latent, shared, mask, itemsize, *, q_rows=None, buffers=None, starts=None,
+               device_offset=None):
         """The policy's attention law over fetched latent/shared keys -> [B,H,T,V].
 
         ``starts`` (with an array ``mask``) marks a left-padded batch cache:
@@ -548,6 +568,7 @@ class MultiLatentAttention(nn.Module):
             q_rows = q.transpose(0, 2, 1, 3).reshape(b, t, h*(n+r))
         policy = self.policy
         flash = None
+        gate = mask  # the mask the absorbed-flash admission sees
         if policy == "auto":
             # DeepSeek/Ling phase split: expanded K/V for prompt chunks while
             # the expanded prefix fits its bound, one latent per token for
@@ -573,10 +594,22 @@ class MultiLatentAttention(nn.Module):
             expanded = wide and transient <= self.expanded_bytes
             policy = "expanded" if expanded else "latent_single"
             if not expanded:
-                flash = "absorbed" if self._flash_admits("absorbed", q_rows, mask, starts) else None
+                # A device-fill mask (``DeviceCausal``) is causal at the device
+                # offset: the absorbed flash takes it as its offset. Only where
+                # the decode flash is an explicit opt-in (Raon ``mla_decode
+                # nax_absorbed``); every other MLA keeps the boolean-array law.
+                gate = ("causal" if device_offset is not None
+                        and getattr(self, "decode_nax", "off") == "nax_absorbed" else mask)
+                flash = "absorbed" if self._flash_admits("absorbed", q_rows, gate, starts) else None
             self.calls["auto_expanded" if expanded else "auto_latent"] += 1
         if policy in {"latent_tiled", "latent_fused", "latent_single"}:
+            if flash and device_offset is not None and gate == "causal":
+                self.calls["latent_flash_device_offset"] += 1
+                mask = "causal"
+            elif device_offset is not None:
+                device_offset = None
             out = self._latent(q, latent, shared, mask, "latent_flash" if flash else policy, buffers,
+                               device_offset=device_offset if flash else None,
                                starts=starts if flash else None)
         elif flash == "expanded":
             if type(self.kv_b_proj) is nn.Linear:
@@ -672,7 +705,8 @@ class MultiLatentAttention(nn.Module):
                 cls._d256_available = False
         return cls._d256_available
 
-    def _latent(self, q, latent, shared, mask, policy, buffers=None, *, starts=None):
+    def _latent(self, q, latent, shared, mask, policy, buffers=None, *, starts=None,
+                device_offset=None):
         if policy == "latent_flash":
             # Absorbed NAX flash over the latent cache (qk 576 / v 512):
             # bottom-right causal offset in-kernel, split partials combined.
@@ -686,12 +720,15 @@ class MultiLatentAttention(nn.Module):
                 # each lane's start: the kernel's causal law plus starts.
                 mask = "causal"
                 self.calls["latent_flash_padded"] += 1
+            # The device fill (``DeviceCausal``) only when there is one, so the
+            # kernel's call contract is unchanged on every other path.
+            extra = {} if device_offset is None else {"offset_array": device_offset}
             if buffers is None:
                 result = absorbed(qn @ w[:, :n], qs, latent, shared, mask, scale=self.scale, heads=h,
-                                  starts=starts)
+                                  starts=starts, **extra)
             else:
                 result = absorbed(qn @ w[:, :n], qs, *buffers, mask, scale=self.scale, heads=h,
-                                  width=latent.shape[2], starts=starts)
+                                  width=latent.shape[2], starts=starts, **extra)
             self.calls["latent_flash"] += 1
             return result @ w[:, n:].swapaxes(-1, -2)
         # A string mask is bottom-right causal over [prefix + rows]. It is
@@ -831,6 +868,11 @@ class LanguageModel(ling.LanguageModel):
             return LeftPaddedCausal(mask, cache.left_padding)
         if isinstance(mask, mx.array) and type(cache) is SegmentedBatchKVCache:
             return SegmentedCausal(mask)
+        if isinstance(mask, mx.array) and getattr(cache, "device_mode", False):
+            from .device_offset_kv import DeviceOffsetKVCache
+
+            if type(cache) is DeviceOffsetKVCache:
+                return DeviceCausal(mask, cache.pos)
         return mask
 
     def __init__(self, args):

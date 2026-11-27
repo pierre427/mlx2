@@ -559,13 +559,23 @@ class DeviceCommitTransaction:
     * ``abort`` returns every row to the pre-round boundary: KV caches are
       observed at their base (rows past it are stale slack, as after a host
       trim), and recurrent rows take back their pre-round state references.
+
+    ``lagged=True`` is the pipelined form (``device_round.pipeline``, DC-5):
+    the KV bound need not be exact at ``begin`` (a booked round may still
+    have slack); ``commit_on_device(count)`` commits at dispatch with a device
+    count and no host value; ``commit(accepted)``, called when the round is
+    booked after its packet read, checks the host count and ``settle``s each
+    KV cache at the lane's exact length plus the rows of a following round
+    still in flight (``settle_length``/``settle_pending``, set by the booker).
+    ``abort`` before the device commit puts back each KV cache's device
+    ``pos`` and host bound as they were at ``begin``.
     """
 
     device_commit = True
     batched = False
     plain = False
 
-    def __init__(self, caches, lengths):
+    def __init__(self, caches, lengths, *, lagged=False):
         from .models.cache import ArraysCache
         from .models.device_offset_kv import DeviceOffsetKVCache
 
@@ -577,15 +587,27 @@ class DeviceCommitTransaction:
         self.caches = caches
         self.closed = False
         self._kv = []
+        self._kv_saved = []
         self._recurrent = []
         self._counts = None
+        self.pipelined = bool(lagged)
+        self._device_committed = False
+        self.expected_used = None
+        self.settle_length = None
+        self.settle_pending = 0
         for cache in caches:
             if type(cache) is DeviceOffsetKVCache:
-                if not cache.device_mode or not cache._exact:
+                if not cache.device_mode or cache._last_write is not None or (
+                        not lagged and not cache._exact):
                     raise HybridVerifyUnsupported(
                         "a device-commit lane needs every KV cache in device mode at an exact length"
+                        if not lagged else
+                        "a pipelined device-commit lane needs every KV cache in device mode, committed"
                     )
                 self._kv.append((cache, int(cache.bound)))
+                self._kv_saved.append(
+                    (cache, cache.pos, int(cache.bound), int(cache.offset), cache._exact)
+                )
             elif type(cache) is ArraysCache and _recurrent(cache):
                 if cache.speculating:
                     raise ValueError("recurrent row already has a speculation owner")
@@ -633,6 +655,21 @@ class DeviceCommitTransaction:
             if int(cache.bound) != base + self.lengths[0] or cache._last_write is None:
                 raise RuntimeError("every target layer must finish verification before commit")
 
+    def commit_on_device(self, count):
+        """Pipelined form: keep ``count`` (device int32 [1]) rows at dispatch."""
+        if not self.pipelined or self.closed or self._device_committed:
+            raise RuntimeError("commit_on_device needs an open pipelined device-commit transaction")
+        try:
+            self._check_advanced()
+            for cache, _base in self._kv:
+                cache.device_commit(count)
+            for cache, *_state in self._recurrent:
+                cache.device_rollback(count)
+        except BaseException:
+            self.abort()
+            raise
+        self._device_committed = True
+
     def commit(self, accepted_lengths):
         if self.closed:
             raise RuntimeError("stale or closed device-commit transaction")
@@ -640,6 +677,21 @@ class DeviceCommitTransaction:
         if len(accepted) != 1 or not 1 <= accepted[0] <= self.lengths[0]:
             raise ValueError("accepted prefix exceeds verified input length")
         (used,) = accepted
+        if self.pipelined:
+            # Booking a round committed at dispatch: the host count must be the
+            # device count, then the bound tightens (``settle``).
+            if not self._device_committed or self.settle_length is None:
+                raise RuntimeError("a pipelined device-commit round books after its device commit")
+            if used != self.expected_used:
+                raise RuntimeError(
+                    f"pipelined device commit kept {self.expected_used} rows, the host books {used}"
+                )
+            for cache, _base in self._kv:
+                cache.settle(self.settle_length, self.settle_pending)
+            self.closed = True
+            rows = [list(self.caches)]
+            self._close()
+            return rows
         try:
             self._check_advanced()
             count = self._count(used)
@@ -664,7 +716,17 @@ class DeviceCommitTransaction:
             return
         self.closed = True
         first = None
-        for cache, base in self._kv:
+        if self._device_committed:
+            # Past its device commit a pipelined round is undone by the
+            # dispatcher's record (``speculative_device_pipeline``), not here.
+            self._close()
+            raise RuntimeError("a device-committed pipelined round cannot abort its transaction")
+        if self.pipelined:
+            for cache, pos, bound, offset, exact in self._kv_saved:
+                cache.pos, cache.bound, cache.offset, cache._exact = pos, bound, offset, exact
+                cache._last_write = None
+                cache.read_base = None
+        for cache, base in ([] if self.pipelined else self._kv):
             try:
                 cache.observe(base)
             except BaseException as error:  # noqa: BLE001 - every row gets its turn
@@ -685,6 +747,7 @@ class DeviceCommitTransaction:
         # The staged count stays: ``_commit`` stages the drafter rings with it
         # after this commit (``count_for``); it is one [1] int32.
         self._kv = []
+        self._kv_saved = []
         self._recurrent = []
 
 

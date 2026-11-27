@@ -58,7 +58,18 @@ def drafter(owner):
 
 
 def slack(owner):
-    return int(owner.num_draft) + 1
+    """Ring slack: one round's verify rows, or two under ``lagged_width``.
+
+    The pipeline (DC-5, which needs ``lagged_width``) may undo a round and its
+    follower together, so its rings take two rounds of rows. The serial
+    lagged-width round gets the same rings: the drafter's attention runs over
+    the whole ring, so a different capacity would change its reduction width
+    and slot order, and the two rounds would no longer agree bitwise.
+    """
+    rows = int(owner.num_draft) + 1
+    device_round = getattr(owner, "device_round", None)
+    policy = getattr(device_round, "policy", None)
+    return 2 * rows if getattr(policy, "lagged_width", False) else rows
 
 
 def in_form(lane):
@@ -142,6 +153,14 @@ def enter(owner, lane):
             ring.pending_count = count
     lane.cache, lane.draft_cache = cache, rings
     lane.device_commit_tail_rows = rows
+    # The target's exact committed length, kept on the host from the counts
+    # it books (the pipelined round, DC-5, settles its KV bound with it).
+    lane.device_commit_length = next(
+        (int(entry.bound) for entry in cache if type(entry) is DeviceOffsetKVCache), 0)
+    # The last booked round's exact start and verify rows: the shared read
+    # base of ``device_round.lagged_width`` (``lagged_base``).
+    lane.device_last_start = lane.device_commit_length
+    lane.device_last_rows = 0
     lane.device_commit_form = True
     return True
 
@@ -178,8 +197,39 @@ def leave(owner, lane):
     lane.cache, lane.draft_cache = cache, draft_cache
     lane.tail = lane.tail[:, : int(rows)]
     lane.device_commit_tail_rows = None
+    lane.device_commit_length = None
+    lane.device_last_start = lane.device_last_rows = None
     lane.device_commit_form = False
     return True
+
+
+def lagged_base(lane, inflight_rows=None):
+    """The shared read base of round X (``device_round.lagged_width``, DC-5).
+
+    ``start(X-1) + rows(X-1)``: the bound the KV caches carry when X is
+    dispatched with X-1 still in flight, which the host also knows in the
+    serial round. With X-1 in flight (``inflight_rows`` its verify rows) its
+    start is the last booked length; otherwise X-1 is the last booked round.
+    The serial and the pipelined round therefore read the same width.
+    """
+    if inflight_rows is not None:
+        return int(lane.device_commit_length) + int(inflight_rows)
+    return int(lane.device_last_start) + int(lane.device_last_rows)
+
+
+def set_read_base(lane, base):
+    from .models.device_offset_kv import DeviceOffsetKVCache
+
+    for entry in lane.cache:
+        if type(entry) is DeviceOffsetKVCache:
+            entry.set_read_base(base)
+
+
+def book_round(lane, rows, consumed):
+    """Host bookkeeping of one committed device round (serial or pipelined)."""
+    lane.device_last_start = int(lane.device_commit_length)
+    lane.device_last_rows = int(rows)
+    lane.device_commit_length = int(lane.device_commit_length) + int(consumed)
 
 
 def refuse(caches, what):
@@ -196,5 +246,5 @@ def refuse(caches, what):
             )
 
 
-__all__ = ["VERSION", "drafter", "enter", "in_form", "lane_reason", "leave", "refuse",
-           "slack", "stage_tail"]
+__all__ = ["VERSION", "book_round", "drafter", "enter", "in_form", "lagged_base", "lane_reason",
+           "leave", "refuse", "set_read_base", "slack", "stage_tail"]

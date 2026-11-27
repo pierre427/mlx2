@@ -1432,7 +1432,7 @@ def _starts(starts, b):
 
 
 def absorbed(q, qs, latent, shared, mask, *, scale, heads=HEADS, split=None, offset=None,
-             variant="tiled", stage="all", width=None, starts=None):
+             variant="tiled", stage="all", width=None, starts=None, offset_array=None):
     """Latent-space O[B, H, T, 512] (before the V un-absorption).
 
     ``width`` names the visible prefix when latent/shared are the cache
@@ -1444,16 +1444,35 @@ def absorbed(q, qs, latent, shared, mask, *, scale, heads=HEADS, split=None, off
     key k is visible to lane b iff starts[b] <= k, within the causal limit).
     ``stage="partial"`` returns the split partials (m, l, o) without the
     combine, for timing the two stages apart.
+    ``offset_array`` (int32 [1] on the device, with a causal mask) is the
+    causal offset read in-kernel: a device-mode KV cache's fill (spec-round
+    DC-5, ``kimi_linear.DeviceCausal``). Keys at or past ``offset + row + 1``
+    are never read, so the slack columns of a wider host read width only
+    add empty splits, which the combine weights 0. The split is then pinned
+    to ``split_plan``'s 2048-key floor (unless given), so the key partition
+    never depends on the read width: the result is the exact-length one at
+    any width, and equals the host-offset call's while that call's own split
+    is the floor (below about 88K keys at 6 rows).
     """
     b, t, width, natural, causal = absorbed_geometry(q, qs, latent, shared, mask, heads, width)
+    if offset_array is not None and (not causal or offset is not None or b != 1):
+        raise ValueError("a device offset needs a causal one-row-batch latent flash")
     offset = natural if offset is None else int(offset)
+    if split is None and offset_array is not None:
+        split = 2048  # split_plan's floor: a width-independent key partition
     if split is None:
         split, count = split_plan(b, t, width)
     else:
         split = -(-int(split) // 128) * 128
         count = -(-width // split)
     cap = latent.shape[2]
-    params = mx.array([t, width, offset, int(causal), split, count, cap], mx.int32)
+    if offset_array is None:
+        params = mx.array([t, width, offset, int(causal), split, count, cap], mx.int32)
+    else:
+        params = mx.concatenate([
+            mx.array([t, width], mx.int32), offset_array.reshape(1).astype(mx.int32),
+            mx.array([int(causal), split, count, cap], mx.int32),
+        ])
     if heads != HEADS:
         return _absorbed_grouped(q, qs, latent, shared, params, b, t, count, cap, heads,
                                  scale=scale, variant=variant, stage=stage, starts=starts)

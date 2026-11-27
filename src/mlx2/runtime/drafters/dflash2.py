@@ -968,7 +968,10 @@ def _draft_lazy(self, anchor, hidden, cache, proposal_length, sampler=None, *, r
         raise ValueError("DFlash2 lazy drafts need a positive proposal length")
     if hidden.shape[0] != 1:
         raise ValueError("DFlash2 lazy drafts run one lane at a time")
-    anchors = mx.array([int(anchor)], dtype=mx.int32)
+    # A device anchor (``device_round.pipeline``: the previous round's
+    # unread last token) is used as is; same ops as the host int's array.
+    anchors = (anchor.reshape(1).astype(mx.int32) if isinstance(anchor, mx.array)
+               else mx.array([int(anchor)], dtype=mx.int32))
     inputs = mx.concatenate(
         [anchors[:, None], mx.full((1, count), self.config.mask_token_id, dtype=mx.int32)], axis=1
     )
@@ -996,8 +999,12 @@ def _draft_lazy_processed(self, anchors, features, logits, candidates, count, rn
     selector = self.candidate_selector
     post_cap = selector.post_softcap
     projected = selector.hidden_projection(features)
+    # A pipelined round (spec-round DC-6) passes a device history whose last
+    # committed tokens are still on the device; it applies the declared
+    # presence law itself (``speculative_device_presence.DeviceHistory``).
+    device_history = history if callable(getattr(history, "apply", None)) else None
     # ``processor_histories[row] + [anchor] + tokens[row]`` (the anchor is a host int here too).
-    prefix = mx.concatenate([
+    prefix = None if device_history is not None else mx.concatenate([
         mx.array(list(history or ()), dtype=mx.int32), anchors.astype(mx.int32),
     ])
     predecessor = anchors
@@ -1009,8 +1016,12 @@ def _draft_lazy_processed(self, anchors, features, logits, candidates, count, rn
             * selector.successor_codebook(candidates[:, position]),
             axis=-1,
         )
-        tokens = mx.concatenate([prefix, mx.stack(drafted)]) if drafted else prefix
-        value = probe_logits_processors(processors, tokens, logits[:, position].astype(mx.float32))
+        if device_history is not None:
+            value = device_history.apply(processors, mx.stack(drafted) if drafted else None,
+                                         logits[:, position].astype(mx.float32))
+        else:
+            tokens = mx.concatenate([prefix, mx.stack(drafted)]) if drafted else prefix
+            value = probe_logits_processors(processors, tokens, logits[:, position].astype(mx.float32))
         scores = (
             mx.take(value[0].astype(mx.float32), candidates[0, position])
             + edges[0].astype(mx.float32)

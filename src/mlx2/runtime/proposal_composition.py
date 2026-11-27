@@ -781,7 +781,8 @@ class ComposedDraftModel:
 
     def draft_lazy(self, anchor, hidden, cache, proposal_length, sampler=None, *, rng=None,
                    logits_processors=None, processor_history=None,
-                   proposal_score_state=None, proposal_trust_state=None, cohort_width=1):
+                   proposal_score_state=None, proposal_trust_state=None, cohort_width=1,
+                   planning_anchor=None, planning_history=None):
         """One composed lane's drafts, lazily, when its row selects ``external``.
 
         The same host planning (``_plan_rows``: committed scores, a fresh
@@ -792,14 +793,24 @@ class ComposedDraftModel:
         native-MTP source or a trusted-PLD calibration raises ``LazyDecline``
         before the backend runs (planning only reads lane state), so the
         device round restores the round and the host path proposes it.
+
+        ``planning_anchor``/``planning_history`` (``device_round.
+        lagged_composition``, DC-6): plan the source from this host state
+        (the lagged one of a pipelined round, whose anchor and last tokens
+        are still on the device) while the backend drafts from ``anchor``.
+        ``processor_history`` may then be a device history, passed to the
+        backend as is.
         """
         backend_lazy = getattr(self.backend, "draft_lazy", None)
         if not callable(backend_lazy):
             raise LazyDecline("composition_backend_without_lazy_draft")
+        device_history = callable(getattr(processor_history, "apply", None))
+        if device_history and planning_history is None:
+            raise ValueError("a device processor history needs a host planning history")
         plan = self._plan_rows(
-            [anchor], proposal_length,
+            [anchor if planning_anchor is None else planning_anchor], proposal_length,
             [list(logits_processors)] if logits_processors else None,
-            [list(processor_history or ())],
+            [list(processor_history or ()) if planning_history is None else list(planning_history)],
             [proposal_score_state if proposal_score_state is not None else {}],
             [proposal_trust_state if proposal_trust_state is not None else {}],
             None, cohort_width,
@@ -814,7 +825,8 @@ class ComposedDraftModel:
             extra["rng"] = rng
         if logits_processors:
             extra.update(logits_processors=logits_processors,
-                         processor_history=list(processor_history or ()))
+                         processor_history=(processor_history if device_history
+                                            else list(processor_history or ())))
         tokens = backend_lazy(anchor, hidden, cache, plan.backend_length, sampler, **extra)
         # An external row's tokens are never read by the bookkeeping; the
         # backend publishes no lazy confidence features.

@@ -68,24 +68,33 @@ def _reference(prompt, steps):
 
 
 def _oracle(monkeypatch, sequence, holder):
-    """Drafts = the target's own continuation, cut at a round-dependent depth.
+    """Drafts = the target's own continuation, cut at a position-dependent depth.
 
     The real lazy draft still runs (context append, ring writes, RNG), so the
-    device-form drafter is exercised; only its tokens are replaced, and both
-    arms see the same replacement for the same lane state.
+    device-form drafter is exercised; only its tokens are replaced. The
+    anchor's position is read from the drafter's committed context (host
+    cache offset plus the pending tail, or a ring's ``pos`` plus its pending
+    count), never from the lane's host history: a pipelined round (DC-5) is
+    dispatched before the round ahead of it is booked. Every arm therefore
+    sees the same drafts at the same position.
     """
     real = _DRAFT_LAZY
-    rounds = {"n": 0}
+
+    def position(hidden, cache):
+        first = cache[0]
+        rows = int(hidden.shape[1])
+        if isinstance(first, DeviceRingKVCache):
+            pending = first.pending_count
+            return int(first.pos.item()) + (int(pending.item()) if rows and pending is not None else 0)
+        return int(first.offset) + rows
 
     def drafted(self, anchor, hidden, cache, count, *args, **kwargs):
+        start = position(hidden, cache) + 1
         tokens = real(self, anchor, hidden, cache, count, *args, **kwargs)
-        lane = next(iter(holder["engine"].lanes.values()))
-        start = len(lane.history) + 1
         want = list(sequence[start:start + count])
         if len(want) < count:
             return tokens
-        cut = rounds["n"] % (count + 1)
-        rounds["n"] += 1
+        cut = start % (count + 1)
         if cut < count:
             want[cut] = (want[cut] + 1) % 96
         return mx.array(want, dtype=mx.int32)
@@ -137,16 +146,22 @@ def _decode(policy, *, prompt=PROMPT, steps=40, composed=False, oracle=None, pre
         engine.close()
 
 
+def _np(array):
+    # bfloat16 has no NumPy type; widening to float32 is exact.
+    return np.array(array.astype(mx.float32) if array.dtype == mx.bfloat16 else array)
+
+
 def _arrays(value):
     """Every array of a frozen cache list or sidecar, KV read below its offset."""
     out = []
+    np_array = _np
 
     def visit(item):
         if isinstance(item, mx.array):
-            out.append(np.array(item))
+            out.append(np_array(item))
         elif type(item) is KVCache and item.keys is not None:
-            out.extend([np.array(item.keys[..., :item.offset, :]),
-                        np.array(item.values[..., :item.offset, :]), item.offset])
+            out.extend([np_array(item.keys[..., :item.offset, :]),
+                        np_array(item.values[..., :item.offset, :]), item.offset])
         elif isinstance(item, (list, tuple)):
             for x in item:
                 visit(x)
@@ -154,7 +169,7 @@ def _arrays(value):
             if item.keys is not None:
                 keys = item._temporal_order(item.keys)
                 values = item._temporal_order(item.values)
-                out.extend([np.array(keys), np.array(values)])
+                out.extend([np_array(keys), np_array(values)])
             out.append(item.offset)
         elif hasattr(item, "cache") and isinstance(item.cache, list):
             visit(item.cache)
