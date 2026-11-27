@@ -336,6 +336,15 @@ class DFlash2DraftModel(DFlashDraftModel):
         self.__dict__.pop("_target_token_embedding", None)
         object.__setattr__(self, "target_embedding_receipt", "raw_table_diagnostic")
 
+    def proposal_rows(self, hidden: mx.array) -> mx.array:
+        """The block rows whose logits draft the proposals.
+
+        Row 0 is the anchor and row ``i`` drafts proposal ``i`` (the anchor
+        row is dropped).  A drafter trained with ``shift_label`` overrides
+        this: row ``i`` drafts token ``i + 1``.
+        """
+        return hidden[:, 1:]
+
     @property
     def proposal_vocab_size(self) -> int:
         """Width of the proposal laws: the target's real vocabulary rows."""
@@ -385,7 +394,7 @@ class DFlash2DraftModel(DFlashDraftModel):
             dtype=token_dtype,
         )
         draft_inputs = mx.concatenate([anchor[:, None], masks], axis=1)
-        draft_hidden = self._hidden(draft_inputs, hidden, cache)[:, 1:]
+        draft_hidden = self.proposal_rows(self._hidden(draft_inputs, hidden, cache))
         return self.candidate_selector.select(
             draft_hidden,
             self._logits(draft_hidden),
@@ -473,7 +482,7 @@ def _draft_distributions(
     if len(logits_processors) != batch or len(processor_histories) != batch:
         raise ValueError("DFlash2 processor rows must match the draft batch")
     inputs = mx.concatenate([anchors[:, None], mx.full((batch, proposal_length), self.config.mask_token_id, dtype=mx.int32)], axis=1)
-    features = self._hidden(inputs, hidden, cache)[:, 1:]
+    features = self.proposal_rows(self._hidden(inputs, hidden, cache))
     logits = self._logits(features)
     selector = self.candidate_selector
     count = min(selector.top_k, logits.shape[-1])
@@ -890,7 +899,7 @@ def _propose_block(
     if any(len(row) != proposal_length for row in uniforms):
         raise ValueError("DFlash2 block needs one uniform per proposed position")
     inputs = mx.concatenate([anchors[:, None], mx.full((batch, proposal_length), self.config.mask_token_id, dtype=mx.int32)], axis=1)
-    features = self._hidden(inputs, hidden, cache)[:, 1:]
+    features = self.proposal_rows(self._hidden(inputs, hidden, cache))
     logits = self._logits(features)
     count = min(self.candidate_selector.top_k, logits.shape[-1])
     candidates = mx.argpartition(logits, -count, axis=-1)[..., -count:]
@@ -998,7 +1007,7 @@ def _draft_lazy(self, anchor, hidden, cache, proposal_length, sampler=None, *, r
     inputs = mx.concatenate(
         [anchors[:, None], mx.full((1, count), self.config.mask_token_id, dtype=mx.int32)], axis=1
     )
-    features = self._hidden(inputs, hidden, self.batch_caches([cache]))[:, 1:]
+    features = self.proposal_rows(self._hidden(inputs, hidden, self.batch_caches([cache])))
     logits = self._logits(features)
     top = min(self.candidate_selector.top_k, logits.shape[-1])
     candidates = mx.argpartition(logits, -top, axis=-1)[..., -top:]
@@ -1263,11 +1272,11 @@ def _start_tree(
         ],
         axis=1,
     )
-    features = (
+    features = self.proposal_rows(
         self._hidden(inputs, hidden, cache, submit=True)
         if submit
         else self._hidden(inputs, hidden, cache)
-    )[:, 1:]
+    )
     selector = self.candidate_selector
     candidates, unary = _lattice_candidates(self, features, anchors_list, selector.top_k)
     if forbidden_token_ids is not None:

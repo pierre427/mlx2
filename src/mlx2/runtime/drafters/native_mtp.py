@@ -149,8 +149,13 @@ class NativeMTPDraftModel:
             feature_width=width,
             num_hidden_layers=head_layers,
             hidden_size=int(args.hidden_size),
-            num_key_value_heads=int(args.num_key_value_heads),
-            head_dim=int(getattr(args, "head_dim", None)
+            # A target whose head caches a non-GQA plane (e.g. an MLA latent
+            # row) declares ``mtp_kv_geometry = (heads, dim)`` so the engine's
+            # reservation (2 * heads * dim elements per token) matches it.
+            num_key_value_heads=int((getattr(target, "mtp_kv_geometry", None)
+                                     or (args.num_key_value_heads, 0))[0]),
+            head_dim=int((getattr(target, "mtp_kv_geometry", None) or (0, 0))[1]
+                         or getattr(args, "head_dim", None)
                          or args.hidden_size // args.num_attention_heads),
             intermediate_size=intermediate,
         )

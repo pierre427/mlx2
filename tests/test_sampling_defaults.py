@@ -91,6 +91,7 @@ def _adapter_classes():
         "deepseek41_mlx": DeepSeekV41MLXAdapter,
         "deepseek41_iq1": DeepSeekV41IQ1Adapter,
         "deepseek_v41": DeepSeekV41SourceAdapter,
+        **{model_type: cls for model_type, (cls, _) in _lab_only_present().items()},
     }
 
 
@@ -288,6 +289,21 @@ EXPECTED = {
     "raon1_mini": {"general": dict(temperature=1.0, top_p=0.95, top_k=20, presence_penalty=1.5)},
 }
 
+# Lab-only families: registered (and expected) only where their adapter
+# module exists (scripts/public_export_withheld.txt).
+_LAB_ONLY: dict[str, tuple] = {}
+
+
+def _lab_only_present():
+    import importlib
+    import importlib.util
+
+    present = {}
+    for model_type, (module, name, profiles) in _LAB_ONLY.items():
+        if importlib.util.find_spec(module) is not None:
+            present[model_type] = (getattr(importlib.import_module(module), name), profiles)
+    return present
+
 
 def test_every_target_adapter_declares_cited_vendor_defaults():
     from mlx2.adapters.registry import _RESOLVERS
@@ -320,8 +336,9 @@ def test_every_target_adapter_declares_cited_vendor_defaults():
         # generation_config.json yet (2026-11-23); revisit when one ships.
         "nemotron3_6_academia",
     }
-    assert set(_RESOLVERS) == set(EXPECTED) | no_vendor_profile
-    for model_type, profiles in EXPECTED.items():
+    expected = {**EXPECTED, **{k: profiles for k, (_, profiles) in _lab_only_present().items()}}
+    assert set(_RESOLVERS) == set(expected) | no_vendor_profile
+    for model_type, profiles in expected.items():
         vendor = vendor_sampling(classes[model_type])
         assert vendor is not None and vendor.model, model_type
         assert {name: p.values() for name, p in vendor.profiles.items()} == profiles, model_type
