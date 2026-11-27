@@ -55,22 +55,23 @@ def block_decide(mx, logp, logq, drafts, uniforms, correction_keys, bonus_key):
     idx = drafts.astype(mx.int32)[..., None]
     lp = mx.take_along_axis(logp[..., :count, :], idx, axis=-1)[..., 0]
     lq = mx.take_along_axis(logq, idx, axis=-1)[..., 0]
-    # p(x)/q(x) in log space; q(x) > 0 for every drafted token (the drafter
-    # sampled it), and a target that forbids x gives ratio 0.
-    ratio = mx.where(mx.isfinite(lp), mx.exp(lp - lq), mx.zeros_like(lp))
+    # Accumulate in log space. An individually unrepresentable ratio can
+    # still bring a very unlikely prefix back to full coverage.
+    log_ratio = lp - lq
     one = mx.ones(drafts.shape[:-1], dtype=f32)
     masses = [one]
-    mass = one
+    log_mass = mx.zeros_like(one)
     passes = []
     for i in range(count):
-        mass = mx.minimum(one, mass * ratio[..., i])
+        log_mass = mx.minimum(0.0, log_mass + log_ratio[..., i])
+        mass = mx.exp(log_mass)
         masses.append(mass)
         if i == count - 1:
             passing = mass
         else:
             residual = mx.sum(mx.maximum(mass[..., None] * p[..., i + 1, :] - q[..., i + 1, :], 0.0),
                               axis=-1)
-            denominator = residual + 1.0 - mass
+            denominator = residual + (-mx.expm1(log_mass))
             passing = mx.where(denominator <= 0, one, residual / mx.where(denominator <= 0, one, denominator))
         passes.append(uniforms[..., i].astype(f32) < passing)
     positions = mx.arange(1, count + 1, dtype=mx.int32)

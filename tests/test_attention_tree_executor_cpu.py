@@ -450,3 +450,20 @@ def test_cohort_refuses_aliased_owners_before_target_mutation(shared_list):
         AttentionTreeExecutor.create().forward_many(
             model, [[17], [19]], [[-1], [-1]], [cache, second], (3,), cached=True, configured_limit=2)
     _assert_committed_cache_equal(cache, reference)
+
+
+def test_attention_tree_batch_preserves_the_supplied_executor(monkeypatch):
+    from mlx2.adapters.external_draft_policy import ExternalDraftAdapterMixin
+    from mlx2.runtime import external_speculative
+
+    adapter = ExternalDraftAdapterMixin()
+    adapter.model = adapter.draft_model = object()
+    adapter.identity = {"fingerprint": "test"}
+    adapter.attention_tree_tiles = True
+    adapter.external_policy = {"batch_size_route": "tree15_b1_b4_chain_b5plus_v1", "num_draft": 3}
+    monkeypatch.setattr(adapter, "_initialize_external_feedback", lambda: None)
+    monkeypatch.setattr(external_speculative, "ExternalDraftBatchGenerator", lambda *a, **kw: kw)
+    monkeypatch.setattr(AttentionTreeExecutor, "create", lambda: pytest.fail("unused provider"))
+    supplied = object()
+    options = adapter.create_external_batch(target_tree_executor_provider=supplied)
+    assert options["target_tree_executor_provider"] is supplied

@@ -58,6 +58,38 @@ def test_decision_matches_host_block_accept(count, vocab):
             assert p[count][int(last)] > 0
 
 
+@pytest.mark.parametrize("small", [7e-8, 1.5e-16])
+def test_full_coverage_passes_even_with_tiny_residual(small):
+    p = [[1, 0, 0], [1 - small, 0, small], [1, 0, 0]]
+    q = [[1, 0, 0], [1 - small, small, 0]]
+    _assert_block_decision(p, q, [0, 1], [0.9, 0.5], expected=1)
+
+
+def test_later_ratios_restore_a_prefix_after_underflow():
+    small = np.exp(-400.0)
+    rare, certain = [small, 1.0], [1.0, 0.0]
+    p = [rare, rare, certain, certain, certain]
+    q = [certain, certain, rare, rare]
+    _assert_block_decision(p, q, [0] * 4, [0.99] * 4, expected=4)
+
+
+def _assert_block_decision(p, q, drafts, uniforms, expected):
+    p, q = np.asarray(p), np.asarray(q)
+
+    def residual_mass(index, mass):
+        return np.maximum(mass * p[index] - q[index], 0).sum()
+
+    tau, coverage = _block_accept(drafts, q[np.arange(len(q)), drafts],
+                                  residual_mass, p, _Uniforms(uniforms))
+    keys = mx.random.split(mx.random.key(0), len(q) + 1)
+    with np.errstate(divide="ignore"):
+        device_tau, _, device_coverage = block_decide(
+            mx, mx.array(np.log(p), mx.float32), mx.array(np.log(q), mx.float32),
+            mx.array(drafts), mx.array(uniforms), keys[:-1], keys[-1])
+    assert tau == int(device_tau) == expected
+    assert coverage == float(device_coverage) == 1.0
+
+
 def test_output_law_is_the_target_joint():
     """Drafts ~ q, decide on the device, finish a short round with the next
     round's draw from p_1 (context-free rows): the first two emitted tokens

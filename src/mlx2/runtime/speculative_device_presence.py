@@ -125,6 +125,8 @@ class DeviceHistory:
         vocab = int(value.shape[-1])
         for contract in contracts:
             tokens, mask = self._window(contract, tail)
+            # Even a masked, unbooked proposal supplies a scatter index.
+            tokens = mx.clip(tokens, 0, vocab - 1)
             hits = mx.zeros((vocab,), dtype=mx.int32).at[tokens].add(mask.astype(mx.int32)) > 0
             # ``logits[:, tokens] -= penalty`` on the window's distinct tokens.
             value = mx.where(hits[None, :], value - contract[0], value)
@@ -180,6 +182,7 @@ class DeviceHistory:
                 lo = mx.maximum(lo, total - context)
             mask = valid & (positions[None, :] >= lo[:, None])
             row_ids = mx.broadcast_to(mx.arange(rows, dtype=mx.int32)[:, None], mask.shape)
+            tokens = mx.clip(tokens, 0, vocab - 1)
             hits = mx.zeros((rows, vocab), dtype=mx.int32).at[
                 row_ids.reshape(-1), mx.broadcast_to(tokens[None, :], mask.shape).reshape(-1)
             ].add(mask.astype(mx.int32).reshape(-1)) > 0

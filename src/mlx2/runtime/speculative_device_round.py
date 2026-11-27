@@ -19,7 +19,7 @@ calls into this module.  Switches (``device_round`` policy object):
     bitwise unchanged.
 ``decide``
     The accept/reject decision on the device, one small int32 packet read
-    per lane (accepted count, finite flag, last emitted token, drafts).
+    per lane (accepted count, law validity, last emitted token, drafts).
     Greedy: the same per-row float32 argmax the host verifier compares
     against, so tokens are identical and the lane RNG advances exactly as
     ``verify_greedy_proposals`` advances it.  Sampled point-mass proposals:
@@ -615,21 +615,18 @@ class DeviceRound:
                                    lookup=self.copy is None)
                 if reason is not None:
                     return _decline(owner, reason, len(cohort))
-        copies = [None] * len(cohort)
+        outcomes = None
         if self.copy is not None:
             cap = self._lane_exact_copy_cap(owner, cohort)
             outcomes = [self.copy.propose(owner, lane, cap=cap) for lane in cohort]
-            copies = [outcome.tokens for outcome in outcomes]
-            if not lazy and not all(copy is not None for copy in copies):
-                if any(copy is not None for copy in copies):
+            copy_count = sum(outcome.tokens is not None for outcome in outcomes)
+            if not lazy and copy_count < len(cohort):
+                if copy_count:
                     # Discarded copies are not booked as probes or limits.
-                    self.copy.count(owner, "mixed_cohort_without_lazy_draft",
-                                    sum(copy is not None for copy in copies))
+                    self.copy.count(owner, "mixed_cohort_without_lazy_draft", copy_count)
                 return False
-            for lane, outcome in zip(cohort, outcomes, strict=True):
-                self.copy.book(owner, lane, outcome)
         try:
-            self._run(owner, cohort, copies, draft_depth)
+            self._run(owner, cohort, outcomes, draft_depth)
         except HostRedo:
             # ``_run`` restored the lanes and statistics before re-raising.
             return _decline(owner, "host_redo", len(cohort))
@@ -677,11 +674,13 @@ class DeviceRound:
             return 15
         return None
 
-    def _run(self, owner, cohort, copies, draft_depth):
+    def _run(self, owner, cohort, copy_outcomes, draft_depth):
         from .external_speculative import HostDraftRow
         from .proposal_providers import PointMassLaw
 
         mx = owner.mx
+        copies = ([outcome.tokens for outcome in copy_outcomes]
+                  if copy_outcomes is not None else [None] * len(cohort))
         on_device = self._enter_device_commit(owner, cohort, copies)
         if self.pipeline:
             from . import speculative_device_pipeline as pipe
@@ -713,6 +712,9 @@ class DeviceRound:
             )
         )
         try:
+            if copy_outcomes is not None:
+                for lane, outcome in zip(cohort, copy_outcomes, strict=True):
+                    self.copy.book(owner, lane, outcome)
             rows = []
             for lane, copy in zip(cohort, copies, strict=True):
                 temp = _temperature(lane)
@@ -845,10 +847,13 @@ class DeviceRound:
                 for row in rows:
                     if row.source != "prompt_copy" and int(row.drafts.shape[0]) > row.count:
                         row.drafts = row.drafts[: row.count]  # padded, but not fixed width
+            # Keep the original IDs in the decision packet (including redo
+            # sentinels). Only the target embedding gets bounded indices.
+            input_vocab = owner._target_token_vocab_size
             inputs = mx.stack([
                 mx.concatenate([
                     mx.array([int(row.lane.anchor)], dtype=mx.int32),
-                    row.drafts,
+                    mx.clip(row.drafts, 0, input_vocab - 1),
                     mx.zeros((width - int(row.drafts.shape[0]) - 1,), dtype=mx.int32),
                 ])
                 for row in rows
@@ -902,7 +907,7 @@ class DeviceRound:
                 ]
                 if any(_host_redo(tokens) for tokens in hosts):
                     raise HostRedo()
-                vocab = int(logits.shape[-1])
+                vocab = min(input_vocab, int(logits.shape[-1]))
                 for tokens in hosts:
                     if any(not 0 <= token < vocab for token in tokens):
                         raise ValueError("device-round draft token outside the vocabulary")
@@ -911,6 +916,8 @@ class DeviceRound:
                     for tokens in hosts
                 ]
                 decisions = owner._verify(cohort, blocks, logits)
+                if any(not 0 <= token < vocab for d in decisions for token in d.emitted):
+                    raise ValueError("device-round token outside the vocabulary")
             blocks = []
             for row, tokens in zip(rows, hosts, strict=True):
                 laws = [None] * len(tokens) if row.ratio else [PointMassLaw(t) for t in tokens]
@@ -1100,7 +1107,11 @@ class DeviceRound:
             if prefix is None:  # built once per lane-round, not per verify row
                 prefix = row.processor_prefix = mx.array(
                     [*lane.history, int(lane.anchor)], dtype=mx.int32)
-            tokens = mx.concatenate([prefix, row.drafts.reshape(-1)[:j].astype(mx.int32)])
+            drafts = getattr(row, "processor_drafts", None)
+            if drafts is None:
+                drafts = row.processor_drafts = mx.clip(
+                    row.drafts.reshape(-1).astype(mx.int32), 0, int(value.shape[-1]) - 1)
+            tokens = mx.concatenate([prefix, drafts[:j]])
             for processor in lane.processors:
                 value = processor(tokens, value)
         return value
@@ -1157,6 +1168,19 @@ class DeviceRound:
             values = mx.where(mask, values - penalty, values)
         return values
 
+    @staticmethod
+    def _greedy_reachable_laws(mx, lane, logits, norms, accepted, response):
+        """After the first mismatch the host uses unprocessed target rows."""
+        if getattr(lane, "processors", None):
+            raw = logits.astype(mx.float32)
+            raw_norms = mx.logsumexp(raw, axis=-1)
+            reachable = mx.arange(int(norms.shape[0])) <= accepted
+            norms = mx.where(reachable, norms, raw_norms)
+            if response is not None:
+                response = [mx.where(reachable[j], law, raw[j] - raw_norms[j])
+                            for j, law in enumerate(response)]
+        return norms, response
+
     def _lane_plan_fixed(self, owner, row, rows_logits):
         """``_lane_plan`` (greedy) over every menu row, with a draft-count mask.
 
@@ -1174,16 +1198,19 @@ class DeviceRound:
         norms = mx.logsumexp(values, axis=-1)
         selected = mx.argmax(values, axis=-1).astype(int32)
         valid = mx.arange(width) <= count
-        finite = mx.all(mx.where(valid, mx.isfinite(norms), True)).astype(int32)
-        if emit:
-            logp = values - norms[:, None]
-            plan.response = [logp[j] for j in range(count + 1)]
         drafts = row.drafts.reshape(-1).astype(int32)
         if int(drafts.shape[0]) < menu:
             drafts = mx.concatenate([drafts, mx.zeros((menu - int(drafts.shape[0]),),
                                                       dtype=int32)])
         matches = (drafts == selected[:menu]) & (mx.arange(menu) < count)
         accepted = mx.sum(mx.cumprod(matches.astype(int32))).astype(int32)
+        response = None
+        if emit:
+            logp = values - norms[:, None]
+            response = [logp[j] for j in range(count + 1)]
+        norms, plan.response = self._greedy_reachable_laws(
+            mx, lane, rows_logits, norms, accepted, response)
+        finite = mx.all(mx.where(valid, mx.isfinite(norms), True)).astype(int32)
         last = mx.take(selected, accepted.reshape(1))
         plan.accepted = accepted.reshape(1).astype(int32)
         plan.last = last.reshape(1).astype(int32)
@@ -1196,6 +1223,7 @@ class DeviceRound:
         emit = lane.sampling.get("emit_logprobs", True)
         temp = _temperature(lane)
         int32 = mx.int32
+        processors = getattr(lane, "processors", None)
         plan = SimpleNamespace(row=row, kind=None, response=None, fits=None, deferred=None)
         if temp == 0:
             plan.kind = "greedy"
@@ -1208,9 +1236,10 @@ class DeviceRound:
                 if emit:
                     response.append(value - norm)
             selected = mx.stack(selected)
-            finite = mx.all(mx.isfinite(mx.stack(norms))).astype(int32)
-            plan.response = response if emit else None
             accepted = self._leading(mx, row.drafts == selected[:count], count)
+            norms, plan.response = self._greedy_reachable_laws(
+                mx, lane, rows_logits, mx.stack(norms), accepted, response if emit else None)
+            finite = mx.all(mx.isfinite(norms)).astype(int32)
             last = mx.take(selected, accepted.reshape(1))
         else:
             block = row.ratio and getattr(owner, "exact_verification", "token") == "block"
@@ -1221,12 +1250,19 @@ class DeviceRound:
             from .sample_utils import transform_top_p_deferred
 
             logp, deferred = [], []
+            reachable = None
             for j in range(count + 1):
                 value = self._row_value(owner, row, rows_logits, j)
+                if reachable is not None:
+                    value = mx.where(reachable, value, rows_logits[j][None].astype(mx.float32))
                 pending = transform_top_p_deferred(transform, value)
                 deferred.append(pending)
                 logp.append(pending.redo()[0] if redo and pending.fits is not None
                             else pending.value[0])
+                if processors and j < count:
+                    token = mx.clip(row.drafts[j], 0, int(logp[-1].shape[-1]) - 1)
+                    supported = mx.exp(mx.take(logp[-1], token)) > 0
+                    reachable = supported if reachable is None else reachable & supported
             fits = [p.fits.reshape(-1) for p in deferred if p.fits is not None]
             plan.deferred = deferred
             plan.fits = mx.concatenate(fits).astype(int32) if fits and not redo else None
@@ -1254,19 +1290,25 @@ class DeviceRound:
                 if int(logq.shape[-1]) < width:
                     pad = mx.full((count, width - int(logq.shape[-1])), -mx.inf, mx.float32)
                     logq = mx.concatenate([logq, pad], axis=-1)
+                # The packet retains the original IDs for _finish's bounds
+                # check. Only gather in-range rows while building the graph.
+                draft_ids = mx.clip(row.drafts.reshape(-1), 0, width - 1)
+                idx = draft_ids.reshape(count, 1)
+                lq = mx.take_along_axis(logq, idx, axis=-1).reshape(-1)
+                # Each drawn token must have positive mass in a normalized
+                # proposal law. A malformed row also gives a nonfinite lq.
+                finite = mx.where(mx.all(mx.isfinite(lq)), finite, -1)
             if plan.kind == "block":
                 from .speculative_block_device import block_decide
 
                 uniform = mx.random.uniform(shape=(count,), key=keys[count])
                 accepted, last, _coverage = block_decide(
-                    mx, logp, logq, row.drafts.reshape(-1), uniform,
+                    mx, logp, logq, draft_ids, uniform,
                     keys[count + 1: 2 * count + 1], keys[2 * count + 1],
                 )
                 last = last.reshape(1)
             elif plan.kind == "ratio":
-                idx = row.drafts.reshape(count, 1)
                 lp = mx.take_along_axis(logp[:count], idx, axis=-1).reshape(-1)
-                lq = mx.take_along_axis(logq, idx, axis=-1).reshape(-1)
                 uniform = mx.random.uniform(shape=(count,), key=keys[count])
                 accept = mx.log(uniform) < (lp - lq)
                 accepted = self._leading(mx, accept, count)
@@ -1298,11 +1340,14 @@ class DeviceRound:
 
     def _finish(self, owner, plans, logits):
         """Host walk of the packets: RNG schedule, stops, ``RoundDecision``s."""
+        from . import external_speculative
         from .external_speculative import LaneFailure, RoundDecision
         from .processor_probe import VerifyWindow
         from .sample_utils import settle_top_p_deferred
 
         mx = owner.mx
+        head_width = int(logits.shape[-1])
+        vocab = min(getattr(owner, "_target_token_vocab_size", head_width), head_width)
         decisions = []
         for index, plan in enumerate(plans):
             row, lane = plan.row, plan.row.lane
@@ -1321,11 +1366,14 @@ class DeviceRound:
             drafts = packet[3: 3 + row.count]
             if _host_redo(drafts):
                 raise HostRedo()
-            vocab = int(logits.shape[-1])
             # Drafts first: the host path refuses an invalid draft row (a
             # DFlash2 lazy draft's -1 tokens) before it ever verifies.
             if any(not 0 <= token < vocab for token in drafts):
                 raise ValueError("device-round token outside the vocabulary")
+            if finite < 0:
+                raise LaneFailure(
+                    lane.uid, "external draft proposal law has no valid mass for its token"
+                )
             if not finite:
                 raise LaneFailure(
                     lane.uid, "external draft target law is not a probability distribution"
@@ -1367,6 +1415,12 @@ class DeviceRound:
             decisions.append(RoundDecision(
                 accepted, emitted, None, 0, plan.response, window,
             ))
+        if external_speculative._VERIFY_TRACE_PATH is not None:
+            external_speculative._VERIFY_TRACE_STATE["forward"] += 1
+            for index, plan in enumerate(plans):
+                lane = plan.row.lane
+                external_speculative._verify_trace(
+                    index, lane, [lane.anchor, *plan.drafts_host], logits)
         return decisions
 
 

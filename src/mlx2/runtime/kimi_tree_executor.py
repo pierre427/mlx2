@@ -44,6 +44,8 @@ SOURCES = (
     "models/switch_layers.py", "models/moe_nax_gather.py", "models/invariant_prefill.py",
     # dense_weight untiles raw TensorFold banks for the absorbed MLA and router.
     "tensorfold_qwen38/lane_qmm.py",
+    # The affine adapter can install row matvecs on dense tree projections.
+    "models/flash_tensorfold_qmv.py",
     # The technologies the Kimi/Ling laws call: the MLA reference, the
     # linear-recurrence KDA laws and recurrence dispatch, their shared
     # dispatch, and the gradient guard it asks.

@@ -72,3 +72,20 @@ def test_exact_private_tree_commit_abort_and_stale_frontier():
         stale.abort()
     finally:
         mx.set_default_device(previous)
+
+
+def test_glm_batch_uses_the_supplied_tree_executor(monkeypatch):
+    from mlx2.adapters import glm53_ast_target
+    from mlx2.adapters.external_draft_policy import ExternalDraftAdapterMixin
+    from mlx2.adapters.glm53_gguf import Glm53GGUFAdapter
+
+    adapter = object.__new__(Glm53GGUFAdapter)
+    adapter.model = Toy()
+    adapter.kernel_policy = {"glm53_ast_target": "serial"}
+    adapter.external_policy = {}
+    monkeypatch.setattr(glm53_ast_target, "Glm53TargetTreeExecutor",
+                        lambda *a, **kw: pytest.fail("constructed an unused GLM tree provider"))
+    monkeypatch.setattr(ExternalDraftAdapterMixin, "create_external_batch", lambda self, **kw: kw)
+    supplied = object()
+    options = adapter.create_external_batch(target_tree_executor_provider=supplied)
+    assert options["target_tree_executor_provider"] is supplied

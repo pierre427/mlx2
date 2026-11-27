@@ -7,6 +7,7 @@ math and per-path KV/recurrent commit remain inside the adapter transaction.
 from __future__ import annotations
 
 import copy
+import math
 
 from .ast_private_state import PrivateHistory
 from .ast_tree_tiles import ASTProposalTrie, plan_tree_tile
@@ -54,14 +55,23 @@ def _slate_priors(blocks):
     probabilities, authorities = [], set()
     for block in blocks:
         selection = getattr(block, "continuation_selection", None)
-        path = next(
-            (
-                path
-                for path in getattr(selection, "paths", ())
-                if tuple(block.tokens) == tuple(path.tokens[: len(block.tokens)])
-            ),
-            None,
-        )
+        paths = getattr(selection, "paths", ())
+        tokens = tuple(block.tokens)
+        source = getattr(block, "continuation_ast_provenance", None)
+        if source is not None:
+            rank = source["rank"]
+            if type(rank) is not int or not 0 <= rank < len(paths):
+                raise ValueError("AST tile prior has an invalid source rank")
+            path = paths[rank]
+            if path.path_id != source["path_id"] or tuple(path.tokens[:len(tokens)]) != tokens:
+                raise ValueError("AST tile prior does not match its selected source")
+        else:
+            # Untrimmed paths identify themselves. A trimmed prefix without
+            # provenance only identifies its source if the match is unique.
+            matches = [path for path in paths if tuple(path.tokens[:len(tokens)]) == tokens]
+            path = next((p for p in matches if len(p.tokens) == len(tokens)), None)
+            if path is None and len(matches) == 1:
+                path = matches[0]
         if path is None:
             probabilities.append(None)
         else:
@@ -70,6 +80,13 @@ def _slate_priors(blocks):
             )
             authorities.add(str(path.score_authority))
     return tuple(probabilities), "+".join(sorted(authorities)) or "unknown"
+
+
+def _selector_probability(logit):
+    if logit >= 0:
+        return 1.0 / (1.0 + math.exp(-logit))
+    odds = math.exp(logit)
+    return odds / (1.0 + odds)
 
 
 def _prepare_request(generator, lane, blocks):
@@ -86,8 +103,6 @@ def _prepare_request(generator, lane, blocks):
         raise ValueError("AST tree tiles require bounded greedy branch-safe paths")
     probabilities, authority = _slate_priors(blocks)
     if getattr(generator, "ast_b1_tile_policy", None) == "four_path15":
-        import math
-
         probabilities = []
         for block in blocks:
             path = next(path for path in block.continuation_selection.paths
@@ -95,7 +110,7 @@ def _prepare_request(generator, lane, blocks):
             features = path.representative.confidence_features
             if len(features) != len(block.tokens) or any(value is None or not math.isfinite(value) for value in features):
                 raise ValueError("four_path15 requires actual source confidence for every row")
-            probabilities.append(tuple(1.0 / (1.0 + math.exp(-value)) for value in features))
+            probabilities.append(tuple(_selector_probability(value) for value in features))
         authority = "draft_selector_probability_for_static_packing_not_target_acceptance"
     trie = ASTProposalTrie.from_paths(
         int(lane.anchor),

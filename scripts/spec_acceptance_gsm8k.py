@@ -463,6 +463,9 @@ def run_questions(client, model_name, prefix, items, *, chat, max_tokens, log=No
                # (null when the server loaded no deterministic tiles).
                "markers": text.count("<<"), "reasoning_markers": reasoning.count("<<"),
                "det_tiles": (find(result, "amoeba_det_tiles_request") or {}).get("calculator")}
+        if request_extra.get("return_token_trace") is True:
+            from mlx2.generation_trace import read_token_trace
+            row["token_ids"] = read_token_trace(extra, expected_tokens=completion)["token_ids"]
         if sampling:
             row["effective_sampling"] = find(result, "effective_sampling")
             row["sampling_filter"] = find(result, "sampling_filter")
@@ -529,7 +532,7 @@ def compact(row):
     # Which verifier decided (e.g. "exact_block") and its round count.
     keep["verification"] = spec.get("verification")
     keep["block_verified_rounds"] = (spec.get("exact_verification") or {}).get("block_verified_rounds")
-    for name in ("effective_sampling", "sampling_filter"):
+    for name in ("effective_sampling", "sampling_filter", "token_ids"):
         if name in row:
             keep[name] = row[name]
     return keep

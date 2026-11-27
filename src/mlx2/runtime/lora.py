@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
 
+_FLOAT32_MAX = float.fromhex("0x1.fffffep127")
 WEIGHT_PROGRAM_ARITHMETIC = "fp32_delta_round_once_v1"
 
 
@@ -46,6 +47,9 @@ def read_lora_config(path):
         raise ValueError(  # noqa: TRY004 - artifact validation is one ValueError API
             "LoRA scale must be numeric"
         )
+    # Both serving paths use the scale in at most float32 precision.
+    if not -_FLOAT32_MAX <= scale <= _FLOAT32_MAX:
+        raise ValueError("LoRA scale must be finite and within float32 range")
     if dropout != 0 and dropout != 0.0:
         raise ValueError("serving LoRA dropout must be zero")
     if not isinstance(keys, list) or not keys or any(

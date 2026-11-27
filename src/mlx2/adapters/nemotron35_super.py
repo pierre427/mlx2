@@ -914,17 +914,16 @@ class Nemotron35SuperAdapter(ExternalDraftAdapterMixin, Nemotron3SuperAdapter):
             self._check_num_draft(draft_record)
         self._load_super_model(artifact, draft_record, draft_loader)
         if self.tree_route:
-            # The tree runs the chain's exact strip recipe; refuse an opt-in
-            # tree route the loaded policies cannot serve, before serving.
-            refusal = self.model.tree_policy_refusal(
-                int(self.external_policy.get("ast_tile_rows", 16))
-            )
-            self._resolve_tree_refusal(refusal)
+            self._validate_tree_executor()
 
-    def _resolve_tree_refusal(self, refusal):
+    def _validate_tree_executor(self):
         """A load-time tree refusal: the adapter's own default yields to the
         chain (as served before the default existed, the reason in the tree
         receipt); an operator-selected tree refuses to load."""
+        if self.external_policy.get("ast_target_executor") == "serial":
+            # Each node runs ordinary one-token decode on its parent snapshot.
+            return
+        refusal = self.model.tree_policy_refusal(int(self.external_policy.get("ast_tile_rows", 16)))
         if refusal is None:
             return
         if self.tree_route_authority != "adapter_default_lilicorr_tree8":
@@ -1541,6 +1540,7 @@ class Nemotron35SuperAdapter(ExternalDraftAdapterMixin, Nemotron3SuperAdapter):
         provider_receipt = provider.receipt() if provider is not None else {}
         provider_receipt.pop("source_identity", None)
         return {
+            **status,
             "schema": "mlx2.nemotron35-super-tree-verify.v1",
             "implemented": True,
             "qualified": False,
@@ -1553,7 +1553,6 @@ class Nemotron35SuperAdapter(ExternalDraftAdapterMixin, Nemotron3SuperAdapter):
             "executor": (
                 self.external_policy.get("ast_target_executor", "packed") if selected else None
             ),
-            **status,
         }
 
     def diagnostics(self):

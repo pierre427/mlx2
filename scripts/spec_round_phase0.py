@@ -908,6 +908,73 @@ def summarize(document):
     return {"schema": SCHEMA + ".summary", "rows": rows}
 
 
+def compare_gsm8k_arms(runs, names, reference, pairs):
+    """Compare complete base-URL GSM8K receipts for the selected Phase 0 arms."""
+    from technology_parity_compare import indexed_rows
+
+    output_keys = ("text", "completion_tokens", "predicted", "finish_reason")
+    keys = (*output_keys, "accept_hist", "depth_hist", "token_ids")
+    report = {"reference": reference, "pairs": pairs, "keys": list(keys),
+              "arms": {}, "incomplete": {}}
+    loaded = {}
+    for name in names:
+        path = runs / name / "gsm8k"
+        if not (path / "receipt.json").is_file():
+            report["incomplete"][name] = "missing receipt"
+            continue
+        receipt = json.loads((path / "receipt.json").read_text())
+        dataset = receipt.get("dataset") or {}
+        count = dataset.get("questions")
+        arms = receipt.get("arms") or []
+        # These launchers always request the contiguous prefix of the test split.
+        if (len(arms) != 1 or type(count) is not int or count < 1
+                or type(dataset.get("offset")) is not int or dataset["offset"] != 0
+                or "indices" in dataset):
+            report["incomplete"][name] = "unexpected arm or question selection"
+            continue
+        identity = (receipt.get("checkpoint"), (receipt.get("driver_revision") or {}).get("head"),
+                    dataset.get("revision"), count)
+        if not all(isinstance(item, str) and item.strip() for item in identity[:3]):
+            report["incomplete"][name] = "missing checkpoint or revision"
+            continue
+        arm = arms[0]
+        rows = indexed_rows(arm, range(count), path)
+        if rows is None or (arm.get("summary") or {}).get("questions") != count:
+            report["incomplete"][name] = f"expected {count} complete question rows"
+            continue
+        if not all(isinstance(row.get("token_ids"), list)
+                   and len(row["token_ids"]) == row["completion_tokens"]
+                   and all(type(t) is int and t >= 0 for t in row["token_ids"])
+                   and type(row["test_index"]) is int and "predicted" in row for row in rows.values()):
+            report["incomplete"][name] = "missing or incomplete token evidence"
+            continue
+        loaded[name] = rows, arm["summary"], identity
+
+    if reference in loaded:
+        report["reference_summary"] = loaded[reference][1]
+    for name in names:
+        against = pairs.get(name, reference)
+        if name == against or against not in names:
+            # ARMS can intentionally select one treatment without its reference.
+            continue
+        entry = {"against": against, "compared": 0, "token_exact": None, "exact": None}
+        report["arms"][name] = entry
+        if name not in loaded or against not in loaded:
+            report["incomplete"].setdefault(name, f"cannot compare with {against}")
+            continue
+        got, summary, identity = loaded[name]
+        ref, _, ref_identity = loaded[against]
+        if identity != ref_identity:
+            report["incomplete"][name] = "checkpoint, revision or question selection differs"
+            continue
+        token_diffs = [i for i in ref if got[i]["token_ids"] != ref[i]["token_ids"]]
+        diffs = [i for i in ref if any(got[i][key] != ref[i][key] for key in keys)]
+        entry.update(compared=len(ref), token_mismatched=token_diffs, token_exact=not token_diffs,
+                     acceptance_or_token_mismatched=diffs, mismatched=diffs, exact=not diffs,
+                     checkpoint=identity[0], source_revision=identity[1], summary=summary)
+    return report
+
+
 def fmt(value, spec=".1f"):
     return "-" if value is None else format(value, spec)
 

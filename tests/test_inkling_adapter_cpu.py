@@ -133,6 +133,12 @@ def test_ast_controls_reach_the_bound_provider(monkeypatch):
         == "inkling_layerwise_packed_tree_v1"
     )
     assert value["dynamic_tree_overflow"] == "cohort"
+    from mlx2.runtime.technologies import tree_verify
+
+    monkeypatch.setattr(tree_verify, "build_tree_executor", lambda *a, **kw: pytest.fail("unused provider"))
+    supplied = object()
+    overridden = adapter.create_external_batch(target_tree_executor_provider=supplied)
+    assert overridden["target_tree_executor_provider"] is supplied
     for extra in (
         {"ast_physical_target": True},
         {"ast_tiles": 2},

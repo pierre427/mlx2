@@ -563,6 +563,17 @@ def _tile_node_budgets(policy, width, default_multilane_rows=None, default_rows=
     }
 
 
+def _hybrid_tree_node_budgets(policy, width, default_rows=16):
+    """The serial hybrid verifier's cap includes the anchor of each lane."""
+    from ..runtime.technologies.tree_verify import check_serial_rows, legacy_topology, tree_executor_choice
+
+    budgets = _tile_node_budgets(policy, width, default_rows=default_rows)
+    cap = legacy_topology("hybrid_serial").max_rows
+    check_serial_rows(tree_executor_choice(policy), max(budgets.values()) + 1,
+                      serial_max_rows=cap, error=f"hybrid serial reference supports at most {cap} tile rows")
+    return budgets
+
+
 def validate_target_verify_row_exact(policy: dict) -> bool:
     """Admission of the row-exact target route (``qwen_hybrid_row_exact``).
 
@@ -2520,9 +2531,8 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
         if tree_width is not None:
             from .qwen38_target_tree_executor import Qwen38TargetTreeExecutor
 
-            kwargs.setdefault(
-                "target_tree_executor_provider", Qwen38TargetTreeExecutor.create()
-            )
+            if "target_tree_executor_provider" not in kwargs:
+                kwargs["target_tree_executor_provider"] = Qwen38TargetTreeExecutor.create()
             kwargs.setdefault("dynamic_tree_max_width", tree_width)
             kwargs.setdefault(
                 "tensorfold_cohort_limit",

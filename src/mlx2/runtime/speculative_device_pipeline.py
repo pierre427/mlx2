@@ -321,8 +321,9 @@ def dispatch(device_round, owner, lane, depth, anchor=None, inflight_rows=None, 
     # to this round's booking like the other counters.
     composition_before = dict(owner.draft.composition_stats) if composed else None
     try:
+        input_vocab = owner._target_token_vocab_size
         anchor_array = (mx.array([int(lane.anchor)], dtype=mx.int32) if anchor is None
-                        else anchor.reshape(1).astype(mx.int32))
+                        else mx.clip(anchor.reshape(1).astype(mx.int32), 0, input_vocab - 1))
         history = extra = None
         pad_block = (getattr(device_round, "fixed_shape", False) and depth <= int(owner.num_draft)
                      and getattr(owner.draft, "draft_lazy_pad", False))
@@ -372,7 +373,7 @@ def dispatch(device_round, owner, lane, depth, anchor=None, inflight_rows=None, 
         drafted = int(drafts.shape[0])  # ``count``, or the menu block when padded
         padded = (mx.concatenate([drafts, mx.zeros((rows - 1 - drafted,), dtype=mx.int32)])
                   if rows - 1 > drafted else drafts)
-        inputs = mx.concatenate([anchor_array, padded])[None]
+        inputs = mx.concatenate([anchor_array, mx.clip(padded, 0, input_vocab - 1)])[None]
         transaction = DeviceCommitTransaction(lane.cache, [rows], lagged=True)
         set_read_base(lane, lagged_base(lane, inflight_rows))
         logits, features = owner._cohort_target_forward(

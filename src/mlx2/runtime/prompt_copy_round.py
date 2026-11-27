@@ -27,6 +27,7 @@ the exact target rule, so the output law is unchanged.
 
 from __future__ import annotations
 
+from bisect import bisect_left
 from dataclasses import asdict, dataclass
 from types import SimpleNamespace
 
@@ -128,9 +129,8 @@ class NgramIndex:
         best_pos, best_ext = None, -1
         max_ext = self.ng_max - self.ng_min
         corpus = self._corpus
-        for pos in reversed(candidates[-self.max_candidates:]):
-            if pos >= length or pos >= max_pos:
-                continue
+        end = bisect_left(candidates, min(length, max_pos))
+        for pos in reversed(candidates[max(0, end - self.max_candidates):end]):
             ext = 0
             while (ext < max_ext and pos - self.ng_min - 1 - ext >= 0
                    and corpus[pos - self.ng_min - 1 - ext]

@@ -523,10 +523,10 @@ class MultiLoRAManager:
                     take_max_rows=self.take_max_rows,
                 )
                 replacements.append((key, module))
-                self.wrapped[key] = module
             if replacements:
-                self.model.update_modules(tree_unflatten(replacements))
                 mx.eval([(m.lora_a, m.lora_b) for _, m in replacements])
+                self.model.update_modules(tree_unflatten(replacements))
+                self.wrapped.update(replacements)
                 # Adapters already resident must also be written into the new
                 # modules (their slot entries are zero for keys they do not
                 # cover, which is the correct value).
@@ -629,16 +629,21 @@ class MultiLoRAManager:
             program_slots.discard(slot)
             if pair is not None and adapter.weight_program is not None:
                 program_slots.add(slot)
-            module._program_slots = frozenset(program_slots)
             # Functional rebuild: forwards already enqueued keep the old arrays.
-            module.lora_a = mx.concatenate(
+            new_a = mx.concatenate(
                 [module.lora_a[:slot], a_slot[None], module.lora_a[slot + 1 :]]
             )
-            module.lora_b = mx.concatenate(
+            new_b = mx.concatenate(
                 [module.lora_b[:slot], b_slot[None], module.lora_b[slot + 1 :]]
             )
-            updated.append((module.lora_a, module.lora_b))
-        mx.eval(updated)
+            updated.append((module, new_a, new_b, frozenset(program_slots)))
+        # Allocation can fail at evaluation. Keep the previous resident's
+        # arrays and coverage intact until every replacement is ready.
+        mx.eval([(a, b) for _, a, b, _ in updated])
+        for module, a, b, program_slots in updated:
+            module.lora_a = a
+            module.lora_b = b
+            module._program_slots = program_slots
 
     def acquire(self, name, *, expected_fingerprint=None):
         """Pin a resident slot for ``name``.  Returns ``(slot, residency)``.
@@ -676,12 +681,13 @@ class MultiLoRAManager:
                         "every multi-LoRA slot is pinned by a live request"
                     )
                 slot = victims[0]  # least recently used unpinned
-                del self.resident[slot]
-                self.counts["slot_evictions"] += 1
                 residency = "evicted"
             self._materialize(adapter)
             self._write_slot(slot, adapter)
             self.resident[slot] = name
+            if residency == "evicted":
+                self.resident.move_to_end(slot)
+                self.counts["slot_evictions"] += 1
             self.pins[slot] += 1
             self.counts["slot_loads"] += 1
             return slot, residency
@@ -802,28 +808,53 @@ _SAFETENSORS_ITEMSIZE = {
 
 
 def _safetensors_header(payload):
-    import json
-    import struct
+    import math
 
-    if len(payload) < 8:
-        raise ValueError("LoRA safetensors file is truncated")
-    (length,) = struct.unpack("<Q", payload[:8])
-    if length > len(payload) - 8 or length > 100 << 20:
-        raise ValueError("LoRA safetensors header is malformed")
-    try:
-        header = json.loads(payload[8 : 8 + length])
-    except ValueError as error:
-        raise ValueError("LoRA safetensors header is malformed") from error
+    from .technologies.embedding_tables import parse_safetensors_header
+
+    header, data_offset = parse_safetensors_header(
+        payload[:8], lambda size: payload[8 : 8 + size],
+        strict_error=ValueError, path="LoRA safetensors", file_size=len(payload),
+        header_limit=100 << 20,
+    )
     if not isinstance(header, dict):
         raise ValueError("LoRA safetensors header is malformed")  # noqa: TRY004 - malformed artifacts share one API
-    header.pop("__metadata__", None)
+    metadata = header.pop("__metadata__", None)
+    # MLX writes null for absent metadata. Its reader also accepts a string
+    # or a list of strings, and requires each value in a mapping to be a string.
+    if metadata is not None:
+        if isinstance(metadata, dict):
+            values = metadata.values()
+        elif isinstance(metadata, list):
+            values = metadata
+        else:
+            values = (metadata,)
+        if any(not isinstance(value, str) for value in values):
+            raise ValueError("LoRA safetensors metadata values must be strings")
+    ranges = []
     for key, entry in header.items():
+        if not isinstance(entry, dict):
+            raise ValueError(f"LoRA safetensors entry {key!r} is malformed")  # noqa: TRY004
+        dtype = entry.get("dtype")
+        shape = entry.get("shape")
+        offsets = entry.get("data_offsets")
         if (
-            not isinstance(entry, dict)
-            or entry.get("dtype") not in _SAFETENSORS_ITEMSIZE
-            or not isinstance(entry.get("shape"), list)
+            not isinstance(dtype, str) or dtype not in _SAFETENSORS_ITEMSIZE
+            or not isinstance(shape, list)
+            or any(type(dim) is not int or dim < 0 for dim in shape)
+            or not isinstance(offsets, list) or len(offsets) != 2
+            or any(type(offset) is not int for offset in offsets)
+            or offsets[1] - offsets[0] != math.prod(shape) * _SAFETENSORS_ITEMSIZE[dtype]
         ):
             raise ValueError(f"LoRA safetensors entry {key!r} is malformed")
+        ranges.append(offsets)
+    end = 0
+    for start, stop in sorted(ranges):
+        if start != end:
+            raise ValueError("LoRA safetensors payload overlaps or has gaps")
+        end = stop
+    if end != len(payload) - data_offset:
+        raise ValueError("LoRA safetensors payload size differs from the declared tensors")
     return header
 
 

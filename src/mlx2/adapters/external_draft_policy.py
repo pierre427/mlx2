@@ -1187,7 +1187,8 @@ class ExternalDraftAdapterMixin:
 
             width = _TREE_BATCH_ROUTES[self.external_policy["batch_size_route"]]
             kwargs.setdefault("dynamic_singleton_tree", True)
-            kwargs.setdefault("target_tree_executor_provider", AttentionTreeExecutor.create())
+            if "target_tree_executor_provider" not in kwargs:
+                kwargs["target_tree_executor_provider"] = AttentionTreeExecutor.create()
             kwargs.setdefault("dynamic_tree_max_width", width)
             kwargs.setdefault(
                 "tree_node_budget_by_lanes", _tile_node_budgets(

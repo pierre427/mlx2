@@ -290,6 +290,56 @@ def test_ngram_index_finds_the_longest_backward_match():
     assert corpus[pos] == 10
 
 
+@pytest.mark.parametrize("options", [DECIDE, BOTH])
+def test_verify_trace_covers_device_decisions(pair, monkeypatch, tmp_path, options):  # noqa: F811
+    import json
+
+    from mlx2.runtime import external_speculative
+
+    target, draft, _ = pair
+    trace = tmp_path / "verify.jsonl"
+    with trace.open("w") as handle:
+        monkeypatch.setattr(external_speculative, "_VERIFY_TRACE_PATH", str(trace))
+        monkeypatch.setattr(external_speculative, "_VERIFY_TRACE_STATE",
+                            {"forward": 0, "handle": handle})
+        _, rounds, stats = _decode(target, draft, _prompt(12, length=8), 3, 4, device_round=options)
+    assert stats["external_device_round_decide_rounds"] > 0
+    events = [json.loads(line) for line in trace.read_text().splitlines()]
+    assert [event["inputs"][1:] for event in events if len(event["inputs"]) > 1] == [
+        row[0] for row in rounds if row[0]]
+    assert [event["forward"] for event in events] == list(range(1, len(events) + 1))
+
+
+def test_prompt_end_does_not_consume_the_copy_candidate_budget():
+    corpus = [1, 2, 3, 1, 2]
+    index = NgramIndex(2, 2, max_candidates=1)
+    index.sync(corpus)
+    index._corpus = corpus
+    assert index.find(corpus.__getitem__, len(corpus), max_pos=len(corpus)) == (2, 0)
+
+
+def test_declined_lazy_round_restores_copy_bookkeeping(pair, monkeypatch):  # noqa: F811
+    from mlx2.runtime.proposal_composition import LazyDecline
+
+    def decline(*args, **kwargs):
+        raise LazyDecline("test_decline")
+
+    target, draft, _ = pair
+    batch = _engine(target, draft, 3, device_round=BOTH, prompt_copy_round=True)
+    try:
+        monkeypatch.setattr(batch.draft, "draft_lazy", decline)
+        uid = batch.insert([list(range(21, 40))], max_tokens=[5])[0]
+        lane = batch.lanes[uid]
+        _run(batch, uid)
+        assert batch.scheduler_stats[DECLINE_REASONS]["test_decline"] > 0
+        assert batch.scheduler_stats["external_device_round_rounds"] == 0
+        assert batch.scheduler_stats["external_prompt_copy_probes"] == 0
+        assert batch.scheduler_stats["external_prompt_copy_decline_reasons"] == {}
+        assert lane.prompt_copy_state.probes == 0
+    finally:
+        batch.close()
+
+
 def test_prompt_copy_backoff_suspends_and_doubles():
     runtime = PromptCopyRuntime(PromptCopyPolicy.from_value({"backoff_min": 64, "backoff_max": 256}))
     owner = SimpleNamespace(scheduler_stats={})
@@ -330,6 +380,55 @@ def test_prompt_copy_rounds_engage_and_stay_greedy_exact(agreeing, options):
 # -- review 2026-11-23: nucleus miss, laws in the engine, depth > 1, bonus, long copies -----
 def _owner():
     return SimpleNamespace(mx=mx, scheduler_stats={}, stops=set())
+
+
+@pytest.mark.parametrize("law", ["token", "block"])
+@pytest.mark.parametrize("q", [[np.nan, 0.0], [-np.inf, -np.inf], [-np.inf, 0.0]])
+def test_sampled_device_verification_refuses_invalid_proposal(law, q):
+    from mlx2.runtime.external_speculative import LaneFailure
+
+    runtime = DeviceRound.__new__(DeviceRound)
+    runtime.policy = DeviceRoundPolicy.from_value(BOTH)
+    owner = _owner()
+    owner.exact_verification = law
+    lane = SimpleNamespace(uid=1, processors=[], rng=RequestRNG(0),
+                           sampling={"sampling_temp": 1.0})
+    row = SimpleNamespace(lane=lane, count=1, host=None, drafts=mx.array([0]),
+                          q=mx.array([q]), ratio=True, seed=1)
+    logits = mx.zeros((1, 2, 2))
+    plans = runtime._plan(owner, [lane], [row], logits)
+    with pytest.raises(LaneFailure, match="proposal law"):
+        runtime._finish(owner, plans, logits)
+
+
+@pytest.mark.parametrize("temperature", [0.0, 1.0])
+@pytest.mark.parametrize("draft,raw_last,valid", [
+    (1, 7.0, True),       # unreachable: use the raw EOS-only row
+    (1, -np.inf, False),  # unreachable: even the raw row is invalid
+    (0, 7.0, False),      # reachable: the processor masks its only token
+])
+def test_minimum_tokens_checks_only_reachable_processed_laws(temperature, draft, raw_last, valid):
+    from mlx2.runtime.external_speculative import LaneFailure
+    from mlx2.serving import minimum_tokens_processor
+
+    runtime = DeviceRound.__new__(DeviceRound)
+    runtime.policy = DeviceRoundPolicy.from_value({**BOTH, "processors": True})
+    processor = minimum_tokens_processor(mx, [2], prompt_tokens=1, minimum=9)
+    lane = SimpleNamespace(uid=1, processors=[processor], rng=RequestRNG(0),
+                           history=[], anchor=0, sampling={"sampling_temp": temperature})
+    row = SimpleNamespace(lane=lane, count=1, host=[draft], drafts=mx.array([draft]),
+                          ratio=False, seed=1)
+    logits = mx.array([[[3.0, -np.inf, 2.0], [-np.inf, -np.inf, raw_last]]])
+    owner = _owner()
+    assert runtime._processors_ok(lane)
+    plans = runtime._plan(owner, [lane], [row], logits)
+    if valid:
+        decision, = runtime._finish(owner, plans, logits)
+        assert decision.accepted == 0 and decision.emitted == [0]
+        assert plans[0].response[1].tolist() == [-np.inf, -np.inf, 0.0]
+    else:
+        with pytest.raises(LaneFailure, match="target law"):
+            runtime._finish(owner, plans, logits)
 
 
 def test_nucleus_window_miss_completes_with_the_dense_kept_set():

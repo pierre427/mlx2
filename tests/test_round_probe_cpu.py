@@ -920,3 +920,36 @@ def test_mixed_route_cells_give_no_verdict():
     row = harness.summarize(base)["rows"][0]
     assert row["mixed_route_cells"] == ["quiet"]
     assert row["phase1_go"] is None and row["go_reasons"] == []
+
+
+def test_phase0_gsm8k_comparisons_require_complete_token_evidence(tmp_path):
+    import json
+
+    def write_arm(name, rows):
+        folder = tmp_path / name / "gsm8k"
+        folder.mkdir(parents=True, exist_ok=True)
+        receipt = {"dataset": {"questions": 2, "offset": 0, "revision": "fixture"},
+                   "checkpoint": "fixture@sha256:1234", "driver_revision": {"head": "test"},
+                   "arms": [{"rows": rows, "summary": {"questions": len(rows)}}]}
+        (folder / "receipt.json").write_text(json.dumps(receipt))
+
+    rows = [{"index": i, "test_index": i, "text": "42", "completion_tokens": 1,
+             "predicted": "42", "finish_reason": "stop", "route": "external_draft",
+             "accept_hist": {"0": 1}, "depth_hist": {"1": 1}, "token_ids": [42]}
+            for i in range(2)]
+    write_arm("off", rows)
+
+    def compare(other):
+        write_arm("on", other)
+        return harness.compare_gsm8k_arms(tmp_path, ["off", "on"], "off", {})
+
+    assert compare(rows)["arms"]["on"]["exact"] is True
+    mismatch = compare([rows[0], {**rows[1], "token_ids": [17]}])["arms"]["on"]
+    assert mismatch["token_exact"] is False and mismatch["token_mismatched"] == [1]
+    for other in (rows[:1], [rows[0], rows[0]], [rows[0], {**rows[1], "test_index": 2}],
+                  [rows[0], {k: v for k, v in rows[1].items() if k != "token_ids"}]):
+        result = compare(other)
+        assert "on" in result["incomplete"]
+        assert result["arms"]["on"]["token_exact"] is None
+    write_arm("off", rows[:1])
+    assert compare(rows[:1])["arms"]["on"]["token_exact"] is None

@@ -1036,12 +1036,10 @@ class Glm53GGUFAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             raise ValueError("GLM-5.3 AST owns exactly one request")
         kwargs.setdefault("dynamic_singleton_tree", True)
         kwargs.setdefault("dynamic_tree_max_width", 1)
-        kwargs.setdefault(
-            "target_tree_executor_provider",
-            Glm53TargetTreeExecutor(
+        if "target_tree_executor_provider" not in kwargs:
+            kwargs["target_tree_executor_provider"] = Glm53TargetTreeExecutor(
                 self.model, implementation=self.kernel_policy["glm53_ast_target"]
-            ),
-        )
+            )
         kwargs.setdefault(
             "tree_node_budget_by_lanes", _tile_node_budgets(self.external_policy, 1)
         )

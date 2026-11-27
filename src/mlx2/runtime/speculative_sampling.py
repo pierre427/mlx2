@@ -460,15 +460,18 @@ def _block_accept(tokens, selected_q, block_residual_mass, targets, rng):
     """
     count = len(tokens)
     uniforms = [rng.uniform() for _ in range(count)]
-    mass, masses, accepted = 1.0, [1.0], 0
+    log_mass, masses, accepted = 0.0, [1.0], 0
     for i, token in enumerate(tokens):
-        mass = min(1.0, mass * targets[i][token] / selected_q[i])
+        target = targets[i][token]
+        log_ratio = math.log(target) - math.log(selected_q[i]) if target > 0 else -math.inf
+        log_mass = min(0.0, log_mass + log_ratio)
+        mass = math.exp(log_mass)
         masses.append(mass)
         if i == count - 1:
             passing = mass
         else:
             residual = block_residual_mass(i + 1, mass)
-            denominator = residual + 1.0 - mass
+            denominator = residual + (-math.expm1(log_mass))
             passing = 1.0 if denominator <= 0 else residual / denominator
         # Strict, as in token-wise ``u < p/q``: uniforms lie in [0, 1), so a
         # zero pass probability (a draft the target forbids) never passes,

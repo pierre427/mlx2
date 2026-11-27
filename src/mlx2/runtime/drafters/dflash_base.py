@@ -115,6 +115,13 @@ class DFlashAttention(nn.Module):
         end = entry.rope_offset()
         q = rope(queries, offset=end)
         pk = rope(prop_keys, offset=end)
+        if keys is None:
+            # A one-token prompt has no committed features on its first
+            # round. Attend the bidirectional block without allocating a
+            # context ring until actual feature rows arrive.
+            return mx.fast.scaled_dot_product_attention(
+                q, pk, prop_values, scale=self.scale, sinks=self._sinks(q),
+            )
         rows = int(queries.shape[2])
         mask = mx.concatenate([
             mx.broadcast_to(visible[None, :], (rows, int(visible.shape[0]))),

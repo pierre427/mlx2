@@ -1339,17 +1339,23 @@ def _proposal_collision_probabilities(laws):
 class _ReferenceTreeTransaction:
     """Commit a serial-tree accepted path through the ordinary target forward."""
 
-    def __init__(self, owner, cache, inputs, uid=None):
+    def __init__(self, owner, cache, inputs, verified_paths, uid=None):
         self.owner = owner
         self.cache = cache
         self.inputs = list(inputs)
+        self.verified_paths = verified_paths
         self.uid = uid
         self.closed = False
 
     def commit_paths(self, paths):
         if self.closed or len(paths) != 1 or not paths[0]:
             raise RuntimeError("reference tree commit requires one nonempty path")
-        tokens = [self.inputs[index] for index in paths[0]]
+        rows = tuple(paths[0])
+        if (not rows or rows[0] != 0 or any(type(row) is not int for row in rows)
+                or not 0 <= rows[-1] < len(self.verified_paths)
+                or rows != tuple(self.verified_paths[rows[-1]])):
+            raise ValueError("reference tree commit must follow a verified root path")
+        tokens = [self.inputs[index] for index in rows]
         with _amoeba_rows(self.owner, [SimpleNamespace(uid=self.uid)]):
             logits, features = self.owner.model.forward_with_taps(
                 self.owner.mx.array([tokens]), self.cache, self.owner.layers
@@ -2609,6 +2615,13 @@ class ExternalDraftBatchGenerator:
     def _target_args(self):
         # Hybrid targets keep text geometry under ``speculative_args``.
         return getattr(self.model, "speculative_args", self.model.args)
+
+    @property
+    def _target_token_vocab_size(self):
+        """Real token IDs available to both the target input and its output head."""
+        size = int(self._target_args.vocab_size)
+        rows = getattr(self.model, "speculative_vocab_rows", None)
+        return size if rows is None else min(size, int(rows))
 
     def _cohort_target_forward(self, inputs, transaction, cohort, *, site, taps=True):
         """Target forward for one cohort transaction (rows bound to the cohort's lanes)."""
@@ -8693,7 +8706,8 @@ class ExternalDraftBatchGenerator:
         """Exact generic control: independently replay every root-to-node path."""
 
         logits, features = [], []
-        for path in self._tree_paths(parents):
+        paths = self._tree_paths(parents)
+        for path in paths:
             cache = self._copy_reference_cache(lane.cache)
             row_inputs = self.mx.array([[inputs[index] for index in path]])
             with _amoeba_rows(self, [lane]):
@@ -8706,7 +8720,7 @@ class ExternalDraftBatchGenerator:
         return (
             self.mx.concatenate(logits, axis=1),
             self.mx.concatenate(features, axis=1),
-            _ReferenceTreeTransaction(self, lane.cache, inputs, uid=lane.uid),
+            _ReferenceTreeTransaction(self, lane.cache, inputs, paths, uid=lane.uid),
         )
 
     def _target_tree_forward(self, lane, inputs, parents):

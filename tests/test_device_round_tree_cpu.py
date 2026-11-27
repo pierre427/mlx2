@@ -519,3 +519,62 @@ def test_a_subclass_overriding_a_host_twin_declines():
     owner = SimpleNamespace(target_execution="reference",
                             draft=CascadedMTPDraftModel.__new__(CascadedMTPDraftModel))
     assert engine_reason(owner, [object()]) == "lazy_tree_twin_overridden"
+
+
+@pytest.mark.parametrize("lazy", [False, True])
+def test_reference_transaction_rejects_sibling_replay_before_cache_mutation(lazy):
+    from types import SimpleNamespace
+
+    from mlx2.runtime.external_speculative import ExternalDraftBatchGenerator
+    from mlx2.runtime.speculative_device_tree import DeviceTree
+
+    def forward(inputs, cache, _layers):
+        cache[0].tokens.extend(inputs[0].tolist())
+        features = mx.cumsum(inputs, axis=1)[:, :, None]
+        return features, features
+
+    batch = object.__new__(ExternalDraftBatchGenerator)
+    batch.mx, batch.layers = mx, ()
+    batch.model = SimpleNamespace(forward_with_taps=forward)
+    lane = SimpleNamespace(uid=1, cache=[SimpleNamespace(tokens=[7])])
+    tokens, parents = [9, 11, 13], [-1, 0, 0]
+    if lazy:
+        _, _, transaction = DeviceTree._reference_forward(
+            batch, lane, mx.array(tokens), geometry((-1, -1)))
+        transaction.inputs = tokens  # populated by DeviceTree.decide after the joint read
+    else:
+        _, _, transaction = batch._reference_tree_forward(lane, tokens, parents)
+    with pytest.raises(ValueError, match="root path"):
+        transaction.commit_paths([[0, 1, 2]])
+    assert lane.cache[0].tokens == [7] and not transaction.closed
+    transaction.commit_paths([[0, 2]])
+    assert lane.cache[0].tokens == [7, 9, 13]
+
+
+@pytest.mark.parametrize("override", ["mixin", "instance"])
+def test_lazy_admission_honors_the_resolved_host_tree_method(override):
+    from types import SimpleNamespace
+
+    from mlx2.runtime.speculative_device_tree import engine_reason
+
+    class Host:
+        def propose_tree(self):
+            return ([1], [-1])
+
+        def draft_tree_lazy(self):
+            return self.proposal
+
+    class DifferentHost:
+        def propose_tree(self):
+            return ([2], [-1])
+
+    class Draft(DifferentHost, Host):
+        pass
+
+    draft = Draft() if override == "mixin" else Host()
+    if override == "instance":
+        draft.propose_tree = DifferentHost().propose_tree
+    draft.proposal = ([1], [-1])
+    owner = SimpleNamespace(draft=draft, _draft_pipelines=lambda: False)
+    assert draft.propose_tree() != draft.draft_tree_lazy()
+    assert engine_reason(owner, [SimpleNamespace(processors=[])]) == "lazy_tree_twin_overridden"

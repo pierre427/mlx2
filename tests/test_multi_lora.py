@@ -282,6 +282,89 @@ def test_lru_eviction_pins_and_deferral(adapters):
     assert "code" not in manager.status()["registered"]
 
 
+def test_failed_slot_write_preserves_resident_and_retries(adapters, monkeypatch):
+    _, paths = adapters
+    manager = MultiLoRAManager(tiny_model(), max_loras=1, max_lora_rank=8)
+    manager.register("sql", paths["sql"])
+    manager.register("code", paths["code"])
+    slot, _ = manager.acquire("sql")
+    manager.release(slot)
+    manager._materialize(manager.registry["code"])
+    original = [(module, module.lora_a, module.lora_b) for module in manager.wrapped.values()]
+
+    def fail_eval(*args):
+        raise RuntimeError("slot allocation failed")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(mx, "eval", fail_eval)
+        with pytest.raises(RuntimeError, match="slot allocation failed"):
+            manager.acquire("code")
+
+    assert all(module.lora_a is a and module.lora_b is b for module, a, b in original)
+    assert manager.status()["resident"] == {str(slot): "sql"}
+    assert manager.status()["counts"]["slot_evictions"] == 0
+    assert manager.acquire("sql") == (slot, "hit")
+    manager.release(slot)
+    assert manager.acquire("code") == (slot, "evicted")
+
+
+def test_failed_wrap_preserves_model_and_retries(adapters, monkeypatch):
+    _, paths = adapters
+    model = tiny_model()
+    manager = MultiLoRAManager(model, max_loras=1, max_lora_rank=8)
+    originals = {key: dict(model.named_modules())[key] for key in KEYS_A}
+
+    def fail_eval(*args):
+        raise RuntimeError("slot allocation failed")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(mx, "eval", fail_eval)
+        with pytest.raises(RuntimeError, match="slot allocation failed"):
+            manager.register("sql", paths["sql"])
+
+    assert not manager.wrapped
+    assert all(dict(model.named_modules())[key] is module for key, module in originals.items())
+    manager.register("sql", paths["sql"])
+    assert manager.acquire("sql")[1] == "loaded"
+
+
+@pytest.mark.parametrize(("metadata", "accepted"), [
+    ({"format": 5}, False), ({"kind": None}, False), ([True], False), (5, False),
+    ({"format": "mlx"}, True), (None, True), (["a", "b"], True), ("mlx", True),
+])
+def test_registration_validates_safetensors_metadata(adapters, metadata, accepted):
+    import json
+
+    _, paths = adapters
+    path = paths["sql"] / "adapters.safetensors"
+    payload = path.read_bytes()
+    data_start = 8 + int.from_bytes(payload[:8], "little")
+    header = json.loads(payload[8:data_start])
+    header["__metadata__"] = metadata
+    encoded = json.dumps(header).encode()
+    encoded += b" " * (-len(encoded) % 8)
+    path.write_bytes(len(encoded).to_bytes(8, "little") + encoded + payload[data_start:])
+
+    manager = MultiLoRAManager(tiny_model(), max_loras=1, max_lora_rank=8)
+    if accepted:
+        manager.register("sql", paths["sql"])
+        assert manager.acquire("sql")[1] == "loaded"
+    else:
+        with pytest.raises(ValueError, match="LoRA safetensors metadata"):
+            manager.register("sql", paths["sql"])
+        assert not manager.wrapped and not manager.registry
+
+
+def test_truncated_adapter_is_refused_before_wrapping(adapters):
+    _, paths = adapters
+    path = paths["sql"] / "adapters.safetensors"
+    path.write_bytes(path.read_bytes()[:-1])
+    manager = MultiLoRAManager(tiny_model(), max_loras=1, max_lora_rank=8)
+    with pytest.raises(ValueError, match="LoRA safetensors"):
+        manager.register("sql", paths["sql"])
+    assert not manager.wrapped and not manager.registry
+
+
 def test_row_binding_mismatch_fails_closed(adapters):
     _, paths = adapters
     model = tiny_model()
@@ -293,6 +376,17 @@ def test_row_binding_mismatch_fails_closed(adapters):
     with pytest.raises(RuntimeError, match="row binding"):
         model(mx.array(PROMPTS[:2]))
     clear_lora_rows(bound)
+
+
+@pytest.mark.parametrize("raw_scale", ["1e309", "NaN", "-1e300"])
+def test_invalid_float32_scale_rejected_at_registration(adapters, raw_scale):
+    _, paths = adapters
+    config = paths["sql"] / "adapter_config.json"
+    config.write_text(config.read_text().replace('"scale": 2.0', f'"scale": {raw_scale}'))
+    manager = MultiLoRAManager(tiny_model(), max_loras=1, max_lora_rank=8)
+    with pytest.raises(ValueError, match="LoRA scale"):
+        manager.register("sql", paths["sql"])
+    assert not manager.registry
 
 
 def test_registration_validation(adapters, tmp_path):

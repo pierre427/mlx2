@@ -946,3 +946,37 @@ def test_winner_features_are_broadcast_without_allocating_loser_slabs():
     np.testing.assert_array_equal(result[1][winner:winner + 1], reference[1])
     assert all(cache is None for i, cache in enumerate(result[2]) if i != winner)
     assert all(rng is None for i, rng in enumerate(result[3]) if i != winner)
+
+
+def test_static_tile_accepts_finite_extreme_selector_logits():
+    paths = ((1, 2), (3, 4), (5, 6), (7, 8))
+    generator, lane = _Generator(paths[-1]), _lane()
+    generator.ast_b1_tile_policy = "four_path15"
+    blocks = _blocks(paths)
+    for path in blocks[0].continuation_selection.paths:
+        path.representative = SimpleNamespace(confidence_features=(-1000.0, 1000.0))
+
+    result = verify_tree_tiles(generator, lane, blocks)
+    winner = _winner(result, paths)
+    serial = verify_tree_tiles(_Generator(paths[-1]), _lane(), _blocks((paths[-1],)))
+    assert result[0][winner].emitted == serial[0][0].emitted == [7, 8, 999]
+    assert result[2][winner] == serial[2][0]
+    assert result[3][winner].snapshot() == serial[3][0].snapshot()
+
+
+def test_trimmed_slate_uses_its_selected_source_prior():
+    # Both selected blocks start with 1. The shorter block was trimmed from
+    # source rank 1, whose high prior should win the only proposal row.
+    paths = ((1, 2, 3), (1, 9), (4, 5))
+    blocks = _blocks(paths, ((0.01,) * 3, (0.9,) * 2, (0.5,) * 2))
+    blocks[1].tokens = [1]
+    for rank, (block, path) in enumerate(zip(blocks, blocks[0].continuation_selection.paths)):
+        path.path_id = f"source-{rank}"
+        block.continuation_ast_provenance = {"rank": rank, "path_id": path.path_id}
+    generator, lane = _Generator((1, 2, 3), tile_rows=2), _lane()
+    lane.ast_tree_source_plan = SimpleNamespace(max_tiles=1, max_tile_rows=2, receipt=lambda: {})
+    result = verify_tree_tiles(generator, lane, blocks)
+    assert generator.calls[0][0] == (0, 1)
+    winner = _winner(result, [block.tokens for block in blocks])
+    assert result[0][winner].emitted == [1, 2]
+    assert result[2][winner] == _state((1001, 1002, 0, 1))

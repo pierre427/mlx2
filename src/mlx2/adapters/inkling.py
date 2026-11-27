@@ -893,8 +893,9 @@ class InklingAdapter(ExternalDraftAdapterMixin):
             "tensorfold_cohort_limit",
             self.external_policy.get("tensorfold_cohort_limit", 4),
         )
-        kwargs.setdefault("target_tree_executor_provider", build_tree_executor(
-            choice, serial=HybridTreeExecutor.create, packed=InklingTreeExecutor.create))
+        if "target_tree_executor_provider" not in kwargs:
+            kwargs["target_tree_executor_provider"] = build_tree_executor(
+                choice, serial=HybridTreeExecutor.create, packed=InklingTreeExecutor.create)
         for key in ("ast_topology", "ast_adaptive_rows", "pairwise_selection"):
             if key in self.external_policy:
                 kwargs.setdefault(key, self.external_policy[key])

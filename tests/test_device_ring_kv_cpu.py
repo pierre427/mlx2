@@ -80,7 +80,8 @@ def test_device_rings_draft_like_rotating_caches(adopt_after, rows_wrapper):
         assert np.array_equal(np.argmax(np.array(la), -1), np.argmax(np.array(lb), -1))
 
 
-def test_rows_past_the_count_are_never_attended():
+@pytest.mark.parametrize("invalid_value", [None, np.nan, np.inf])
+def test_rows_past_the_count_are_never_attended(invalid_value):
     """Garbage in the uncommitted rows of every append changes nothing."""
     _, draft = tiny()
     width = _feature_width(draft)
@@ -93,7 +94,8 @@ def test_rows_past_the_count_are_never_attended():
         for rows, keep in ROUNDS:
             features = r.normal(size=(1, rows, width)).astype(np.float32)
             if poison:
-                features[:, keep:] = rng.normal(scale=1e3, size=features[:, keep:].shape)
+                features[:, keep:] = (rng.normal(scale=1e3, size=features[:, keep:].shape)
+                                      if invalid_value is None else invalid_value)
             block = mx.array([[5, draft.config.mask_token_id, draft.config.mask_token_id]])
             for c in caches:
                 c.pending_count = mx.array([keep], dtype=mx.int32)
@@ -147,6 +149,8 @@ def test_adoption_and_counts_refuse_silent_context_changes():
         DeviceRingKVCache.from_host(KVCache(), window=4, slack=2)
     with pytest.raises(ValueError, match="sliding RotatingKVCache"):
         DeviceRingKVCache.from_host(RotatingKVCache(max_size=8, keep=0), window=4, slack=2)
+    with pytest.raises(ValueError, match="keep=0"):
+        DeviceRingKVCache.from_host(RotatingKVCache(max_size=4, keep=1), window=4, slack=2)
     ring = DeviceRingKVCache(window=3, slack=4)
     k = mx.ones((1, 2, 3, 2))
     with pytest.raises(ValueError, match="committed count"):

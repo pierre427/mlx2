@@ -242,6 +242,9 @@ def validate_tree_policy(policy):
         raise ValueError("Kimi AST prompt-lookup graft must be boolean")
     if policy.get("pairwise_selection", "host") != "host":
         raise ValueError("Kimi AST uses host pairwise selection")
+    from .qwen38_27b import _hybrid_tree_node_budgets
+
+    _hybrid_tree_node_budgets(policy, 4)
     return True
 
 
@@ -505,11 +508,11 @@ class KimiLinearAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
                   "prefill_plan_exact": True,
                   "kimi_speculative_route": self._speculative_route()}
         if self.tree_route:
-            from .qwen38_27b import _tile_node_budgets
+            from .qwen38_27b import _hybrid_tree_node_budgets
 
             config.update(batch_size_route=TREE_ROUTE, dynamic_tree_overflow="chain",
-                          tree_node_budget_by_lanes=_tile_node_budgets(
-                              self.external_policy, 4, None, self.default_ast_tile_rows),
+                          tree_node_budget_by_lanes=_hybrid_tree_node_budgets(
+                              self.external_policy, 4, self.default_ast_tile_rows),
                           ast_target_executor=self.external_policy.get("ast_target_executor", "packed"))
         return config
 
@@ -518,16 +521,17 @@ class KimiLinearAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             from ..runtime.hybrid_tree_executor import HybridTreeExecutor
             from ..runtime.kimi_tree_executor import KimiTreeExecutor
             from ..runtime.technologies.tree_verify import build_tree_executor, tree_executor_choice
-            from .qwen38_27b import _tile_node_budgets
+            from .qwen38_27b import _hybrid_tree_node_budgets
 
             choice = tree_executor_choice(self.external_policy)
             kwargs.setdefault("dynamic_singleton_tree", True)
             kwargs.setdefault("dynamic_tree_max_width", 4)
             kwargs.setdefault("dynamic_tree_overflow", "chain")
-            kwargs.setdefault("target_tree_executor_provider", build_tree_executor(
-                choice, serial=HybridTreeExecutor.create, packed=KimiTreeExecutor.create))
-            kwargs.setdefault("tree_node_budget_by_lanes", _tile_node_budgets(
-                self.external_policy, 4, None, self.default_ast_tile_rows))
+            if "target_tree_executor_provider" not in kwargs:
+                kwargs["target_tree_executor_provider"] = build_tree_executor(
+                    choice, serial=HybridTreeExecutor.create, packed=KimiTreeExecutor.create)
+            kwargs.setdefault("tree_node_budget_by_lanes", _hybrid_tree_node_budgets(
+                self.external_policy, 4, self.default_ast_tile_rows))
             for key in ("ast_topology", "ast_adaptive_rows"):
                 if key in self.external_policy:
                     kwargs.setdefault(key, self.external_policy[key])

@@ -258,6 +258,14 @@ def test_outputs_rng_scores_and_caches_equal_the_switch_off_round(monkeypatch, c
     assert receipt["accepted"] > 0 and receipt["device_round"]["lane"]["device_commit_rounds"] > 0
 
 
+def test_device_commit_one_token_prompt_starts_without_context():
+    off, off_state, off_final, _ = _decode(OFF, prompt=[7], steps=9)
+    on, on_state, on_final, stats = _decode(ON, prompt=[7], steps=9)
+    assert len(on) == 9 and on == off and on_state == off_state
+    _assert_same_finish(off_final, on_final)
+    assert stats["external_device_round_device_commit_rounds"] > 1
+
+
 def test_random_drafter_and_a_longer_prompt():
     # The random drafter accepts almost nothing: one committed row per round.
     off, off_state, off_final, _ = _decode(OFF, prompt=LONG, steps=30)

@@ -76,9 +76,10 @@ class DeviceRingKVCache:
         """
         from ..models.cache import RotatingKVCache
 
-        if type(cache) is not RotatingKVCache or int(cache.max_size) != int(window):
+        if type(cache) is not RotatingKVCache or cache.keep or int(cache.max_size) != int(window):
             raise ValueError(
-                "a device ring adopts only a sliding RotatingKVCache whose max_size is its window"
+                "a device ring adopts only a sliding RotatingKVCache with keep=0 "
+                "whose max_size is its window"
             )
         ring = cls(window, slack)
         length = int(cache.offset)
@@ -127,9 +128,13 @@ class DeviceRingKVCache:
         offsets = mx.arange(rows, dtype=mx.int32)
         absolute = self.pos + offsets
         slots = absolute % self.capacity
-        self.keys[:, :, slots, :] = keys
-        self.values[:, :, slots, :] = values
-        self.slot_pos[slots] = mx.where(offsets < count, absolute, -1)
+        committed = offsets < count
+        # A masked attention weight can still multiply a discarded NaN or
+        # infinity. Keep rejected verify rows out of both operands.
+        keep = committed[None, None, :, None]
+        self.keys[:, :, slots, :] = mx.where(keep, keys, 0)
+        self.values[:, :, slots, :] = mx.where(keep, values, 0)
+        self.slot_pos[slots] = mx.where(committed, absolute, -1)
         self.pos = self.pos + count
         self.bound += rows
         return self.keys, self.values, self.context_mask()

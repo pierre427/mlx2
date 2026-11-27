@@ -14,7 +14,7 @@ import pytest
 
 from mlx2.runtime.hybrid_tree_executor import HybridTreeExecutor
 from mlx2.runtime.hybrid_verify_rows import HybridVerifyRows
-from mlx2.runtime.models.cache import ArraysCache, KVCache
+from mlx2.runtime.models.cache import ArraysCache
 from mlx2.runtime.models.nemotron_tree import NemotronTree
 from mlx2.runtime.nemotron_tree_executor import (
     PROTOCOL,
@@ -627,15 +627,18 @@ def test_bolt_keeps_the_chain():
 def test_a_refused_default_tree_yields_to_the_chain(tmp_path):
     adapter = _tree_default_adapter(tmp_path, {})
     adapter.tree_route = True
-    adapter._resolve_tree_refusal("mamba segment auto")
+    adapter.model = _model()
+    adapter.model.set_short_segment_policy("auto")
+    adapter._validate_tree_executor()
     assert adapter.tree_route is False
     assert "batch_size_route" not in adapter.external_policy
     assert "ast_tile_rows" not in adapter.external_policy
     assert adapter.tree_route_authority == "adapter_default_refused:mamba segment auto"
     operator = _tree_default_adapter(tmp_path, {"batch_size_route": "tree15_b1_chain_b2plus_v1"})
     operator.tree_route_authority = "operator"
+    operator.model = adapter.model
     with pytest.raises(ValueError, match="refused at load"):
-        operator._resolve_tree_refusal("mamba segment auto")
+        operator._validate_tree_executor()
 
 
 def test_feedback_and_physical_target_keep_the_chain(tmp_path):
@@ -690,3 +693,31 @@ def test_default_guarded_handoff_receipt_names_the_adapter(monkeypatch):
     receipt = ExternalDraftBatchGenerator._cost_handoff_receipt(generator, lane)
     assert receipt["defaulted"] is True
     assert receipt["selection_authority"] == "adapter_default_super_tree_guarded"
+
+
+def test_serial_tree_uses_ordinary_mamba_with_a_packed_ineligible_policy(tmp_path):
+    adapter = _tree_default_adapter(tmp_path, {"batch_size_route": "tree15_b1_chain_b2plus_v1",
+                                              "ast_target_executor": "serial"})
+    adapter.tree_route = True
+    adapter.tree_route_authority = "operator"
+    model = _model()
+    model.set_short_segment_policy("auto")
+    refusal = model.tree_policy_refusal(16)
+    assert refusal == "mamba segment auto"
+    adapter.model = model
+    adapter._validate_tree_executor()
+    diagnostics = adapter._tree_verify_diagnostics()
+    assert diagnostics["schema"] == "mlx2.nemotron35-super-tree-verify.v1"
+    assert diagnostics["executor"] == "serial"
+
+    live = _prefilled(model)
+    reference = copy.deepcopy(live)
+    tokens = [1, 2, 3, 4]
+    logits, _, tx = HybridTreeExecutor().forward(model, tokens, [-1, 0, 0, 2], live,
+                                                 CAPTURES, cached=False)
+    path = [0, 2, 3]
+    for index in path:
+        expected, _ = model.forward_with_taps(mx.array([[tokens[index]]]), reference, CAPTURES)
+        _assert_bits(logits[:, index:index + 1], expected)
+    tx.commit_paths([path])
+    _assert_planes_equal(live, reference)

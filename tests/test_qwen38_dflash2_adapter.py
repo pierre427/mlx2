@@ -357,6 +357,12 @@ def test_tensorfold_source_alone_does_not_select_tree(monkeypatch):
     assert adapter.execution_config(max_lanes=4, prefill_step=16)["batch_size_route"] == "tree15_b1_chain_b2plus_v1"
     with pytest.raises(ValueError, match="cannot be overridden"):
         adapter.create_external_batch(dynamic_tree_max_width=4)
+    from mlx2.adapters.qwen38_target_tree_executor import Qwen38TargetTreeExecutor
+
+    monkeypatch.setattr(Qwen38TargetTreeExecutor, "create", lambda: pytest.fail("unused provider"))
+    supplied = object()
+    adapter.create_external_batch(target_tree_executor_provider=supplied)
+    assert calls[-1]["target_tree_executor_provider"] is supplied
 
 
 def test_external_tensorfold_tree_keeps_independent_16_row_geometry(monkeypatch):

@@ -171,6 +171,11 @@ def test_default_format_is_chat_fewshot(tmp_path, monkeypatch):
     (tmp_path / "a").write_bytes(b"a")
     (tmp_path / "b").write_bytes(b"b")
     monkeypatch.setattr(gsm, "load_split", lambda path: train if path.name == "a" else test)
+    from mlx2.generation_trace import GeneratedTokenTrace
+
+    trace = GeneratedTokenTrace()
+    for token in range(9):
+        trace.append(token, 1, None)
     seen = []
 
     class Handler(BaseHTTPRequestHandler):
@@ -191,7 +196,7 @@ def test_default_format_is_chat_fewshot(tmp_path, monkeypatch):
         def do_POST(self):
             seen.append((self.path, json.loads(self.rfile.read(int(self.headers["Content-Length"])))))
             self._send({"choices": [{"message": {"content": "so\n#### 18"}, "finish_reason": "stop"}],
-                        "usage": {"completion_tokens": 9, "prompt_tokens": 40}, "mlx2": {"ttft_seconds": 0.001}})
+                        "usage": {"completion_tokens": 9, "prompt_tokens": 40}, "mlx2": {"ttft_seconds": 0.001, "token_trace": trace.receipt()}})
 
     server = HTTPServer(("127.0.0.1", 0), Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
@@ -199,7 +204,7 @@ def test_default_format_is_chat_fewshot(tmp_path, monkeypatch):
         out = tmp_path / "out"
         assert gsm.main(["--output", str(out), "--base-url", f"http://127.0.0.1:{server.server_port}",
                          "--checkpoint", "M@sha256:" + "0" * 64, "--num-questions", "1",
-                         "--request", '{"enable_thinking": false}']) == 0
+                         "--request", '{"enable_thinking": false, "return_token_trace": true}']) == 0
     finally:
         server.shutdown()
     path, payload = seen[0]
@@ -211,6 +216,7 @@ def test_default_format_is_chat_fewshot(tmp_path, monkeypatch):
     assert receipt["prompt"]["format"] == "chat-fewshot" and receipt["prompt"]["mode"] == "chat 5-shot"
     assert receipt["arms"][0]["summary"]["accuracy"] == 1.0
     row = receipt["arms"][0]["rows"][0]
+    assert payload["return_token_trace"] is True and row["token_ids"] == list(range(9))
     assert row["text"] == "so\n#### 18" and row["finish_reason"] == "stop" and row["test_index"] == 0
     with pytest.raises(SystemExit):
         gsm.main(["--output", str(tmp_path / "o2"), "--base-url", "http://x", "--checkpoint", "M@sha256:0",

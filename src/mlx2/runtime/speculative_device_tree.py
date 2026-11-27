@@ -179,18 +179,21 @@ def engine_reason(owner, cohort):
     return None
 
 
-def _defining_class(cls, name):
-    return next((klass for klass in cls.__mro__ if name in vars(klass)), None)
-
-
 def _twin_overridden(draft):
-    """Whether a host twin named by ``draft_tree_lazy_host_twins`` is defined
-    below the class that defines ``draft_tree_lazy``."""
-    cls = type(draft)
-    owner = _defining_class(cls, "draft_tree_lazy")
+    """A more specific host operation needs its own matching lazy hook."""
+    instance = getattr(draft, "__dict__", {})
+    if "draft_tree_lazy" in instance:
+        return False
     twins = getattr(draft, "draft_tree_lazy_host_twins", ("propose_tree",))
-    return any(_defining_class(cls, twin) not in (None, owner) and issubclass(
-        _defining_class(cls, twin), owner) for twin in twins)
+    if any(name in instance for name in twins):
+        return True
+    for cls in type(draft).__mro__:
+        if "draft_tree_lazy" in vars(cls):
+            return False
+        if any(name in vars(cls) for name in twins):
+            return True
+    # A dynamically forwarded hook has no declared host twin on this owner.
+    return True
 
 
 def run(runtime, owner, cohort):
@@ -259,7 +262,7 @@ class DeviceTree:
         geo = geometry(tuple(block.parents))
         inputs = mx.concatenate([
             mx.array([int(lane.anchor)], dtype=mx.int32),
-            _device_tokens(mx, block.tokens),
+            mx.clip(_device_tokens(mx, block.tokens), 0, owner._target_token_vocab_size - 1),
         ])
         if owner.target_execution == "reference":
             logits, features, transaction = self._reference_forward(owner, lane, inputs, geo)
@@ -291,7 +294,7 @@ class DeviceTree:
             logits.append(row_logits[:, -1:])
             features.append(row_features[:, -1:])
         # The commit replays host tokens; ``decide`` fills them after the read.
-        transaction = _ReferenceTreeTransaction(owner, lane.cache, [], uid=lane.uid)
+        transaction = _ReferenceTreeTransaction(owner, lane.cache, [], geo.paths, uid=lane.uid)
         return mx.concatenate(logits, axis=1), mx.concatenate(features, axis=1), transaction
 
     # -- the decision -----------------------------------------------------------
@@ -326,7 +329,7 @@ class DeviceTree:
             phase("tree_target_wait")
         tokens = ([int(token) for token in np.asarray(block.tokens).tolist()] if lazy
                   else [int(token) for token in block.tokens])
-        vocab = int(logits.shape[-1])
+        vocab = min(owner._target_token_vocab_size, int(logits.shape[-1]))
         if any(not 0 <= token < vocab for token in tokens):
             # Restored by ``_tree_round``; the host round serves it as before.
             raise LazyDecline("draft_outside_vocabulary")
@@ -342,6 +345,8 @@ class DeviceTree:
                 phase("tree_target_law")
             _bump(owner.scheduler_stats, "external_device_tree_decide_lanes")
             self.runtime._lane_count(lane, "tree_decide_rounds")
+        if any(not 0 <= token < vocab for d in decisions for token in d.emitted):
+            raise ValueError("device-tree token outside the vocabulary")
         _bump(owner.scheduler_stats, "external_device_tree_rounds")
         self.runtime._lane_count(lane, "tree_rounds")
         return [host], decisions

@@ -231,6 +231,7 @@ class OutputParser:
     # Template structure dropped from answer text only (never from a tool
     # body or reasoning): Kimi's ``<|tool_calls_section_*|>`` wrapper.
     content_structure_markers = ()
+    quoted_structure_markers = ()
     # The reasoning-channel markers; an adapter whose template spells them
     # otherwise (Hy4's ``<think:S>``/``</think:S>``) overrides only these.
     thinking_open_marker = THINKING_OPEN_MARKER
@@ -367,8 +368,11 @@ class OutputParser:
             self._after_call = False
         if not text.isspace():
             self._shown_text = True
-        events.append({"content": text})
         self._code.feed(text)
+        self._emit_content(events, text)
+
+    def _emit_content(self, events, text):
+        events.append({"content": text})
 
     @property
     def stop_sequence(self):
@@ -602,14 +606,14 @@ class OutputParser:
                 end, marker = min(matches)
                 if end:
                     self._emit(events, self.buffer[:end])
-                if markers[marker] is None:
-                    self._drop_structure_marker(marker)
-                elif (
-                    marker == self.tool_open
+                if (
+                    (marker == self.tool_open or marker in self.quoted_structure_markers)
                     and self.channel == "content"
                     and self._code.in_code()
                 ):
                     self._content(events, marker)  # a quoted example
+                elif markers[marker] is None:
+                    self._drop_structure_marker(marker)
                 else:
                     self.channel = markers[marker]
                     if marker == self.tool_open:

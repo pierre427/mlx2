@@ -465,11 +465,11 @@ class RaonAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
         # 2026-11-27: "pipeline on by default"), unqualified, on the shape
         # it was measured on: draft_model / num_draft / proposal_composition
         # only. DC-6 GPU @46ca23e7b on Raon-1-mini-mlx@sha256:089f6390:
-        # GSM8K100 token-exact against the serial lagged-width round, acc
+        # GSM8K100 at presence penalty 0 matched serial text and lengths, acc
         # 0.95, +12-14 % decode with composition off. lagged_composition is
         # on too (Pierre, 2026-11-27), so the default composed rounds
-        # pipeline: DC-6 full arm GSM8K100 token-exact against the serial
-        # composed round, +9-12 % quiet decode, +1.5 % GSM8K decode. An
+        # pipeline: the composed arms also matched on GSM8K100 at penalty 0.
+        # Quiet decode gained 9-12 % at vendor presence, GSM8K 1.5 %. An
         # explicit device_round (``false`` for the host chain) always wins.
         if DEVICE_ROUND_DEFAULT_SHAPE.issuperset(self.external_policy):
             self.external_policy["device_round"] = dict(DEVICE_ROUND_DEFAULT)

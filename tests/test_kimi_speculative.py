@@ -761,7 +761,7 @@ def test_tensorfold_receipt_follows_the_artifact_layout_and_lane_binding():
 
 KIMI_TREE_MODULES = ("kimi_tree_executor.py", "models/kimi_tree.py", "models/kimi_linear.py",
                      "models/kimi_linear_mla_fused.py", "models/kimi_linear_mla_flash.py",
-                     "models/kimi_linear_fused.py")
+                     "models/kimi_linear_fused.py", "models/flash_tensorfold_qmv.py")
 
 
 def test_packed_tree_revision_binds_every_package_import_of_the_kimi_modules():
@@ -776,6 +776,7 @@ def test_packed_tree_revision_binds_every_package_import_of_the_kimi_modules():
     missing = []
     for name in KIMI_TREE_MODULES:
         path = root / name
+        assert path in bound, f"unbound Kimi tree implementation: {name}"
         for node in ast.walk(ast.parse(path.read_text())):
             if not isinstance(node, ast.ImportFrom) or node.level == 0:
                 continue
@@ -835,3 +836,16 @@ def test_packed_tree_revision_check_rehashes_only_when_a_source_moves(tmp_path, 
     copy_path.write_bytes(copy_path.read_bytes() + b"\n# edit\n")
     with pytest.raises(RuntimeError, match="source changed"):
         executor.validate_revision()
+
+
+@pytest.mark.parametrize("budget", [{"ast_tiles": 2},
+                                    {"tree_node_budget_by_lanes": {"1": 16, "2": 8, "3": 4, "4": 2}}])
+def test_serial_tree_refuses_tiles_above_its_16_row_cap(budget):
+    from mlx2.adapters.kimi_linear import TREE_ROUTE, validate_tree_policy
+
+    policy = {"batch_size_route": TREE_ROUTE, **budget}
+    assert validate_tree_policy({**policy, "ast_target_executor": "packed"})
+    with pytest.raises(ValueError, match="serial.*16"):
+        validate_tree_policy({**policy, "ast_target_executor": "serial"})
+    assert validate_tree_policy({"batch_size_route": TREE_ROUTE, "ast_target_executor": "serial",
+                                 "ast_tiles": 2, "ast_tile_rows": 8})
