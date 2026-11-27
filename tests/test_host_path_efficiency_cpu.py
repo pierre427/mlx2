@@ -326,6 +326,7 @@ def test_real_serving_snapshot_collectors_run_outside_admission_lock():
         "capsule_pool": capsules,
         "batch": SimpleNamespace(scheduler_stats={"rounds": 1}),
         "segmented_self_mtp_stats": lambda: checked("mtp", {}),
+        "ragged_roll_counts": lambda: checked("ragged_roll", {}),
         "mx": SimpleNamespace(
             get_active_memory=lambda: checked("active", 0),
             get_peak_memory=lambda: checked("peak", 0),
@@ -349,7 +350,7 @@ def test_real_serving_snapshot_collectors_run_outside_admission_lock():
         ),
         ns,
     )
-    assert len(calls) == 10
+    assert len(calls) == 11
     capsules.counters["bytes"] = 9
     assert self.snapshot["cache_capsules"] == {"bytes": 4}
     assert self.snapshot["old"] is True

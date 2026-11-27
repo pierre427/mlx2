@@ -866,6 +866,45 @@ def deferred_commit_counts(reset: bool = False) -> Dict[str, int]:
     return out
 
 
+# Slab (shared-cursor) ragged-trim counters, process-wide. A residual rewind
+# rolls each row's ``[0, _idx)`` K/V window, so its cost grows with context;
+# segmented caches rewind per row with a cursor move and never count here.
+_RAGGED_ROLL_COUNTS: Dict[str, int] = {}
+
+
+def _ragged_roll_count(key: str, amount: int = 1) -> None:
+    _RAGGED_ROLL_COUNTS[key] = _RAGGED_ROLL_COUNTS.get(key, 0) + int(amount)
+
+
+def _note_ragged_trim(cache, residual, width: int) -> None:
+    """Count one slab ``trim_ragged``: cursor-only or a K/V window roll.
+
+    ``width`` is the rolled window (columns); ``bytes`` estimates the K+V
+    bytes the gather reads, from the stored arrays' per-column size.
+    """
+    if residual is None or max(residual) == 0:
+        _ragged_roll_count("cursor_only_trims")
+        return
+    _ragged_roll_count("roll_calls")
+    _ragged_roll_count("rows_rolled", sum(1 for r in residual if r))
+    _ragged_roll_count("window_columns", width)
+    total = 0
+    for leaf in tree_flatten([cache.keys, cache.values]):
+        array = leaf[1] if isinstance(leaf, tuple) else leaf
+        if isinstance(array, mx.array) and array.ndim >= 3 and array.shape[2]:
+            total += array.nbytes * width // array.shape[2]
+    _ragged_roll_count("bytes", total)
+
+
+def ragged_roll_counts(reset: bool = False) -> Dict[str, int]:
+    """Slab ragged-trim counters (roll_calls, rows_rolled, window_columns,
+    bytes, cursor_only_trims)."""
+    out = dict(sorted(_RAGGED_ROLL_COUNTS.items()))
+    if reset:
+        _RAGGED_ROLL_COUNTS.clear()
+    return out
+
+
 def _state_checkpoint_max() -> int:
     """Max recorded state checkpoints per ArraysCache (0 disables)."""
     try:
@@ -4058,6 +4097,7 @@ class BatchQuantizedKVCache(_BaseCache):
         if uniform:
             self._idx -= uniform
             self.offset -= uniform
+        _note_ragged_trim(self, residual, self._idx)
         if max(residual) > 0:
             shifts = mx.array(residual)
             if self.keys is not None:
@@ -4855,6 +4895,7 @@ class BatchKVCache(_BaseCache):
         if uniform:
             self._idx -= uniform
             self.offset -= uniform
+        _note_ragged_trim(self, residual, self._idx)
         if max(residual) > 0:
             shifts = mx.array(residual)
             floor = [p + r for (p, r) in zip(self._padding_floor(), residual)]

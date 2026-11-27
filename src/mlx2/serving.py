@@ -11950,6 +11950,7 @@ class ServingEngine(KernelReloadMixin):
                 draw_key,
             )
             from .runtime.segmented_self_mtp import segmented_self_mtp_stats
+            from .runtime.models.cache import ragged_roll_counts
             from .memory_preemption import (
                 choose_preemption_victim,
                 decode_replay_block,
@@ -14158,6 +14159,7 @@ class ServingEngine(KernelReloadMixin):
                     "approximate_kv": approximate_status,
                     "scheduler": dict(batch.scheduler_stats),
                     "segmented_self_mtp": segmented_self_mtp_stats(),
+                    "slab_ragged_roll": ragged_roll_counts(),
                     "round_probe": _round_probe_status(),
                     "technologies": _technology_counters(),
                     "spomin_live_surgery": (
@@ -18359,6 +18361,7 @@ class ServingEngine(KernelReloadMixin):
                             ),
                             "scheduler": dict(batch.scheduler_stats),
                             "segmented_self_mtp": segmented_self_mtp_stats(),
+                            "slab_ragged_roll": ragged_roll_counts(),
                             "round_probe": _round_probe_status(),
                             "technologies": _technology_counters(),
                             "metal_active_bytes": mx.get_active_memory(),
