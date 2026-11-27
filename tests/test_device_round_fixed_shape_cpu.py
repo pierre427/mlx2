@@ -259,3 +259,143 @@ def test_every_switch_is_either_compatible_or_refused():
     refused = set()
     unknown = set(_SWITCHES) - compatible - refused
     assert not unknown, f"classify new device_round switches for fixed_shape: {sorted(unknown)}"
+
+
+# --- Drafter padding (2026-11-27). The 1a-5c GPU check (qualification/runs/specround-1a5c-
+# 20261127/) found the remaining P6b variation was the drafter's block width on budget-limited
+# rounds (depth min(num_draft, budget) < menu). Under fixed_shape those rounds now draft a full
+# menu block (``pad_to``); the proposals stay the first ``depth`` tokens.
+
+
+def _drafter_widths(monkeypatch, steps, policy):
+    """Block widths of every lazy draft (anchor + mask rows) the runner asks the drafter for."""
+    from mlx2.runtime.drafters import dflash2
+
+    seen = []
+    original = dflash2._draft_lazy
+
+    def spy(self, anchor, hidden, cache, proposal_length, *args, pad_to=None, **kwargs):
+        out = original(self, anchor, hidden, cache, proposal_length, *args, pad_to=pad_to,
+                       **kwargs)
+        seen.append(int(out.shape[0]) + 1)
+        return out
+
+    monkeypatch.setattr(dflash2.DFlash2DraftModel, "draft_lazy", spy)
+    tokens, stats = _decode(steps=steps, device_round=policy)
+    return seen, tokens, stats
+
+
+@pytest.mark.parametrize("steps", [7, 9, 12, 16])
+def test_budget_limited_rounds_draft_a_full_menu_block(monkeypatch, steps):
+    fixed, fix_tokens, stats = _drafter_widths(monkeypatch, steps, FIXED)
+    var, var_tokens, var_stats = _drafter_widths(monkeypatch, steps, BOTH)
+    model, draft = tiny()
+    batch = generator(model, draft)
+    menu = int(batch.num_draft)
+    batch.close()
+    assert fixed and set(fixed) == {menu + 1}
+    assert fix_tokens == var_tokens
+    assert list(stats["_rng"].values()) == list(var_stats["_rng"].values())
+    short = sum(width < menu + 1 for width in var)
+    assert short == stats["external_device_round_fixed_shape_padded_drafts"]
+    assert "external_device_round_fixed_shape_padded_drafts" not in var_stats
+    # Every padded draft was verified at the menu width (no skip took it).
+    assert stats["external_device_round_fixed_shape_rounds"] == stats["external_device_round_rounds"]
+    assert stats[FIXED_SHAPE_SKIPS] == {}
+
+
+@pytest.mark.parametrize("steps", [7, 12])
+def test_padded_fixed_round_equals_the_unpadded_fixed_round(monkeypatch, steps):
+    from mlx2.runtime.speculative_device_round import DeviceRound
+
+    padded, padded_stats = _decode(steps=steps, device_round=FIXED)
+    monkeypatch.setattr(DeviceRound, "_pad_depth", lambda self, owner, lane, depth: None)
+    plain, plain_stats = _decode(steps=steps, device_round=FIXED)
+    assert padded == plain
+    assert list(padded_stats["_rng"].values()) == list(plain_stats["_rng"].values())
+    assert padded_stats["external_device_round_fixed_shape_padded_drafts"] > 0
+    assert plain_stats["external_device_round_fixed_shape_padded_drafts"] == 0
+
+
+def test_padded_rounds_with_presence_and_composition_equal_the_variable_round():
+    for steps in (7, 11):
+        var, var_rng, _ = _decode_processed(steps=steps, make=_presence_make, device_round=PROC)
+        fix, fix_rng, stats = _decode_processed(steps=steps, make=_presence_make,
+                                                device_round=PROC_FIXED)
+        assert fix == var and fix_rng == var_rng
+        assert stats["external_device_round_fixed_shape_padded_drafts"] > 0
+        var, var_state, _ = _decode_composed(steps=steps, device_round=BOTH)
+        fix, fix_state, stats = _decode_composed(steps=steps, device_round=FIXED)
+        assert fix == var and fix_state == var_state
+        assert stats["external_device_round_fixed_shape_padded_drafts"] > 0
+
+
+def _presence_make(prompt):
+    from mlx2.runtime.sample_utils import make_logits_processors
+
+    return make_logits_processors(presence_penalty=1.5, presence_context_size=20,
+                                  penalty_generation_start=len(prompt))
+
+
+@pytest.mark.parametrize("processed", [False, True])
+def test_draft_lazy_pad_to_contract(processed):
+    """``pad_to`` returns a menu block, consumes the unpadded uniforms, and is a no-op when
+    the proposal is already that long."""
+    from mlx2.runtime.speculative_sampling import RequestRNG
+
+    _, draft = tiny()
+    extra = {}
+    if processed:
+        extra = {"logits_processors": _presence_make([1, 2, 3]), "processor_history": [1, 2, 3]}
+    hidden = mx.random.normal((1, 5, draft.config.hidden_size * len(draft.config.target_layer_ids)),
+                              key=mx.random.key(3))
+    for depth in (1, 2, 3):
+        rng_a, rng_b = RequestRNG(7), RequestRNG(7)
+        plain = draft.draft_lazy(4, hidden, draft.make_cache(), depth, rng=rng_a, **extra)
+        padded = draft.draft_lazy(4, hidden, draft.make_cache(), depth, rng=rng_b, pad_to=4,
+                                  **extra)
+        assert padded.shape == (4,) and padded.dtype == mx.int32
+        assert rng_a.snapshot() == rng_b.snapshot()
+        assert all(0 <= int(t) for t in padded.tolist()[:depth])
+        rng_c = RequestRNG(7)
+        same = draft.draft_lazy(4, hidden, draft.make_cache(), depth, rng=rng_c, pad_to=depth,
+                                **extra)
+        assert same.tolist() == plain.tolist()
+
+
+def test_pairwise_walk_steps_mark_each_invalid_position():
+    from mlx2.runtime.drafters.dflash2 import pairwise_walk
+
+    rng = np.random.default_rng(5)
+    candidates = mx.array(rng.integers(0, 50, (2, 4, 3)), dtype=mx.int32)
+    scores = rng.normal(size=(2, 4, 3, 3)).astype(np.float32)
+    scores[0, 2] = np.nan
+    scores[1, 3] = -np.inf
+    uniforms = rng.uniform(size=(2, 4)).tolist()
+    tokens, laws, invalid = pairwise_walk(candidates, mx.array(scores), uniforms, [0.0, 0.0])
+    t2, l2, i2, steps = pairwise_walk(candidates, mx.array(scores), uniforms, [0.0, 0.0],
+                                      steps=True)
+    assert tokens.tolist() == t2.tolist() and invalid.tolist() == i2.tolist()
+    assert steps.tolist() == [[False, False, True, False], [False, False, False, True]]
+    assert mx.any(steps, axis=1).tolist() == invalid.tolist()
+
+
+@pytest.mark.parametrize("bad, depth, invalid", [(3, 2, False), (1, 2, True), (0, 4, True)])
+def test_only_real_positions_mark_a_padded_draft_invalid(monkeypatch, bad, depth, invalid):
+    """A NaN pair-score row at a padded position never invalidates the draft (-1 tokens);
+    one at a real position still does, padded or not."""
+    _, draft = tiny()
+    original = type(draft).pairwise_score_table
+
+    def poisoned(self, anchors, features, candidates, unary):
+        scores = original(self, anchors, features, candidates, unary)
+        position = mx.arange(scores.shape[1]).reshape(1, -1, 1, 1) == bad
+        return mx.where(position, mx.array(float("nan"), dtype=scores.dtype), scores)
+
+    monkeypatch.setattr(type(draft), "pairwise_score_table", poisoned)
+    hidden = mx.random.normal((1, 5, draft.config.hidden_size * len(draft.config.target_layer_ids)),
+                              key=mx.random.key(11))
+    padded = draft.draft_lazy(4, hidden, draft.make_cache(), depth, pad_to=4)
+    assert (min(padded.tolist()[:depth]) == -1) is invalid
+    if depth == 4:  # pad_to equal to the depth: the same masked graph, every position real
+        assert padded.tolist() == [-1] * 4

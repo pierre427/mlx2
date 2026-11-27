@@ -871,3 +871,34 @@ def test_clean_dispatches_ignores_leftover_bindings():
     ]
     # Dispatch 0 does not read 11, so the later write does not make it unclean.
     assert round_probe.clean_dispatches(table, kernels, reflection) == [0, 1]
+
+
+def test_recording_reflection_follows_the_recordings_kernel_order(monkeypatch, tmp_path):
+    """``pipelines`` in a recording follows ``summary["kernels"]``, not the native table's
+    hash-map order (2026-11-27: indexing the old order by ``dispatch["pipeline"]`` swapped
+    kernel names between rounds)."""
+    import json
+    import types
+
+    class Handle:
+        def summary(self):
+            return {"kernels": ["copy", "sort", "gemv"]}
+
+        def dispatch_table(self):
+            return [{"pipeline": 1, "slots": []}, {"pipeline": 0, "slots": []}]
+
+    native = types.SimpleNamespace(
+        pipelines=lambda: [{"function": "gemv"}, {"function": "unused"}, {"function": "sort"},
+                           {"function": "copy"}],
+        compare_recordings=lambda a, b: "same", gpu_identity=lambda: "fake", MLX_VERSION="0",
+        CAPABILITIES=())
+    monkeypatch.setattr(round_probe, "_native", native)
+    monkeypatch.setitem(round_probe._record, "dir", str(tmp_path))
+    monkeypatch.setitem(round_probe._record, "written", 0)
+    monkeypatch.setitem(round_probe._record, "errors", [])
+    monkeypatch.setitem(round_probe._record, "previous", None)
+    monkeypatch.setattr(round_probe, "_flag_ab_indices", lambda: ())
+    round_probe._write_recording("r", Handle(), 0.0)
+    assert round_probe._record["errors"] == []
+    doc = json.loads(next(tmp_path.glob("round-*.json")).read_text())
+    assert [p["function"] for p in doc["pipelines"]] == doc["summary"]["kernels"]

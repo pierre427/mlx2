@@ -67,6 +67,8 @@ FEATURES = (
     "device_round.pipeline",
     # 2026-11-26: the shared read width (DC-5 fix) and Raon's NAX absorbed decode levers.
     "device_round.lagged_width", "mla_decode_nax_absorbed", "mla_decode_nax_absorbed_packed",
+    # DC-6 (2026-11-26): lagged proposal-composition planning under the pipeline.
+    "device_round.lagged_composition",
     # Raon-1-mini levers (2026-11-25): merged decode projections, fused mHC sites.
     "merged_projections", "mhc_fused", "mla_flash_expanded", "moe_nax_gather_affine",
     # Hy4-flash (2026-11-18): embedded DFly2 drafter, chain-packed AST executor.

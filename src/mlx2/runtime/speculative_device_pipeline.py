@@ -289,7 +289,8 @@ def _stop_aware_count(owner, plan, drafts, count):
     mx = owner.mx
     accepted = plan.accepted.reshape(())
     index = mx.arange(count + 1, dtype=mx.int32)
-    padded = mx.concatenate([drafts.reshape(-1).astype(mx.int32), mx.zeros((1,), dtype=mx.int32)])
+    padded = mx.concatenate([drafts.reshape(-1)[:count].astype(mx.int32),
+                             mx.zeros((1,), dtype=mx.int32)])
     emitted = mx.where(index < accepted, padded, plan.last.reshape(()))
     stops = sorted(int(t) for t in owner.stops)
     used = accepted + 1
@@ -340,18 +341,29 @@ def dispatch(device_round, owner, lane, depth, anchor=None, inflight_rows=None, 
             extra.update(planning_anchor=int(lane.anchor), planning_history=list(lane.history),
                          proposal_score_state=lane.proposal_score_counts,
                          proposal_trust_state=lane.proposal_trust_states, cohort_width=1)
+        pad_block = (getattr(device_round, "fixed_shape", False) and depth <= int(owner.num_draft)
+                     and getattr(owner.draft, "draft_lazy_pad", False))
+        if pad_block:
+            # The serial fixed-shape round's drafter graph (``DeviceRound._pad_depth``;
+            # a pipelined round is full depth, so nothing is padded off).
+            extra = dict(extra or {})
+            extra["pad_to"] = int(owner.num_draft)
         drafts = owner.draft.draft_lazy(anchor_array, lane.tail, lane.draft_cache, depth, None,
                                         **(extra or {}))
         composition = device_round._composition_row(owner.draft) if composed else None
         drafts = drafts.reshape(-1).astype(mx.int32)
         count = int(drafts.shape[0])
+        if pad_block:
+            # The proposals are the first ``depth`` (a composed backend's cap included).
+            count = depth if not composed else min(depth, int(owner.draft.backend_proposal_length))
         fixed = getattr(device_round, "fixed_shape", False)
         menu = int(owner.num_draft)
         if fixed and count > menu:
             raise RuntimeError("a pipelined round drafted past the fixed-shape menu")
         rows = menu + 1 if fixed else count + 1
-        padded = (mx.concatenate([drafts, mx.zeros((rows - 1 - count,), dtype=mx.int32)])
-                  if rows - 1 > count else drafts)
+        drafted = int(drafts.shape[0])  # ``count``, or the menu block when padded
+        padded = (mx.concatenate([drafts, mx.zeros((rows - 1 - drafted,), dtype=mx.int32)])
+                  if rows - 1 > drafted else drafts)
         inputs = mx.concatenate([anchor_array, padded])[None]
         transaction = DeviceCommitTransaction(lane.cache, [rows], lagged=True)
         set_read_base(lane, lagged_base(lane, inflight_rows))

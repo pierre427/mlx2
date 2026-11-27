@@ -782,7 +782,7 @@ class ComposedDraftModel:
     def draft_lazy(self, anchor, hidden, cache, proposal_length, sampler=None, *, rng=None,
                    logits_processors=None, processor_history=None,
                    proposal_score_state=None, proposal_trust_state=None, cohort_width=1,
-                   planning_anchor=None, planning_history=None):
+                   planning_anchor=None, planning_history=None, pad_to=None):
         """One composed lane's drafts, lazily, when its row selects ``external``.
 
         The same host planning (``_plan_rows``: committed scores, a fresh
@@ -800,6 +800,10 @@ class ComposedDraftModel:
         are still on the device) while the backend drafts from ``anchor``.
         ``processor_history`` may then be a device history, passed to the
         backend as is.
+
+        ``pad_to`` (``device_round.fixed_shape``): planned at ``proposal_length``
+        as always; the backend drafts a ``pad_to`` block (its ``draft_lazy_pad``)
+        of which the first ``plan.backend_length`` tokens are the proposals.
         """
         backend_lazy = getattr(self.backend, "draft_lazy", None)
         if not callable(backend_lazy):
@@ -827,6 +831,8 @@ class ComposedDraftModel:
             extra.update(logits_processors=logits_processors,
                          processor_history=(processor_history if device_history
                                             else list(processor_history or ())))
+        if pad_to is not None:
+            extra["pad_to"] = pad_to
         tokens = backend_lazy(anchor, hidden, cache, plan.backend_length, sampler, **extra)
         # An external row's tokens are never read by the bookkeeping; the
         # backend publishes no lazy confidence features.

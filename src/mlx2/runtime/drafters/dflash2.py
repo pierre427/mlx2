@@ -800,7 +800,7 @@ def pairwise_score_table(self, anchors, features, candidates, unary):
     ).astype(mx.float32)
 
 
-def pairwise_walk(candidates, scores, uniforms, temperatures):
+def pairwise_walk(candidates, scores, uniforms, temperatures, *, steps=False):
     """Sample a whole block from a pair-score table with pre-drawn uniforms.
 
     Pure mx ops (the reference any fused kernel must match).  Per row and
@@ -808,7 +808,9 @@ def pairwise_walk(candidates, scores, uniforms, temperatures):
     inverse CDF with ``searchsorted(side="right")``; ``t == 0`` is the argmax
     one-hot law and still consumes its uniform.  Returns ``(tokens [B,K]
     int32, cand_q [B,K,C] f32, invalid [B] bool)``; ``invalid`` marks rows
-    whose walked scores the sequential softmax would reject.
+    whose walked scores the sequential softmax would reject.  ``steps``
+    also returns ``[B,K]`` bool: whether each position's walked row is
+    invalid (the same test, not accumulated).
     """
     batch, length, count = candidates.shape
     temperatures = mx.array(temperatures, dtype=mx.float32).reshape(batch, 1)
@@ -823,15 +825,17 @@ def pairwise_walk(candidates, scores, uniforms, temperatures):
     selected = mx.zeros((batch,), dtype=mx.int32)
     tokens, laws = [], []
     invalid = mx.zeros((batch,), dtype=mx.bool_)
+    flags = []
     for position in range(length):
         row = mx.take_along_axis(
             scores[:, position],
             mx.broadcast_to(selected[:, None, None], (batch, 1, count)),
             axis=1,
         )[:, 0]
-        invalid = invalid | mx.any(mx.isnan(row), axis=-1) | ~mx.any(
-            mx.isfinite(row), axis=-1
-        )
+        bad = mx.any(mx.isnan(row), axis=-1) | ~mx.any(mx.isfinite(row), axis=-1)
+        invalid = invalid | bad
+        if steps:
+            flags.append(bad)
         best = mx.argmax(row, axis=-1).astype(mx.int32)
         one_hot = (columns == best[:, None]).astype(mx.float32)
         x = row / safe
@@ -850,6 +854,8 @@ def pairwise_walk(candidates, scores, uniforms, temperatures):
                 :, 0
             ]
         )
+    if steps:
+        return mx.stack(tokens, axis=1), mx.stack(laws, axis=1), invalid, mx.stack(flags, axis=1)
     return mx.stack(tokens, axis=1), mx.stack(laws, axis=1), invalid
 
 
@@ -931,7 +937,7 @@ DRAFT_LAZY_HOST_REDO = -2
 
 
 def _draft_lazy(self, anchor, hidden, cache, proposal_length, sampler=None, *, rng=None,
-                logits_processors=None, processor_history=None):
+                logits_processors=None, processor_history=None, pad_to=None):
     """One lane's greedy drafts as a lazy int32 ``[n]`` array, no host read.
 
     ``speculative_device_round`` ``lazy_draft`` (default off, unqualified).
@@ -960,12 +966,29 @@ def _draft_lazy(self, anchor, hidden, cache, proposal_length, sampler=None, *, r
     Greedy and one lane only: the device round declines sampled lanes
     (``draft_lazy_greedy_only``) and cohorts wider than one
     (``draft_lazy_width_one``) before calling this.
+
+    ``pad_to`` (``device_round.fixed_shape``, slice 1a-5; ``draft_lazy_pad``):
+    draft a block of ``pad_to >= proposal_length`` positions (shorter on a
+    budget-limited round), so the drafter runs at the menu width, through one
+    masked graph whatever the proposal length.  The
+    result has ``pad_to`` tokens; only the first ``proposal_length`` are
+    proposals.  The RNG gives up ``proposal_length`` uniforms, as unpadded,
+    and only those positions can mark the draft invalid or host-redo.  The
+    drafter attends over its whole block (``is_causal`` false), so the
+    proposals themselves may differ from an unpadded block's: a padded round
+    is exact greedy verification of different drafts, not the same drafts.
     """
     if sampler is not None:
         raise ValueError("DFlash2 lazy drafts are greedy only (no drafting sampler)")
     count = int(proposal_length)
     if count < 1:
         raise ValueError("DFlash2 lazy drafts need a positive proposal length")
+    real = None
+    if pad_to is not None:
+        # One graph for every fixed-shape round, full-depth ones included.
+        if int(pad_to) < count:
+            raise ValueError("DFlash2 lazy drafts cannot pad below the proposal length")
+        real, count = count, int(pad_to)
     if hidden.shape[0] != 1:
         raise ValueError("DFlash2 lazy drafts run one lane at a time")
     # A device anchor (``device_round.pipeline``: the previous round's
@@ -983,16 +1006,24 @@ def _draft_lazy(self, anchor, hidden, cache, proposal_length, sampler=None, *, r
     if logits_processors:
         return _draft_lazy_processed(
             self, anchors, features, logits, candidates, count, rng,
-            logits_processors, processor_history,
+            logits_processors, processor_history, real=real,
         )
     scores = self.pairwise_score_table(anchors, features, candidates, unary)
-    uniforms = [[rng.uniform() if rng is not None else 0.0 for _ in range(count)]]
-    tokens, _laws, invalid = pairwise_walk(candidates, scores, uniforms, [0.0])
-    return mx.where(invalid[0], mx.full((count,), -1, dtype=mx.int32), tokens[0].astype(mx.int32))
+    if real is None:
+        uniforms = [[rng.uniform() if rng is not None else 0.0 for _ in range(count)]]
+        tokens, _laws, invalid = pairwise_walk(candidates, scores, uniforms, [0.0])
+        return mx.where(invalid[0], mx.full((count,), -1, dtype=mx.int32),
+                        tokens[0].astype(mx.int32))
+    uniforms = [[rng.uniform() if rng is not None and position < real else 0.0
+                 for position in range(count)]]
+    tokens, _laws, _invalid, steps = pairwise_walk(candidates, scores, uniforms, [0.0], steps=True)
+    # Fixed shape: the real positions as a host-built mask, not a slice.
+    invalid = mx.any(steps[0] & mx.array([position < real for position in range(count)]))
+    return mx.where(invalid, mx.full((count,), -1, dtype=mx.int32), tokens[0].astype(mx.int32))
 
 
 def _draft_lazy_processed(self, anchors, features, logits, candidates, count, rng,
-                          processors, history):
+                          processors, history, *, real=None):
     """The processed greedy loop of ``_draft_distributions`` for one lane, lazily."""
     from ..processor_probe import probe_logits_processors
 
@@ -1030,8 +1061,13 @@ def _draft_lazy_processed(self, anchors, features, logits, candidates, count, rn
             excluded = mx.isinf(scores) & (scores < 0)
             capped = cap_selector_scores(scores.astype(mx.float32), post_cap).astype(mx.float32)
             scores = mx.where(excluded, mx.array(-float("inf"), dtype=mx.float32), capped)
-        redo = redo | ~mx.any(mx.isfinite(scores)) | mx.any(mx.isnan(scores))
-        if rng is not None:
+        bad = ~mx.any(mx.isfinite(scores)) | mx.any(mx.isnan(scores))
+        if real is None:
+            redo = redo | bad
+        else:
+            # Padded (``pad_to``): only real positions redo; same ops per position.
+            redo = redo | (bad & mx.array(position < real))
+        if rng is not None and (real is None or position < real):
             rng.uniform()  # ``rng.sample(one-hot)`` draws one uniform per position
         token = mx.take(candidates[0, position], mx.argmax(scores)).astype(mx.int32)
         drafted.append(token)
@@ -1045,6 +1081,7 @@ DFlash2DraftModel.draft_lazy_consumes_rng = True
 DFlash2DraftModel.draft_lazy_greedy_only = True
 DFlash2DraftModel.draft_lazy_width_one = True
 DFlash2DraftModel.draft_lazy_processors = True
+DFlash2DraftModel.draft_lazy_pad = True
 
 
 def tree_codebooks(self):

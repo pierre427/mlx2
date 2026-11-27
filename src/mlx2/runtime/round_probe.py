@@ -500,8 +500,13 @@ def _write_recording(route, handle, started):
     try:
         summary = handle.summary()
         table = handle.dispatch_table()
-        kernels = set(summary.get("kernels") or [])
-        reflection = [p for p in _native.pipelines() if p.get("function") in kernels]
+        # ``pipelines`` is reflection looked up by function name, in the order of
+        # ``summary["kernels"]``. It is not indexed by ``dispatch["pipeline"]``: name
+        # the dispatch with ``summary["kernels"][dispatch["pipeline"]]`` (two pipelines
+        # can share a name, and an unreflected one has no entry here).
+        order = {name: i for i, name in reversed(list(enumerate(summary.get("kernels") or [])))}
+        reflection = sorted((p for p in _native.pipelines() if p.get("function") in order),
+                            key=lambda p: order[p.get("function")])
         index = _record["written"]
         path = Path(_record["dir"]) / f"round-{os.getpid()}-{index:04d}.json"
         previous = _record.get("previous")

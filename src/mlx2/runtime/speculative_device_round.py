@@ -148,7 +148,8 @@ DEVICE_COMMIT_COUNTERS = (
 )
 DEVICE_COMMIT_SKIPS = "external_device_round_device_commit_skips"
 # Installed only when ``fixed_shape`` is on.
-FIXED_SHAPE_COUNTERS = ("external_device_round_fixed_shape_rounds",)
+FIXED_SHAPE_COUNTERS = ("external_device_round_fixed_shape_rounds",
+                        "external_device_round_fixed_shape_padded_drafts")
 FIXED_SHAPE_SKIPS = "external_device_round_fixed_shape_skips"
 
 
@@ -304,6 +305,24 @@ class DeviceRound:
             skips[reason] = skips.get(reason, 0) + len(cohort)
             return None
         return menu + 1
+
+    def _pad_depth(self, owner, lane, depth):
+        """The menu block a ``fixed_shape`` lazy draft runs at, or None.
+
+        Every depth up to the menu (a budget-limited round drafts the same block
+        and keeps its first ``depth`` tokens), for a drafter that pads
+        (``draft_lazy_pad``) and a lane the fixed width will serve (greedy;
+        presence-window processors only), so a padded draft is never verified at
+        a variable width."""
+        menu = int(owner.num_draft)
+        if not self.fixed_shape or depth > menu:
+            return None
+        if not getattr(owner.draft, "draft_lazy_pad", False) or _temperature(lane) > 0:
+            return None
+        if any(getattr(p, "presence_window", None) is None
+               for p in getattr(lane, "processors", None) or ()):
+            return None
+        return menu
 
     def abort_pipeline(self, owner, uids=None):
         """Discard an unread pipelined round (DC-5) of these lanes (all: None)."""
@@ -622,6 +641,9 @@ class DeviceRound:
                         extra.update(logits_processors=lane.processors,
                                      processor_history=list(lane.history))
                     composed = getattr(owner.draft, "draft_lazy_composed", False)
+                    pad = self._pad_depth(owner, lane, draft_depth)
+                    if pad is not None:
+                        extra["pad_to"] = pad
                     if composed:
                         # The executor-owned lane states ``_propose`` passes.
                         extra.update(processor_history=list(lane.history),
@@ -639,6 +661,18 @@ class DeviceRound:
                         error.failed_uids = (lane.uid,)
                     raise
                 drafts = drafts.reshape(-1).astype(mx.int32)
+                count = int(drafts.shape[0])
+                if pad is not None:
+                    # The proposals are the first ``depth`` (a composed backend's
+                    # own cap included: ``plan.backend_length``, equal because
+                    # ``_serve`` declines ``composition_long_copies``); the rest
+                    # pads the drafter's block.
+                    count = draft_depth if not composed else min(
+                        draft_depth, int(owner.draft.backend_proposal_length))
+                    if count < int(drafts.shape[0]):
+                        _bump(owner.scheduler_stats,
+                              "external_device_round_fixed_shape_padded_drafts")
+                        self._lane_count(lane, "fixed_shape_padded_drafts")
                 if self.policy is not None and self.policy.submit_drafts:
                     # Start the drafter on the device while the host builds
                     # the verify graph (no host read; the same graph).
@@ -648,7 +682,7 @@ class DeviceRound:
                     q = mx.concatenate(recorded, axis=0)
                 rows.append(SimpleNamespace(
                     # A composed backend may draft fewer than the round depth.
-                    lane=lane, count=int(drafts.shape[0]), host=None, drafts=drafts, q=q,
+                    lane=lane, count=count, host=None, drafts=drafts, q=q,
                     composition=composition,
                     source="device_round", seed=seed, ratio=ratio, keys=None,
                 ))
@@ -663,11 +697,15 @@ class DeviceRound:
             fixed = self._fixed_width(owner, cohort, rows) if self.fixed_shape else None
             if fixed is not None:
                 width = fixed
+            else:
+                for row in rows:
+                    if row.source != "prompt_copy" and int(row.drafts.shape[0]) > row.count:
+                        row.drafts = row.drafts[: row.count]  # padded, but not fixed width
             inputs = mx.stack([
                 mx.concatenate([
                     mx.array([int(row.lane.anchor)], dtype=mx.int32),
                     row.drafts,
-                    mx.zeros((width - row.count - 1,), dtype=mx.int32),
+                    mx.zeros((width - int(row.drafts.shape[0]) - 1,), dtype=mx.int32),
                 ])
                 for row in rows
             ])
@@ -940,8 +978,9 @@ class DeviceRound:
         if not processors:
             return values
         drafts = row.drafts.reshape(-1).astype(mx.int32)
-        if count < menu:
-            drafts = mx.concatenate([drafts, mx.zeros((menu - count,), dtype=mx.int32)])
+        if int(drafts.shape[0]) < menu:  # a padded draft (``pad_to``) is menu long already
+            drafts = mx.concatenate([drafts, mx.zeros((menu - int(drafts.shape[0]),),
+                                                      dtype=mx.int32)])
         history = getattr(row, "device_history", None)
         if history is not None:
             # A pipelined round's history is partly on the device (DC-6).
@@ -993,8 +1032,9 @@ class DeviceRound:
             logp = values - norms[:, None]
             plan.response = [logp[j] for j in range(count + 1)]
         drafts = row.drafts.reshape(-1).astype(int32)
-        if count < menu:
-            drafts = mx.concatenate([drafts, mx.zeros((menu - count,), dtype=int32)])
+        if int(drafts.shape[0]) < menu:
+            drafts = mx.concatenate([drafts, mx.zeros((menu - int(drafts.shape[0]),),
+                                                      dtype=int32)])
         matches = (drafts == selected[:menu]) & (mx.arange(menu) < count)
         accepted = mx.sum(mx.cumprod(matches.astype(int32))).astype(int32)
         last = mx.take(selected, accepted.reshape(1))
