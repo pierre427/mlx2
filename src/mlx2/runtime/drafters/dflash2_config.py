@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import ClassVar
 
-from .base_config import DFlashConfig, check_dflash_window_contract
+from .base_config import DFlashConfig, check_dflash_window_contract, resolve_num_target_layers
 
 
 def _is_strictly_increasing_ints(values: list[int]) -> bool:
@@ -180,11 +180,16 @@ class DFlash2Config(DFlashConfig):
         return self.target_layer_ids[-1] == self.num_target_layers
 
     @classmethod
-    def from_dict(cls, params: dict) -> "DFlash2Config":
+    def from_dict(cls, params: dict, *, num_target_layers: int | None = None) -> "DFlash2Config":
+        """``num_target_layers``: the target's tap count, used only when the
+        config declares none (mlx-vlm #2841; ``resolve_num_target_layers``)."""
         flat = dict(params)
         dflash = flat.pop("dflash_config", None)
         if not isinstance(dflash, Mapping):
             raise TypeError("DFlash2 requires a dflash_config object.")
+        flat["num_target_layers"] = resolve_num_target_layers(
+            flat, dflash, num_target_layers, label="DFlash2"
+        )
 
         _refuse_other_draft_contracts(flat, dflash)
         check_dflash_window_contract(flat, dflash)

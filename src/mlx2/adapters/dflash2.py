@@ -212,12 +212,18 @@ def inspect_drafter(path, target, *, config_type=DFlash2Config, target_text=None
     config = _decode_unique_json(config_raw, 'draft config.json')
     if config.get('architectures') != ['DFlash2DraftModel']:
         raise ValueError('Expected DFlash2DraftModel artifact')
-    args = config_type.from_dict(config)
     if target_text is None:
         target_config = _decode_unique_json((Path(target)/'config.json').read_bytes(), 'target config.json')
         text = target_config.get('text_config', target_config)
     else:
         text = target_text
+    # A config without num_target_layers takes the target's tap count, never
+    # an assumed default; an explicit value stays authoritative and is
+    # checked against the target below (mlx-vlm #2841).
+    args = config_type.from_dict(
+        config,
+        num_target_layers=text.get('num_hidden_layers') if target_tap_count is None else target_tap_count,
+    )
     for name in ('hidden_size','vocab_size'):
         if text[name] != getattr(args,name): raise ValueError(f'DFlash2 target {name} mismatch')
     check_target_taps(args, layer_count=text['num_hidden_layers'],

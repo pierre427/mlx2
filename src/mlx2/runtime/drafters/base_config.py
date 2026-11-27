@@ -29,6 +29,35 @@ def check_dflash_window_contract(flat: Mapping, dflash: Mapping) -> None:
         )
 
 
+def resolve_num_target_layers(flat: Mapping, dflash: Mapping, target_layers=None, *, label="DFlash"):
+    """The target layer count a DFlash drafter config declares, or the target's.
+
+    ``num_target_layers`` may sit at the top level or in ``dflash_config``;
+    both spellings must agree.  An explicit value is authoritative (a target
+    whose depth differs is refused at binding).  When neither is present the
+    count comes from the target (``target_layers``); without one the config
+    is refused rather than assuming the dataclass default of 32, which would
+    mis-range every tap of a deeper target (mlx-vlm #2841).
+    """
+    top = flat.get("num_target_layers")
+    nested = dflash.get("num_target_layers")
+    if top is not None and nested is not None and top != nested:
+        raise ValueError(
+            f"{label} num_target_layers conflict: top level {top!r} != dflash_config {nested!r}."
+        )
+    declared = nested if nested is not None else top
+    if declared is not None:
+        return declared
+    if target_layers is None:
+        raise ValueError(
+            f"{label} config omits num_target_layers and no target layer count was "
+            "supplied; refusing to assume one."
+        )
+    if type(target_layers) is not int or target_layers <= 0:
+        raise ValueError(f"{label} target layer count must be a positive integer.")
+    return target_layers
+
+
 @dataclass
 class DFlashConfig:
     hidden_size: int = 2560
@@ -65,10 +94,15 @@ class DFlashConfig:
         return len(self.target_layer_ids) * self.hidden_size * int(self.target_streams_per_layer)
 
     @classmethod
-    def from_dict(cls, params: dict) -> "DFlashConfig":
+    def from_dict(cls, params: dict, *, num_target_layers: int | None = None) -> "DFlashConfig":
+        """``num_target_layers``: the target's layer count, used only when the
+        config declares none (see ``resolve_num_target_layers``)."""
         flat = dict(params)
         dflash_cfg = flat.pop("dflash_config", None) or {}
         check_dflash_window_contract(flat, dflash_cfg)
+        flat["num_target_layers"] = resolve_num_target_layers(
+            flat, dflash_cfg, num_target_layers, label="DFlash"
+        )
         # This parser applies no logit transform; the DFlash2 parser does.
         for key, identity in (("output_multiplier", 1.0), ("final_logit_softcapping", None)):
             if dflash_cfg.get(key, identity) != identity:
