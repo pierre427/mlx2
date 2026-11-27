@@ -1,5 +1,6 @@
 """CPU-only Source policy/dispatch oracle; actual QMM replaced with spy."""
 import hashlib
+import importlib.metadata
 import inspect
 from pathlib import Path
 from types import SimpleNamespace
@@ -113,6 +114,16 @@ def test_pin_failure_not_silent_fallback(monkeypatch):
 
 def test_actual_installed_build_helper_identity_and_drift(monkeypatch):
     native.implementation_identity.cache_clear()
+    if importlib.metadata.version('mlx') not in native.AUDITED_MLX_VERSIONS:
+        # Unaudited stock QMM build (0.32.5 changed the M99 MXFP8 dispatch):
+        # the opt-in profile must refuse, never silently run another law.
+        with pytest.raises(RuntimeError,match='MLX version changed'):native.implementation_identity()
+        native.implementation_identity.cache_clear()
+        # The build pin still guards an audited version string on another build.
+        monkeypatch.setattr(importlib.metadata,'version',lambda name:native.AUDITED_MLX_VERSIONS[0])
+        with pytest.raises(RuntimeError,match='build changed'):native.implementation_identity()
+        native.implementation_identity.cache_clear()
+        return
     value=native.implementation_identity()
     own=hashlib.sha256(Path(native.__file__).read_bytes()).hexdigest()
     expected=hashlib.sha256((native.POLICY+':'+native.LIBRARY_SHA256+':'+own+':'+repr(sorted(native.HEADER_PINS.items()))).encode()).hexdigest()

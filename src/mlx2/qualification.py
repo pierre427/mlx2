@@ -433,7 +433,11 @@ APPROVED_MEDIA_PRODUCERS = {
             # Re-pinned 2026-11-10 (Pierre): b0ebffe23 only extracted the
             # loader call into _load_model_and_processor (behaviour-neutral
             # for gemma3n/minicpmo; Gemma 4 native overrides it).
-            "adapter_contract_sha256": "39a9fc039ee8d7db16699022eacceb8b2117331ee0c8d0eb13f00d3d29a3f170",
+            # Re-pinned 2026-11-27 (Pierre: fix all preflight pins): d0f8afbac
+            # installs a corrected mlx-vlm BatchRotatingKVCache.make_mask (ring
+            # wrap with left padding; latent on current routes). Companions
+            # from 39a9fc03... must be regenerated.
+            "adapter_contract_sha256": "444f6a3bc2c7d352edb55faf1484c58212ab2a1ce32d590f685e5af32c93209b",
         },
         evaluate_native_vlm_report,
         NATIVE_VLM_MEDIA_CHECKS["gemma3n"],
@@ -477,7 +481,13 @@ APPROVED_MEDIA_PRODUCERS = {
             # media requests on the PLD route are now served with plain
             # decode (``multimodal_plain_decode_routes``).  Companions from
             # 72bdaed8... and 03e4d4e6... must be regenerated.
-            "adapter_contract_sha256": "37e1c72e7f60e613dc27112146e74a670fb7ec436c3aa8fa5601d820a303551b",
+            # Re-pinned 2026-11-27 (Pierre: fix all preflight pins): gemma4.py
+            # changed after 501718d91 with the native tensor backend default
+            # (b0ebffe23, a3daf9111), tail skip (aa45ef0a8, 41a8ea44c), the
+            # Artemis source pin (9b64b3791) and the resident calculator
+            # candidate (fc869e04b). Companions from 37e1c72e... must be
+            # regenerated.
+            "adapter_contract_sha256": "057e79c2874e555b359479984348d915b4a9f0e1936555682542f7d1119848bb",
         },
         evaluate_native_vlm_report,
         NATIVE_VLM_MEDIA_CHECKS["gemma4"],
@@ -505,7 +515,8 @@ APPROVED_MEDIA_PRODUCERS = {
             # Re-pinned 2026-10-14 with gemma3n (debd7c639, adapters/mlx_vlm.py).
             # Re-pinned 2026-10-31 with gemma3n (KV-shared row pruning option).
             # Re-pinned 2026-11-10 with gemma3n (b0ebffe23 loader extraction).
-            "adapter_contract_sha256": "39a9fc039ee8d7db16699022eacceb8b2117331ee0c8d0eb13f00d3d29a3f170",
+            # Re-pinned 2026-11-27 with gemma3n (d0f8afbac make_mask wrap fix).
+            "adapter_contract_sha256": "444f6a3bc2c7d352edb55faf1484c58212ab2a1ce32d590f685e5af32c93209b",
         },
         evaluate_native_vlm_report,
         NATIVE_VLM_MEDIA_CHECKS["minicpmo"],

@@ -69,11 +69,16 @@ _RESIDENT_F32_DENSE = re.compile(
     r"blk\.\d+\.(ffn_gate_inp|attn_compressor_kv|attn_compressor_gate|indexer\.proj|indexer\.attn_k)\.weight")
 
 # Only these reviewed implementations can back the opt-in raw PP Q_b path.
+# source_dense.py / source_dense_legacy.py re-pinned 2026-11-27: f2c694169 and
+# 5ca073d1b (2026-11-25) changed only their per-build installed-MLX admission
+# (PINS_BY_VERSION / MMA_SHA256_BY_VERSION, decline on unaudited builds); the
+# transcribed kernels are unchanged.  These pins were left stale, so the Q_b
+# path refused on every build.
 Q_B_PREFILL_SOURCE_PINS = {
-    'source_fp8_projection_tiles.py': '12e7617134e2dee24be28efd02d1117dee2dfacefa96c476ab916599b80a3c2b',
-    'source_prefill_legacy_tiles.py': '004b4f1a8980661dce95f646329fc64c28b8aa7512ca864790b7622b4fa4bb16',
-    'source_dense.py': '11fe30e8f0a58f966fba3fb6c555d88de30f6cd6190a34e1f809137029b35f65',
-    'source_dense_legacy.py': '564e7e17bb8c1641f5a26ec1329968de7fad895ae83840793b226909bb023a0d',
+    'source_fp8_projection_tiles.py': 'd4234f59352234a6021bbe46bca13e68557c0c2dab5c799ef64f671b2bea0065',
+    'source_prefill_legacy_tiles.py': '036c2d8dfaba52cb474b1810bf8fb882f9a9d621b525b5faa30f33581bb3ae41',
+    'source_dense.py': 'fc3a25f9af1b7d5f4fe42e01171b8f5fca2617bb08b3b5763cee9ed9ceaba470',
+    'source_dense_legacy.py': 'b66c81ecb8e425fe81646dbf45a70cc68535b6328249c872ed3873c15d4d8398',
 }
 
 
@@ -90,9 +95,9 @@ def _verify_q_b_prefill_source():
 
 
 NAX_PREFILL_SOURCE_PINS = {
-    'source_prefill_nax_profile.py': 'f01a8095b15aa804bdd0bed88578139599a7ded2a988a09839935ca1bb44779b',
-    'source_prefill_nax.py': '29c1f7ec6f21228d180d42b02111e3385a8ee41b18da073dcc15e6bf680a3416',
-    'source_prefill_legacy_tiles.py': '004b4f1a8980661dce95f646329fc64c28b8aa7512ca864790b7622b4fa4bb16',
+    'source_prefill_nax_profile.py': '0a56f11ac45c24a2e52dfd1573e119c666d1698e5128d7f05270c51e496213c5',
+    'source_prefill_nax.py': '3eff5577e0d5b742501cca6c2d5a826810ab528a0a7b1f306da8d92f0decab71',
+    'source_prefill_legacy_tiles.py': '036c2d8dfaba52cb474b1810bf8fb882f9a9d621b525b5faa30f33581bb3ae41',
 }
 
 

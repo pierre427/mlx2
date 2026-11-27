@@ -23,8 +23,12 @@ def split_partitions(rows,outputs,inputs):
 
 
 def implementation_identity():
-    from .source_prefill_legacy_tiles import HASHES
-    return hashlib.sha256((Path(__file__).read_text()+narrow.implementation_identity()+repr(HASHES)).encode()).hexdigest()
+    # The installed build's header pins and version, so identities from
+    # different audited MLX builds never collide (review 2026-11-27).
+    from .source_prefill_legacy_tiles import HASHES_BY_VERSION,installed_version
+    version=installed_version()
+    return hashlib.sha256((Path(__file__).read_text()+narrow.implementation_identity()+version
+        +repr(HASHES_BY_VERSION.get(version))).encode()).hexdigest()
 
 
 def route_spec(key,rows,layer,generation):
@@ -74,7 +78,7 @@ if(column==0u)selected_scores[row]=scores[location];
 
 
 def projection_spec(key,rows,*,down=False):
-    from .source_prefill_legacy_tiles import _header
+    from .source_prefill_legacy_tiles import _header,installed_version
     k,n,maxparts=(2304,5120,3)if down else(5120,2304,5)
     r=rows*6
     source=f'''
@@ -98,7 +102,10 @@ mlx2_source_legacy_tiles::fp_qmm_t_impl<float,32,4,true,float,false,32,32,32>(
  simdgroup_index_in_threadgroup,thread_index_in_simdgroup);
 '''
     header=_header()
-    if header.count('const constant int&')!=4:raise RuntimeError('Pinned wide PP dimension signature changed')
+    # 0.32.5: the legacy-tiles header adds a 0.32.4-order forwarding overload
+    # with the same four dimension parameters; both become by-value ints.
+    if header.count('const constant int&')!=(4 if installed_version()=='0.32.4' else 8):
+        raise RuntimeError('Pinned wide PP dimension signature changed')
     header=header.replace('const constant int&','const int')
     return dict(input_names=['x','groups','jobs','counts']+[f'bank{i}'for i in range(len(key))],
         output_names=['partials']if down else['gate_partials','up_partials'],header=header+_constants(key),source=source,

@@ -69,8 +69,10 @@ def test_invalid_component_geometry_refuses_before_device(mutation):
 
 def test_projection_loader_and_f32_k8_helper_are_verbatim_installed():
     _,headers=tile._installed();original=(headers/'fp_quantized.h').read_text()
-    start=original.index('template <\n    typename T,\n    const int group_size,\n    const int bits,\n    const bool aligned_N,\n    typename U = T,')
-    stop=original.index('\ntemplate <\n    typename T,\n    int group_size,\n    int bits,\n    bool has_global_scale = false,\n    int BM = 32,',start)
+    # Anchors are per audited MLX build (0.32.5 reorders the template list).
+    first,last=tile.QMM_T_ANCHORS[tile.installed_version()]
+    start=original.index(first)
+    stop=original.index(last,start)
     generated=tile._header()
     assert original[start:stop] in generated
     loader_start=original.index('template <\n    typename T,\n    short BROWS,')
@@ -339,3 +341,25 @@ def test_offline16x64_single_and15expert_compiles_without_gpu(m,tmp_path):
         source=tmp_path/(name+'.metal');source.write_text(text)
         result=subprocess.run(['xcrun','-sdk','macosx','metal','-std=metal3.2','-I',str(include),'-c',str(source),'-o',str(tmp_path/(name+'.air'))],capture_output=True,text=True,timeout=45)
         assert result.returncode==0,result.stdout+result.stderr
+
+
+def test_every_audited_build_pins_the_same_header_set():
+    assert set(tile.HASHES_BY_VERSION)=={'0.32.4','0.32.5'}
+    assert tile.HASHES_BY_VERSION['0.32.4'] is tile.HASHES
+    assert all(set(p)==set(tile.HASHES) for p in tile.HASHES_BY_VERSION.values())
+    assert set(tile.QMM_T_ANCHORS)==set(tile.HASHES_BY_VERSION)
+
+
+def test_0325_forwarding_overload_keeps_the_0324_parameter_order(monkeypatch):
+    # 0.32.5 moved has_global_scale ahead of aligned_N; the appended overload
+    # must forward the 0.32.4 order to the stock helper with TW=T, unchanged.
+    w=tile._QMM_T_ORDER_0324
+    assert 'const bool aligned_N,\n    typename U = T,\n    const bool has_global_scale = false,' in w
+    assert 'threadgroup T* Ws,' in w
+    assert 'fp_qmm_t_impl<T, group_size, bits, has_global_scale, aligned_N, U, BM, BK, BN>(' in w
+    body=w[w.index(') {'):]
+    for op in ('+=',' * ','fma','simdgroup','acc'):assert op not in body
+    if tile.installed_version()=='0.32.5':
+        assert tile._header().count(w)==1
+    else:
+        assert w not in tile._header()

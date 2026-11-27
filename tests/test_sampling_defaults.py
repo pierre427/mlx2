@@ -60,6 +60,7 @@ def _adapter_classes():
     from mlx2.adapters.hy_v4_flash import HYV4FlashAdapter
     from mlx2.adapters.inkling2 import Inkling2Adapter
     from mlx2.adapters.raon1_mini import RaonAdapter
+    from mlx2.adapters.sensenova_loop import SenseNovaLoopAdapter
 
     return {
         "qwen4_exp": FlashNextAdapter,
@@ -71,6 +72,7 @@ def _adapter_classes():
         "hy_v4_flash": HYV4FlashAdapter,
         "inkling2_loop": Inkling2Adapter,
         "raon1_mini": RaonAdapter,
+        "sensenova_loop": SenseNovaLoopAdapter,
         "laguna": LagunaXS21Adapter,
         "mellum": Mellum21ThinkingAdapter,
         "gemma3n": Gemma3nAdapter,
@@ -287,6 +289,8 @@ EXPECTED = {
     "inkling2_loop": {"general": dict(temperature=1.0, top_p=1.0)},
     # KRAFTON/Raon-1-mini@6691a076 generation_config.json (read 2026-11-25).
     "raon1_mini": {"general": dict(temperature=1.0, top_p=0.95, top_k=20, presence_penalty=1.5)},
+    # SenseNova-Loop-9B generation_config.json (local artifact, read 2026-11-27).
+    "sensenova_loop": {"general": dict(temperature=1.0, top_p=0.95)},
 }
 
 # Lab-only families: registered (and expected) only where their adapter

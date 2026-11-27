@@ -10,6 +10,16 @@ from functools import lru_cache
 
 SHAPES={'q_b':(1280,32768),'wo_b':(8192,5120)}
 TILES=((32,32),(64,32),(32,64),(16,64))
+# fp_qmv_fast_impl begin anchor per audited build (header hashes are pinned
+# by source_prefill_legacy_tiles._installed). 0.32.5 re-audit (2026-11-27):
+# the span to fp_qmv_impl is byte-identical except that ``has_global_scale``
+# moves to the 4th template parameter, before ``partial_rows``. The call
+# fp_qmv_fast_impl<float,32,8,false,false,R> sets both to false, so the
+# instantiation is unchanged. fp8.h leaves the e4m3 weight decode unchanged.
+QMV_FAST_BEGIN={
+    '0.32.4':'template <\n    typename T,\n    int group_size,\n    int bits,\n    bool partial_rows = false,',
+    '0.32.5':'template <\n    typename T,\n    int group_size,\n    int bits,\n    bool has_global_scale,\n    bool partial_rows = false,',
+}
 _STORE=r'''
 namespace mlx2_source_fp8_store {
 inline float owner_bf16(float x) {
@@ -74,7 +84,10 @@ def _header(algorithm,fused_boundary):
         return base
     if algorithm!='qmv_fast':raise ValueError('Source FP8 unknown helper algorithm')
     text=(headers/'fp_quantized.h').read_text()
-    begin=text.index('template <\n    typename T,\n    int group_size,\n    int bits,\n    bool partial_rows = false,')
+    import importlib.metadata
+    anchor=QMV_FAST_BEGIN.get(importlib.metadata.version('mlx'))
+    if anchor is None:raise RuntimeError('Source FP8 pinned helper anchor changed: unaudited MLX build')
+    begin=text.index(anchor)
     end=text.index('\ntemplate <typename T, int group_size, int bits, bool has_global_scale = false>\nMETAL_FUNC void fp_qmv_impl(',begin)
     helper=text[begin:end]
     if fused_boundary:helper=_once(helper,'y[row] = static_cast<T>(result[row]);',

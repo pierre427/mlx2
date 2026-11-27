@@ -25,6 +25,86 @@ HASHES={
  'steel/utils/type_traits.h':'4766c5a3809d3cf7740e63acc5703ef76b6b4e85d8baf16602c9d517a2fd426c',
  'steel/gemm/kernels/steel_gemm_splitk.h':'2ada2a7ea548f6c4b0e7962b4a2f163e8a212620ecc46e078a06647df12b0635',
 }
+# Per-build header pins.  0.32.5 re-audit (2026-11-27, installed 0.32.4 vs
+# 0.32.5 headers): fp4.h, steel/defines.h, loader.h, utils.h, type_traits.h
+# and steel_gemm_splitk.h are byte-identical.  fp_quantized.h only appends
+# Fp4HalfLoader/use_fp4_half_loader to the prefix (unused here) and reorders
+# fp_qmm_t_impl's template parameters (has_global_scale moves before
+# aligned_N, a deduced TW weight-tile type is added); the body changes
+# only Ws to TW* and the loader to a conditional_t, which for TW=T resolves
+# to the same QuantizedBlockLoader, so the compiled law is unchanged.  mma.h only gives
+# BlockMMA::mma a defaulted TB=T (BaseMMAFrag unchanged).  transforms.h
+# changes only the two-argument TransformAdd/TransformAxpby, which
+# store_result's TransformNone never reaches.  integral_constant.h changes
+# only the compile-time binop result type.  fp8.h changes only non-finite
+# encodes and the E8M0 0xFF byte (now NaN instead of +inf); finite scales
+# decode identically.  _header() adds a forwarding overload with the 0.32.4
+# parameter order so existing instantiations keep their meaning.  Bitwise
+# parity stays the GPU gate.
+HASHES_BY_VERSION={
+ '0.32.4':HASHES,
+ '0.32.5':{
+  'fp_quantized.h':'553777467b49cb1f1b498cf24a5870ea57b65cf8b68536d17dd64fe56583de45',
+  'fp4.h':'e3159945d7e5ae24f7a1ca9c4875b2a5d15cfb6952405df24a0df1bb2622a93a',
+  'fp8.h':'0d212a9fa1d371bd85c8d7cf8159dbe0e702a4bbdf0a334f7fe3032c55743a1c',
+  'steel/defines.h':'b03cea6a7d5cfe814e6838d8536e2aacdcafd2744cb408e954fda336ce21759a',
+  'steel/gemm/mma.h':'21439be1087ac840ac5936bda0e57bd982fb7b104ea5e5f82ba7be0d2eaee524',
+  'steel/gemm/loader.h':'c1b82153670b1e18371a6e88fdbcf440af692957775c2f837700315ab8a5112e',
+  'steel/gemm/transforms.h':'ac276dd33675d3fac60870d385349d1e4bc94bb06e88e31a19bada0ef4ea39a8',
+  'steel/utils.h':'d4c36298145d1c5617a94f07dbfabf6ac932afe2fd7ea0c9291f1fb385c5404a',
+  'steel/utils/integral_constant.h':'748d04212ae45c82fe227355235d25422f8e24a52568d372f59da28a76244e56',
+  'steel/utils/type_traits.h':'4766c5a3809d3cf7740e63acc5703ef76b6b4e85d8baf16602c9d517a2fd426c',
+  'steel/gemm/kernels/steel_gemm_splitk.h':'2ada2a7ea548f6c4b0e7962b4a2f163e8a212620ecc46e078a06647df12b0635',
+ },
+}
+# fp_qmm_t_impl begin/end anchors in each audited fp_quantized.h.
+QMM_T_ANCHORS={
+ '0.32.4':('template <\n    typename T,\n    const int group_size,\n    const int bits,\n    const bool aligned_N,\n    typename U = T,',
+           '\ntemplate <\n    typename T,\n    int group_size,\n    int bits,\n    bool has_global_scale = false,\n    int BM = 32,'),
+ '0.32.5':('template <\n    typename T,\n    int group_size,\n    int bits,\n    bool has_global_scale,\n    bool aligned_N,\n    typename U = T,',
+           '\ntemplate <\n    typename T,\n    int group_size,\n    int bits,\n    bool has_global_scale, // unimplemented\n    int BM = 32,'),
+}
+# 0.32.5 only: the 0.32.4 parameter order, forwarding with TW=T.  Explicit
+# arguments select exactly one overload (a type cannot bind to the other's
+# bool slot), so callers' fp_qmm_t_impl<T,gs,bits,aligned_N,U,hgs,BM,BK,BN>
+# instantiations keep the 0.32.4 meaning.  No arithmetic is added.
+_QMM_T_ORDER_0324=r"""
+template <
+    typename T,
+    const int group_size,
+    const int bits,
+    const bool aligned_N,
+    typename U = T,
+    const bool has_global_scale = false,
+    const int BM = 32,
+    const int BK = 32,
+    const int BN = 32>
+METAL_FUNC void fp_qmm_t_impl(
+    const device uint32_t* w,
+    const device uint8_t* scales,
+    const device float* global_scale,
+    const device T* x,
+    device U* y,
+    threadgroup T* Xs,
+    threadgroup T* Ws,
+    const constant int& K,
+    const constant int& N,
+    const constant int& M,
+    const constant int& K_eff,
+    uint3 tid,
+    uint lid,
+    uint simd_gid,
+    uint simd_lid) {
+  fp_qmm_t_impl<T, group_size, bits, has_global_scale, aligned_N, U, BM, BK, BN>(
+      w, scales, global_scale, x, y, Xs, Ws, K, N, M, K_eff,
+      tid, lid, simd_gid, simd_lid);
+}
+"""
+
+
+def installed_version():
+    import importlib.metadata
+    return importlib.metadata.version('mlx')
 
 
 def _tile(tile):
@@ -54,7 +134,10 @@ def plan(rows,*,tile=DEFAULT_TILE):
 def _installed():
     from .source_dense import _installed as installed
     root,headers=installed()
-    for name,wanted in HASHES.items():
+    pins=HASHES_BY_VERSION.get(installed_version())
+    if pins is None:
+        raise RuntimeError('Source legacy tile installed helper changed; re-audit required')
+    for name,wanted in pins.items():
         if hashlib.sha256((headers/name).read_bytes()).hexdigest()!=wanted:
             raise RuntimeError('Source legacy tile installed helper changed; re-audit required')
     return root,headers
@@ -65,7 +148,7 @@ def _header():
     _,headers=_installed();seen=set()
     def expand(name):
         if name in seen:return ''
-        if name not in HASHES:
+        if name not in HASHES_BY_VERSION[installed_version()]:
             raise RuntimeError('Source legacy tile unpinned header dependency: '+name)
         seen.add(name);result=[]
         for line in (headers/name).read_text().splitlines():
@@ -78,10 +161,13 @@ def _header():
     deps='\n'.join(expand(s)for s in ('steel/gemm/mma.h','steel/gemm/loader.h','fp4.h','fp8.h'))
     text=(headers/'fp_quantized.h').read_text()
     prefix=text[text.index('using namespace metal;'):text.index('template <typename T, int group_size, int bits, int D>')]
-    begin=text.index('template <\n    typename T,\n    const int group_size,\n    const int bits,\n    const bool aligned_N,\n    typename U = T,')
-    end=text.index('\ntemplate <\n    typename T,\n    int group_size,\n    int bits,\n    bool has_global_scale = false,\n    int BM = 32,',begin)
+    version=installed_version();start,stop=QMM_T_ANCHORS[version]
+    begin=text.index(start)
+    end=text.index(stop,begin)
     helper=text[begin:end]
     assert helper.count('METAL_FUNC void fp_qmm_t_impl(')==1
+    if version!='0.32.4':
+        helper+=_QMM_T_ORDER_0324
     # No substitutions in the loader or projection helper: even constant
     # reference arguments and thread-position attributes remain stock.
     return ('// Derived installed MLX helpers, Apple2024-2026, MIT.\n'
@@ -241,7 +327,8 @@ def batch_plan(row_counts,*,tile=DEFAULT_TILE):
 @lru_cache(maxsize=1)
 def _batch_header():
     header=_header();old='const constant int& M,'
-    if header.count(old)!=1:
+    # 0.32.5 also spells M this way in the 0.32.4-order forwarding overload.
+    if header.count(old)!=(1 if installed_version()=='0.32.4' else 2):
         raise RuntimeError('Source legacy batch M forwarding anchor changed')
     # Argument forwarding only. The entire stock helper body, including
     # loaders, K8 MMA sequence, masks and stores, remains byte-identical.

@@ -16,6 +16,18 @@ COUNTER = 'official_source_prefill_q1_m1_owner_store'
 TINY_COUNTER = 'official_source_prefill_q1_tiny_down_'
 TINY_CONTRACT = 'PP-only Q1 localM1..3 contiguous GU-prefix old DOWN batch; unchanged dot/BF16 owner; per-expert output views and ordinary ordered concat; original/large-Q1/decode unchanged; explicit/unqualified'
 LIBRARY_SHA256 = 'd8c9393d584e781393c3effccfccd8ba85ad0c70264edaf9f897dca9875375c6'
+# Per-build libmlx.dylib pins.  0.32.5 re-audit (2026-11-27, v0.32.4..v0.32.5):
+# both policies run only mlx2's own fast.metal_kernel sources (pinned below)
+# and ordinary views/concat/astype.  The custom-kernel host change (#4568)
+# caches generated source per kernel object, keyed by name, template args and
+# input/output dtypes; write_signature and the kernel body are unchanged, so
+# only the generated kernel name differs.  copy.cpp/primitives.cpp change only
+# empty-output allocation order; no astype/concat arithmetic changed.  Bitwise
+# parity of the compiled kernels stays a GPU-gate claim.
+LIBRARY_SHA256_BY_VERSION = {
+    '0.32.4': LIBRARY_SHA256,
+    '0.32.5': '0b8158bf29ecac60049f9163dda9537aab10d6fd8aa3d7614c646c3e6f810750',
+}
 SOURCE_PINS = {
     'source_q1.py': '151be733a1edda7feb12fa617860d10008bdb315cee8250d0bf263d16e9aeb05',
     'source_q1_down_owner.py': 'f36787d0a5fd2bfa156377bb058b4279be7a8eb3fb4f5d597cbb43160364d7a8',
@@ -23,7 +35,7 @@ SOURCE_PINS = {
 TINY_SOURCE_PINS = {
     'source_q1.py': '151be733a1edda7feb12fa617860d10008bdb315cee8250d0bf263d16e9aeb05',
     'source_down_prefill.py': '77c7c8603a6a04209968533efe725f452ff95ebc09135503d466d97eb2301337',
-    'source_down_fusion.py': '0a5d5e1f7d6571079b58e6a511f531fd0aa02c829076030112fd73bf9847c780',
+    'source_down_fusion.py': '26d8c81536c3e29a6f4546593340a908b133d9cfcee2e4cd8a2728dc3e13722e',
 }
 
 
@@ -42,17 +54,25 @@ def validate_policy(policy, *, expert_math, prefill_batch):
         raise ValueError('Source Q1 prefill DOWN requires gate_up and routed_fused_fp32')
 
 
+def _installed_library(label):
+    """(version, libmlx sha256) for an audited installed MLX build, else raise."""
+    import mlx.core as mx
+    version = importlib.metadata.version('mlx')
+    expected = LIBRARY_SHA256_BY_VERSION.get(version)
+    if expected is None:
+        raise RuntimeError(f'Source {label} DOWN MLX version changed; re-audit required')
+    library = Path(mx.__file__).resolve().parent/'lib/libmlx.dylib'
+    if hashlib.sha256(library.read_bytes()).hexdigest() != expected:
+        raise RuntimeError(f'Source {label} DOWN MLX build changed; re-audit required')
+    return version, expected
+
+
 @lru_cache(maxsize=1)
 def implementation_identity():
-    import mlx.core as mx
-    if importlib.metadata.version('mlx') != '0.32.4':
-        raise RuntimeError('Source Q1 M1 DOWN MLX version changed; re-audit required')
-    library = Path(mx.__file__).resolve().parent/'lib/libmlx.dylib'
-    if hashlib.sha256(library.read_bytes()).hexdigest() != LIBRARY_SHA256:
-        raise RuntimeError('Source Q1 M1 DOWN MLX build changed; re-audit required')
+    version, library_sha256 = _installed_library('Q1 M1')
     own = Path(__file__)
     root = own.parent.parent/'runtime/gguf'
-    records = ['mlx0.32.4:'+LIBRARY_SHA256]
+    records = ['mlx'+version+':'+library_sha256]
     for name, expected in SOURCE_PINS.items():
         actual = hashlib.sha256((root/name).read_bytes()).hexdigest()
         if actual != expected:
@@ -66,13 +86,8 @@ def implementation_identity():
 @lru_cache(maxsize=1)
 def tiny_implementation_identity():
     """Bind the selected old-Q1-batch mechanism and ordinary assembly path."""
-    import mlx.core as mx
-    if importlib.metadata.version('mlx') != '0.32.4':
-        raise RuntimeError('Source Q1 tiny DOWN MLX version changed; re-audit required')
-    library=Path(mx.__file__).resolve().parent/'lib/libmlx.dylib'
-    if hashlib.sha256(library.read_bytes()).hexdigest()!=LIBRARY_SHA256:
-        raise RuntimeError('Source Q1 tiny DOWN MLX build changed; re-audit required')
-    own=Path(__file__);root=own.parent.parent/'runtime/gguf';records=['mlx0.32.4:'+LIBRARY_SHA256]
+    version,library_sha256=_installed_library('Q1 tiny')
+    own=Path(__file__);root=own.parent.parent/'runtime/gguf';records=['mlx'+version+':'+library_sha256]
     for name,expected in TINY_SOURCE_PINS.items():
         actual=hashlib.sha256((root/name).read_bytes()).hexdigest()
         if actual!=expected:raise RuntimeError('Source Q1 tiny DOWN implementation changed; re-audit required')

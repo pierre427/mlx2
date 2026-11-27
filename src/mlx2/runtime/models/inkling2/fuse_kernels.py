@@ -318,7 +318,7 @@ def residual(module, blocks, partial):
 # ``fp contract(off)``).  Routes are restated, not read from MLX at run time:
 # ``mlx_order_plan`` declines (counted ``mlx_order:<reason>``) any shape
 # whose route it does not restate, and the caller then runs the reference.
-# FP32 GEMMs take TF32/NAX routes when ``MLX_ENABLE_TF32`` is on (mlx2 pins
+# FP32 GEMMs take TF32/NAX routes when the TF32 environment switch is on (mlx2 pins
 # it off, process_env.py), so those routes decline under TF32.
 RESIDUAL_MLX_ORDER = True
 RESIDUAL_MLX_MAC = "source"
@@ -330,7 +330,7 @@ _MO_MACS = {
 _mo_kernels = {}
 _ARCH = []
 # The MLX release whose dispatch and orders are restated here. Two things
-# this module cannot see (review 2026-11-26): MLX latches MLX_ENABLE_TF32 at
+# this module cannot see (review 2026-11-26): MLX latches the TF32 environment switch at
 # its first FP32 matmul, so the pin must be applied before any (mlx2's
 # process_env does; the plan reads the environment), and this kernel is
 # compiled by the OS Metal compiler while MLX's come prebuilt, so a macOS

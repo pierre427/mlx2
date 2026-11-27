@@ -25,7 +25,6 @@ import importlib.machinery
 import importlib.util
 import json
 import platform
-import statistics
 import subprocess
 import sys
 import sysconfig

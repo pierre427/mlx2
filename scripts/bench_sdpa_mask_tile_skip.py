@@ -138,7 +138,7 @@ def run(args) -> int:
             arms["native_window"] = dict(mask="causal", window_size=int(extra["window"]))
         rows = _valid_rows(mx, kind, B, qL, kL)
         for arm, kw in arms.items():
-            def call():
+            def call(q=q, k=k, v=v):
                 return mx.fast.scaled_dot_product_attention(q, k, v, scale=scale, sinks=sinks, **kw)
             try:
                 o = call()
@@ -182,7 +182,7 @@ def run(args) -> int:
             report["cases"].append(rec)
             print(f"{name:28s} {arm:14s} {rec['ms_median']:9.3f} ms  keep={rec['mask_true_fraction']:.3f}",
                   flush=True)
-        del q, k, v, mask
+        del q, k, v, mask, call
         mx.clear_cache()
     (out_dir / "results.json").write_text(json.dumps(report, indent=1) + "\n")
     return 0

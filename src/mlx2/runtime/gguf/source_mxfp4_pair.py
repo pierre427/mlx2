@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: MIT
 """Explicit Source MXFP4 pair; bounded component parity, unqualified profile.
 
-Reads the pinned, installed MIT MLX 0.32.4 helpers; no upstream repository
-access. Original wrapper preserves the stock virtual grid and calls unchanged
+Reads the pinned, installed MIT MLX helpers (audited 0.32.4 and 0.32.5
+builds); no upstream repository access. Original wrapper preserves the stock virtual grid and calls unchanged
 helper bodies. See docs/research/2026-10-25-ds41-original-pair-design.md.
 Nothing runs on import. Dense weights and ordinary QMM stay unchanged.
 """
@@ -21,13 +21,69 @@ HASHES = {
     'fp4.h': 'e3159945d7e5ae24f7a1ca9c4875b2a5d15cfb6952405df24a0df1bb2622a93a',
     'fp8.h': '9a9d77a6295f66b4ada4311c3b855b6ecb7a2b38f28623109e3c61d2e17e81ae',
 }
+LIBRARY_SHA256 = 'd8c9393d584e781393c3effccfccd8ba85ad0c70264edaf9f897dca9875375c6'
+# HASHES/LIBRARY_SHA256 above are the original 0.32.4 pins; generation uses
+# installed_pins(). Each build pins libmlx.dylib, the three headers and the
+# 0-based fp_quantized.h line spans that are transcribed: ``shared`` (fp4/fp8
+# decode, scale, load and qdot laws), ``fast`` (fp_qmv_fast_impl), ``qmv``
+# (fp_qmv_impl, used by source_down_fusion) and ``wide`` (fp_qmv_wide_impl).
+# 0.32.5 re-audit (2026-11-27, v0.32.4..v0.32.5): fp4.h is byte-identical.
+# fp_quantized.h inserts Fp4HalfLoader/use_fp4_half_loader (89 lines, not
+# transcribed) before fp_qmv_quad_impl; ``shared``, ``qmv`` and ``wide`` are
+# byte-identical at the shifted spans, and ``fast`` differs only in moving
+# ``has_global_scale`` to the 4th template parameter before ``partial_rows``.
+# The helper spelling fp_qmv_fast_impl<float,32,4,false,false,4> sets both to
+# false, so the instantiation is unchanged. fp8.h changes only the NaN
+# encodings: an e4m3 encode of NaN now yields 0x7F instead of saturating
+# (never called here), and an e8m0 scale byte 0xFF now decodes to NaN instead
+# of +inf (the stock kernel reads the same installed fp8.h, so parity with
+# stock holds; finite scales are unchanged). quantized.cpp keeps the stock
+# float32 route for this geometry (K 5120, N 2304, M 1..12 on gen-17 M5 Max,
+# vector limit 13): the new qmv_mma and NAX split-K branches require
+# tf32 or a non-float32 input, and qmv/qmv_wide keep their grids and fp tile
+# cap of 5. Bitwise parity to the stock dispatch stays a GPU-gate claim.
+PINS_BY_VERSION = {
+    '0.32.4': dict(library=LIBRARY_SHA256, headers=HASHES,
+                   spans=dict(shared=(19, 147), fast=(332, 421), qmv=(421, 578), wide=(582, 697))),
+    '0.32.5': dict(library='0b8158bf29ecac60049f9163dda9537aab10d6fd8aa3d7614c646c3e6f810750',
+                   headers={
+                       'fp_quantized.h': '553777467b49cb1f1b498cf24a5870ea57b65cf8b68536d17dd64fe56583de45',
+                       'fp4.h': 'e3159945d7e5ae24f7a1ca9c4875b2a5d15cfb6952405df24a0df1bb2622a93a',
+                       'fp8.h': '0d212a9fa1d371bd85c8d7cf8159dbe0e702a4bbdf0a334f7fe3032c55743a1c',
+                   },
+                   spans=dict(shared=(19, 147), fast=(421, 510), qmv=(510, 667), wide=(671, 786))),
+}
+
+
+def installed_pins():
+    """Audited pins for the installed MLX build; raises on an unaudited one."""
+    import importlib.metadata
+    pinned = PINS_BY_VERSION.get(importlib.metadata.version('mlx'))
+    if pinned is None:
+        raise RuntimeError('installed stock dispatch changed; re-audit before compiling')
+    return pinned
 
 
 @lru_cache(maxsize=1)
 def _verify_library():
+    pinned = installed_pins()
     path = installed_root()/'lib/libmlx.dylib'
-    if hashlib.sha256(path.read_bytes()).hexdigest() != 'd8c9393d584e781393c3effccfccd8ba85ad0c70264edaf9f897dca9875375c6':
+    if hashlib.sha256(path.read_bytes()).hexdigest() != pinned['library']:
         raise RuntimeError('installed stock dispatch changed; re-audit before compiling')
+    return pinned
+
+
+def installed_texts():
+    """Verified installed header texts and the build's pinned line spans."""
+    pinned = _verify_library()
+    root = installed_root()/'include/mlx/backend/metal/kernels'
+    text = {}
+    for name, expected in pinned['headers'].items():
+        raw = (root/name).read_bytes()
+        if hashlib.sha256(raw).hexdigest() != expected:
+            raise RuntimeError('installed stock helper changed; re-audit before compiling')
+        text[name] = raw.decode()
+    return text, pinned['spans']
 
 
 def descriptor(rows, *, verified_m5_vector_band=False):
@@ -45,17 +101,10 @@ def descriptor(rows, *, verified_m5_vector_band=False):
 
 
 def _source_header(rows):
-    _verify_library()
-    root = installed_root()/'include/mlx/backend/metal/kernels'
-    text = {}
-    for name, expected in HASHES.items():
-        raw = (root/name).read_bytes()
-        if hashlib.sha256(raw).hexdigest() != expected:
-            raise RuntimeError('installed stock helper changed; re-audit before compiling')
-        text[name] = raw.decode()
+    text, spans = installed_texts()
     lines = text['fp_quantized.h'].splitlines(keepends=True)
     # Pinned full-file hashes make these exact source spans unambiguous.
-    pieces = ''.join(lines[19:147]) + ''.join(lines[332:421]) + ''.join(lines[582:697])
+    pieces = ''.join(''.join(lines[a:b]) for a, b in (spans['shared'], spans['fast'], spans['wide']))
     assert 'fp_qmv_fast_impl' in pieces and 'fp_qmv_wide_impl' in pieces
     # The generated helper text is derived MLX code and retains its attribution.
     return '''// Derived helpers: Copyright © 2025-2026 Apple Inc. MIT license.

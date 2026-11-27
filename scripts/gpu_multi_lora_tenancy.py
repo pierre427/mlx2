@@ -644,7 +644,7 @@ def summarize(d: Path):
         rp = r["phases"].get("reload_parity")
         if rp:
             bad = [k for k, v in rp.items() if not v["identical"]]
-            lines += [f"**Reload parity** (B=1 greedy, before vs after eviction): "
+            lines += ["**Reload parity** (B=1 greedy, before vs after eviction): "
                       + ("all identical" if not bad else f"DIVERGED: {', '.join(bad)}"), ""]
     # Cross-config output identity: the same B=1 greedy reference requests
     # (base + first four adapters, same seeds) in every config.

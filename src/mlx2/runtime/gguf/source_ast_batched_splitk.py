@@ -13,6 +13,31 @@ import re
 
 PROFILE='source_ast_batched_stock_float_candidate_v2'
 HASHES={'steel/gemm/kernels/steel_gemm_fused.h':'ed49c8b9c73957f0cbc9dea30f484cf84fb821aece68233d6d1967856200d5c7','steel/gemm/gemm.h': 'c84af31e2c57154f2a8a24fa7f9fe2449765cce9a66f3f035846ed3c03b6a8b0', 'steel/gemm/loader.h': 'c1b82153670b1e18371a6e88fdbcf440af692957775c2f837700315ab8a5112e', 'steel/defines.h': 'b03cea6a7d5cfe814e6838d8536e2aacdcafd2744cb408e954fda336ce21759a', 'steel/gemm/mma.h': '9b37709de40c3acaa5411875e52c8d26e6de093261741f671fbdab9c39a852b7', 'steel/gemm/transforms.h': '73487e29beab5af9478bc931c49b5e8d66937c2fa2651499867f47ac5529afc2', 'steel/utils.h': 'd4c36298145d1c5617a94f07dbfabf6ac932afe2fd7ea0c9291f1fb385c5404a', 'steel/utils/integral_constant.h': '886eccaac4f8f00eab5a10551fdb5315df7ab7462aba13d69bb95765c1a4735e', 'steel/utils/type_traits.h': '4766c5a3809d3cf7740e63acc5703ef76b6b4e85d8baf16602c9d517a2fd426c', 'steel/gemm/params.h': '6711e72e32310eafb088895d5a6d20fcfca814158f5b38eb72b6e69d9d773e43', 'steel/gemm/kernels/steel_gemm_splitk.h': '2ada2a7ea548f6c4b0e7962b4a2f163e8a212620ecc46e078a06647df12b0635'}
+# HASHES above are the original 0.32.4 pins; generation and identity use
+# installed_hashes(). 0.32.5 re-audit (2026-11-27, v0.32.4..v0.32.5): eight
+# of the eleven headers are byte-identical, including steel_gemm_fused.h,
+# steel_gemm_splitk.h, gemm.h and loader.h, whose bodies are transcribed.
+# mma.h only gives BlockMMA::mma a ``TB = T`` template parameter for the B
+# tile (float here, so the same instantiation; BaseMMAFrag is unchanged).
+# integral_constant.h only rewrites the compile-time binop result type.
+# transforms.h changes TransformAdd/TransformAxpby, which are not used here:
+# the split-K accumulation uses TransformNone and the regular body has
+# use_out_source=false and do_axpby=false. For float/float they also compute
+# the same value. matmul.cpp changes only the transposed gemv_t dispatch and
+# empty GatherMM/SegmentedMM outputs, so the steel split-K and regular GEMM
+# selection this plan restates is unchanged. Bitwise parity stays the GPU gate.
+HASHES_BY_VERSION={'0.32.4':HASHES,'0.32.5':{**HASHES,
+    'steel/gemm/mma.h':'21439be1087ac840ac5936bda0e57bd982fb7b104ea5e5f82ba7be0d2eaee524',
+    'steel/gemm/transforms.h':'ac276dd33675d3fac60870d385349d1e4bc94bb06e88e31a19bada0ef4ea39a8',
+    'steel/utils/integral_constant.h':'748d04212ae45c82fe227355235d25422f8e24a52568d372f59da28a76244e56'}}
+
+
+def installed_hashes():
+    import importlib.metadata
+    hashes=HASHES_BY_VERSION.get(importlib.metadata.version('mlx'))
+    if hashes is None:
+        raise RuntimeError('Source AST split-K installed helper changed; re-audit required:mlx version')
+    return hashes
 
 
 def supports_splitk(m,n,k):
@@ -52,7 +77,7 @@ def plan(batches,m,n,k,*,transpose_b):
 def _installed():
     from .source_dense import _installed as pinned
     _,base=pinned()
-    for name,expected in HASHES.items():
+    for name,expected in installed_hashes().items():
         if hashlib.sha256((base/name).read_bytes()).hexdigest()!=expected:
             raise RuntimeError('Source AST split-K installed helper changed; re-audit required:'+name)
     return base
@@ -198,4 +223,4 @@ def private_matmul(left,right,*,transpose_b,check_live):
 def implementation_identity():
     _installed()
     from .source_dense import installed_pins
-    return hashlib.sha256(Path(__file__).read_bytes()+installed_pins()[0].encode()+repr(sorted(HASHES.items())).encode()).hexdigest()
+    return hashlib.sha256(Path(__file__).read_bytes()+installed_pins()[0].encode()+repr(sorted(installed_hashes().items())).encode()).hexdigest()

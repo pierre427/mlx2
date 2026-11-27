@@ -9,8 +9,8 @@ from pathlib import Path
 import hashlib
 
 PINS={
- 'source_prefill_nax_profile.py':'f01a8095b15aa804bdd0bed88578139599a7ded2a988a09839935ca1bb44779b',
- 'source_prefill_legacy_tiles.py':'004b4f1a8980661dce95f646329fc64c28b8aa7512ca864790b7622b4fa4bb16',
+ 'source_prefill_nax_profile.py':'0a56f11ac45c24a2e52dfd1573e119c666d1698e5128d7f05270c51e496213c5',
+ 'source_prefill_legacy_tiles.py':'036c2d8dfaba52cb474b1810bf8fb882f9a9d621b525b5faa30f33581bb3ae41',
  'source_gate_up_fusion.py':'4b57e3191bf2fef8558d709e1114d965916bb75131fa57e968586e52edec3501',
  'source_middle_fusion.py':'743b00fcf9af4b9e294d6b5b6482b687e0efcfe363d326bf614ad0f00104f9fd',
 }

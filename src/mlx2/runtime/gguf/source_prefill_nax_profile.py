@@ -12,8 +12,8 @@ import hashlib
 
 PROFILE='mxfp4_nax_k16_ordered_f32_v1'
 PINS={
-    'source_prefill_nax.py':'29c1f7ec6f21228d180d42b02111e3385a8ee41b18da073dcc15e6bf680a3416',
-    'source_prefill_legacy_tiles.py':'004b4f1a8980661dce95f646329fc64c28b8aa7512ca864790b7622b4fa4bb16',
+    'source_prefill_nax.py':'3eff5577e0d5b742501cca6c2d5a826810ab528a0a7b1f306da8d92f0decab71',
+    'source_prefill_legacy_tiles.py':'036c2d8dfaba52cb474b1810bf8fb882f9a9d621b525b5faa30f33581bb3ae41',
 }
 
 

@@ -51,19 +51,23 @@ def plan(ids, kinds, *, tile_rows=4):
 def _original_header():
     # Read only the exact installed source already reviewed for the paired
     # launcher. The library/header hashes protect dispatch and source spans.
-    from .source_mxfp4_pair import HASHES, _verify_library, installed_root
-    _verify_library()
+    # Per-build pins and line spans live in source_mxfp4_pair.PINS_BY_VERSION
+    # (0.32.5 re-audit 2026-11-27: fp_qmv_impl is byte-identical, shifted 89
+    # lines by the inserted Fp4HalfLoader).
+    from .source_mxfp4_pair import installed_pins, _verify_library, installed_root
+    pinned = _verify_library() or installed_pins()
     root = installed_root()/"include/mlx/backend/metal/kernels"
     texts = {}
-    for name, expected in HASHES.items():
+    for name, expected in pinned["headers"].items():
         raw = (root/name).read_bytes()
         if hashlib.sha256(raw).hexdigest() != expected:
             raise RuntimeError("installed Source down helper changed; re-audit required")
         texts[name] = raw.decode()
     lines = texts["fp_quantized.h"].splitlines(keepends=True)
+    spans = pinned["spans"]
     # Helpers include the exact fp4 decode, scale, load and qdot laws.
-    pieces = "".join(lines[19:147])
-    helper = "".join(lines[421:578])
+    pieces = "".join(lines[slice(*spans["shared"])])
+    helper = "".join(lines[slice(*spans["qmv"])])
     if (helper.count("METAL_FUNC void fp_qmv_impl(") != 1
             or not helper.startswith("template <typename T, int group_size, int bits, bool has_global_scale = false>")):
         raise RuntimeError("pinned Source down helper span mismatch")

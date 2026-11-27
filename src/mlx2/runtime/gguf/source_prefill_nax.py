@@ -10,7 +10,16 @@ from functools import lru_cache
 import hashlib
 from pathlib import Path
 
-MECHANISM_SHA256 = '62c5522a09bd178ac2218f6eafefdd4fc55382cd10c150f0d67ff73a14c80811'
+# moe_nax_gather.py pin.  Re-audit 2026-11-27 (62c5522a at f14fa19f3 ->
+# 3562e68b at 44376a94d): b9892734a and 44376a94d only add the Nvfp4Q and
+# Mxfp8Q loader structs to _MM_HEADER (templates this component never
+# instantiates), their kernel sources/registrations, and the opt-in
+# allow_mxfp8 / nax_*_owned gates in supports/_launch/try_gather.  The
+# spans used here (_MLX_MM_HEADERS, _read_mlx_headers, the
+# 'template <typename T, short R>'..'// Element offsets' loader block,
+# Mxfp4Q, Geo and the '// seg:' helper with every anchor below) are
+# byte-identical.
+MECHANISM_SHA256 = '3562e68b5e0558ad401f853330b21a21d598299088f24a70e85b5201b66cb0c4'
 K, N = 5120, 2304
 
 

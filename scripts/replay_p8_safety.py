@@ -33,7 +33,6 @@ import platform
 import subprocess
 import sys
 import sysconfig
-import threading
 import time
 from pathlib import Path
 

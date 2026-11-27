@@ -121,7 +121,6 @@ def main():
             mx.eval(a_out, b_out)
             diff = max(float(mx.max(mx.abs(p.astype(mx.float32) - q.astype(mx.float32))).item())
                        for p, q in zip(a_out, b_out))
-            sub = (x[:, :1] if rows > 2 else None)
             report["rows"][str(rows)].update(matrix_ms=timed(matrix), matrix_max_abs_diff_vs_law0=diff)
             print(rows, report["rows"][str(rows)], flush=True)
             save()

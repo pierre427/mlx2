@@ -60,7 +60,8 @@ def test_unsupported_shape_law_refuses(kind,rows,options):
 def test_raw_fast_helper_is_verbatim_and_fused_changes_only_store():
     from mlx2.runtime.gguf.source_prefill_legacy_tiles import _installed
     _,headers=_installed();text=(headers/'fp_quantized.h').read_text()
-    begin=text.index('template <\n    typename T,\n    int group_size,\n    int bits,\n    bool partial_rows = false,')
+    import importlib.metadata
+    begin=text.index(p.QMV_FAST_BEGIN[importlib.metadata.version('mlx')])
     end=text.index('\ntemplate <typename T, int group_size, int bits, bool has_global_scale = false>\nMETAL_FUNC void fp_qmv_impl(',begin)
     helper=text[begin:end]
     assert helper in p._header('qmv_fast',False)

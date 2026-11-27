@@ -12,8 +12,8 @@ from pathlib import Path
 
 K,N=5120,2304
 PROFILES={f'small_m_nax_p{p}_ordered_f32_v1':p for p in (1,5)}
-PINS={'source_prefill_nax.py':'29c1f7ec6f21228d180d42b02111e3385a8ee41b18da073dcc15e6bf680a3416',
-      'source_prefill_nax_middle.py':'f25f35372f219c436e61076210d5b24b980d0ed935a3bb4514f6887cdb694518'}
+PINS={'source_prefill_nax.py':'3eff5577e0d5b742501cca6c2d5a826810ab528a0a7b1f306da8d92f0decab71',
+      'source_prefill_nax_middle.py':'d4f7b685c3b02f5ebd50313ebce7d14f0250112d5da10c562f91987a30f1287e'}
 
 
 def plan(row_counts,*,numerical_profile):

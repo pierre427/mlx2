@@ -517,7 +517,11 @@ def test_super_vl_spec_from_the_adapter_inspector():
     assert None not in where
     layers = {w for w in where if isinstance(w, int)}
     assert layers == set(range(88)) and "skip" in where and "resident" in where
-    assert spec.fingerprint[:8] == "33a6f018"
+    # Re-pinned 2026-11-27: the adapter fingerprint binds each shard's
+    # (st_dev, st_ino, size, mtime, ctime); the export moved to
+    # the model disk behind a symlink on 2026-11-20, so the identity
+    # changed with the same bytes (was 33a6f018).
+    assert spec.fingerprint[:8] == "936ae320"
 
 
 # ------------------------------------------------------------------ plan, inspection, CLI

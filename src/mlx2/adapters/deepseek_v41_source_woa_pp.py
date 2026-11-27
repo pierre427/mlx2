@@ -18,6 +18,23 @@ HEADER_PINS={
     'steel/gemm/nax.h':'fb10bcae44095e9fed5c81213d03527dd5fe5ac11be11ec7784bd357c6f317ec',
     'steel/gemm/gemm_nax.h':'8f8d11f3c29e30dbfcaa6799963edd5fb71b81f912c4f3494e294d3002e3d337',
 }
+# Per-build (libmlx sha256, header pins).  0.32.5 re-audit (2026-11-27,
+# v0.32.4..v0.32.5): the route is one stock BF16 batched einsum (M99, N1024,
+# K4096 per group) on the steel NAX GEMM.  steel/gemm/nax.h and gemm_nax.h are
+# byte-identical; mma.h only gains a ``TB = T`` template parameter on
+# BlockMMA::mma (BaseMMAFrag unchanged); einsum.cpp is unchanged and matmul.cpp
+# changes only the transposed gemv_t tiles (mlx #4850, a vector path this M99
+# GEMM never takes) and empty GatherMM/SegmentedMM outputs.  transforms.h's
+# TransformAdd/Axpby change reaches only addmm epilogues, not this einsum.
+# libmlx/metallib are rebuilt, so the stock numerical profile stays a GPU-gate
+# claim (provenance source-woa-native-pp), not a CPU one.
+PINS_BY_VERSION={
+    '0.32.4':(LIBRARY_SHA256,HEADER_PINS),
+    '0.32.5':('0b8158bf29ecac60049f9163dda9537aab10d6fd8aa3d7614c646c3e6f810750',{
+        **HEADER_PINS,
+        'steel/gemm/mma.h':'21439be1087ac840ac5936bda0e57bd982fb7b104ea5e5f82ba7be0d2eaee524',
+    }),
+}
 
 
 def configuration_supported(args):
@@ -34,13 +51,15 @@ def owning_alias(name):
 @lru_cache(maxsize=1)
 def implementation_identity():
     import mlx.core as mx
-    if importlib.metadata.version('mlx')!='0.32.4':raise RuntimeError('Source native WoA PP MLX version changed; re-audit required')
+    pinned=PINS_BY_VERSION.get(importlib.metadata.version('mlx'))
+    if pinned is None:raise RuntimeError('Source native WoA PP MLX version changed; re-audit required')
+    library_sha256,header_pins=pinned
     root=Path(mx.__file__).resolve().parent
-    if hashlib.sha256((root/'lib/libmlx.dylib').read_bytes()).hexdigest()!=LIBRARY_SHA256:raise RuntimeError('Source native WoA PP MLX build changed; re-audit required')
-    for name,expected in HEADER_PINS.items():
+    if hashlib.sha256((root/'lib/libmlx.dylib').read_bytes()).hexdigest()!=library_sha256:raise RuntimeError('Source native WoA PP MLX build changed; re-audit required')
+    for name,expected in header_pins.items():
         if hashlib.sha256((root/'include/mlx/backend/metal/kernels'/name).read_bytes()).hexdigest()!=expected:raise RuntimeError('Source native WoA PP header changed; re-audit required')
     own=hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
-    return hashlib.sha256((POLICY+':'+LIBRARY_SHA256+':'+own+':'+repr(sorted(HEADER_PINS.items()))).encode()).hexdigest()
+    return hashlib.sha256((POLICY+':'+library_sha256+':'+own+':'+repr(sorted(header_pins.items()))).encode()).hexdigest()
 
 
 def eligible(name,x,weight,*,groups=8,check_device=True):

@@ -41,7 +41,7 @@ def main():
         mx.eval(ids, counts, n_sel, q_pos, left_pad)
         kw = dict(scale=bench.D ** -0.5, u_width=u_width, total=total, n_kv_heads=case.kvh)
         for law in a.laws.split(","):
-            def run(lazy):
+            def run(lazy, case=case):
                 nax.set_lazy_rescale(lazy)
                 out = nax.nax_qsa_attention(case.q, case.k, case.v, ids, counts, n_sel, q_pos,
                                             left_pad, law=law, **kw)
@@ -62,7 +62,7 @@ def main():
             cells.append(cell)
             print(json.dumps({k: cell[k] for k in ("context", "law", "bitwise_equal",
                                                    "eager_ms_median", "lazy_ms_median")}), flush=True)
-        del case
+        del case, run
     nax.set_lazy_rescale(False)
     git = lambda *x: subprocess.run(["git", *x], capture_output=True, text=True, cwd=ROOT).stdout.strip()  # noqa: E731
     receipt = {"schema": "mlx2.qsa-nax-lazy-rescale-probe.v1", "mlx2_commit": git("rev-parse", "HEAD"),

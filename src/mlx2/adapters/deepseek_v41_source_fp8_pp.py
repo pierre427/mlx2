@@ -18,12 +18,23 @@ HEADER_PINS={
     'fp_quantized_nax.h':'8a712870dc17493ddf05daa706481d52867b29e9141d2ecb76dccf47f04c8b42',
 }
 SHAPES={'attn_q_b':(1280,32768),'attn_output_b':(8192,5120)}
+# Audited MLX builds.  0.32.5 is deliberately NOT admitted (re-audit
+# 2026-11-27, v0.32.4..v0.32.5): this profile IS the stock BF16 MXFP8 QMM at
+# M99, and that dispatch changed.  mlx #4781 routes a transposed, N-aligned,
+# 8-byte-aligned BF16 activation through the staged fp_qmm_t_nax schedule
+# (wm4 wn1, bm64, flat 128-thread groups; fp_quantized_nax.h +432 lines), and
+# qmm_nax_k_partitions may split WoB's K=8192 into 2-4 F32 partitions plus a
+# steel splitk accumulate.  The validated profile (provenance
+# deepseek-v41-source-fp8-native-pp, 0.32.4 component unit + model closure)
+# therefore does not transfer.  Admitting 0.32.5 needs a new GPU component
+# unit and model closure; until then the opt-in route refuses (fail-closed).
+AUDITED_MLX_VERSIONS=('0.32.4',)
 
 
 @lru_cache(maxsize=1)
 def implementation_identity():
     import mlx.core as mx
-    if importlib.metadata.version('mlx')!='0.32.4':raise RuntimeError('Source native FP8 PP MLX version changed; re-audit required')
+    if importlib.metadata.version('mlx') not in AUDITED_MLX_VERSIONS:raise RuntimeError('Source native FP8 PP MLX version changed; re-audit required')
     root=Path(mx.__file__).resolve().parent
     if hashlib.sha256((root/'lib/libmlx.dylib').read_bytes()).hexdigest()!=LIBRARY_SHA256:
         raise RuntimeError('Source native FP8 PP MLX build changed; re-audit required')
