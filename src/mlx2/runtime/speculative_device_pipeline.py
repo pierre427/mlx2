@@ -324,15 +324,22 @@ def dispatch(device_round, owner, lane, depth, anchor=None, inflight_rows=None, 
         anchor_array = (mx.array([int(lane.anchor)], dtype=mx.int32) if anchor is None
                         else anchor.reshape(1).astype(mx.int32))
         history = extra = None
+        pad_block = (getattr(device_round, "fixed_shape", False) and depth <= int(owner.num_draft)
+                     and getattr(owner.draft, "draft_lazy_pad", False))
         if lane.processors:
-            if previous is None:
-                history = list(lane.history)
-            else:
-                from .speculative_device_presence import DeviceHistory
+            from .speculative_device_presence import DeviceHistory, presence_contracts
 
+            if previous is not None:
                 history = DeviceHistory(mx, lane.history, lane.anchor,
                                         previous.plan.row.drafts, previous.commit - 1,
                                         previous.plan.last)
+            elif pad_block and presence_contracts(lane.processors):
+                # A round with nothing in flight ahead of it (the first after
+                # entry, one near a budget end) builds the following round's
+                # graph (slice 1a-5, one round kind).
+                history = DeviceHistory.first(mx, lane.history, lane.anchor, owner.num_draft)
+            else:
+                history = list(lane.history)
             extra = {"logits_processors": lane.processors, "processor_history": history}
         if composed:
             # The source is planned from the host state: exact for a first
@@ -341,8 +348,6 @@ def dispatch(device_round, owner, lane, depth, anchor=None, inflight_rows=None, 
             extra.update(planning_anchor=int(lane.anchor), planning_history=list(lane.history),
                          proposal_score_state=lane.proposal_score_counts,
                          proposal_trust_state=lane.proposal_trust_states, cohort_width=1)
-        pad_block = (getattr(device_round, "fixed_shape", False) and depth <= int(owner.num_draft)
-                     and getattr(owner.draft, "draft_lazy_pad", False))
         if pad_block:
             # The serial fixed-shape round's drafter graph (``DeviceRound._pad_depth``;
             # a pipelined round is full depth, so nothing is padded off).
@@ -356,6 +361,9 @@ def dispatch(device_round, owner, lane, depth, anchor=None, inflight_rows=None, 
         if pad_block:
             # The proposals are the first ``depth`` (a composed backend's cap included).
             count = depth if not composed else min(depth, int(owner.draft.backend_proposal_length))
+            if count < int(drafts.shape[0]):
+                # Deferred with the dispatch counters; the lane count at booking.
+                _bump(owner.scheduler_stats, "external_device_round_fixed_shape_padded_drafts")
         fixed = getattr(device_round, "fixed_shape", False)
         menu = int(owner.num_draft)
         if fixed and count > menu:
@@ -372,7 +380,7 @@ def dispatch(device_round, owner, lane, depth, anchor=None, inflight_rows=None, 
         )
         row = SimpleNamespace(lane=lane, count=count, host=None, drafts=drafts, q=None,
                               ratio=False, seed=None, source="device_round", composition=composition)
-        if lane.processors and previous is not None:
+        if lane.processors and not isinstance(history, list):
             row.device_history = history  # verify rows read the same device history
         if fixed:
             plan = device_round._lane_plan_fixed(owner, row, logits[0, :rows])
@@ -386,7 +394,12 @@ def dispatch(device_round, owner, lane, depth, anchor=None, inflight_rows=None, 
         for ring in lane.draft_cache:
             ring.pending_count = commit
         lane.tail = features[0:1]
-        mx.async_eval(plan.packet, commit)
+        # Under ``fixed_shape`` the round also schedules its own commit side, so
+        # a round's encoded work does not depend on whether one follows it.
+        mx.async_eval(plan.packet, commit,
+                      *((lane.tail, *transaction.device_state(),
+                         *(a for ring in lane.draft_cache for a in getattr(ring, "state", ())
+                           if a is not None)) if fixed else ()))
     except BaseException:
         restore(owner, rec, stats=True, settle=False)
         for name, value in before.items():
@@ -471,6 +484,8 @@ def book(device_round, owner, inflight, following):
         device_round._lane_count(lane, key)
     if getattr(device_round, "fixed_shape", False):
         device_round._lane_count(lane, "fixed_shape_rounds")
+        if inflight.count < int(inflight.plan.row.drafts.shape[0]):
+            device_round._lane_count(lane, "fixed_shape_padded_drafts")
     tokens = inflight.plan.drafts_host
     blocks = [HostDraftRow(tokens, [PointMassLaw(t) for t in tokens], 1)]
     for key, value in (inflight.plan.row.composition or {}).items():
@@ -508,8 +523,12 @@ def serve(device_round, owner, cohort, depth):
     """Serve this poll's round pipelined; False leaves it to the serial round."""
     inflight = getattr(owner, "_device_inflight", None)
     reason = skip_reason(owner, cohort)
-    if reason is None and depth != _follow_depth(owner):
-        reason = "short_depth"  # a budget end is near: the serial round decides it
+    if (reason is None and depth != _follow_depth(owner)
+            and not (getattr(device_round, "fixed_shape", False) and 1 <= depth <= int(owner.num_draft)
+                     and getattr(owner.draft, "draft_lazy_pad", False))):
+        # A budget end is near: the serial round decides it. Under ``fixed_shape``
+        # a padding drafter keeps it pipelined (the menu block, one round kind).
+        reason = "short_depth"
     if (reason is None and getattr(device_round, "fixed_shape", False)
             and depth > int(owner.num_draft)):
         # A round deeper than the fixed-shape menu (unreachable while depths are

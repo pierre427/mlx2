@@ -670,6 +670,17 @@ class DeviceCommitTransaction:
             raise
         self._device_committed = True
 
+    def device_state(self):
+        """The lazy arrays a device commit leaves: KV fills and rolled-back recurrent entries.
+
+        A ``fixed_shape`` pipelined round schedules them with its own packet
+        (slice 1a-5), so they are encoded in this round whether or not a
+        following round is dispatched before it is read."""
+        state = [cache.pos for cache, _base in self._kv]
+        for cache, *_rest in self._recurrent:
+            state.extend(entry for entry in cache.cache if entry is not None)
+        return state
+
     def commit(self, accepted_lengths):
         if self.closed:
             raise RuntimeError("stale or closed device-commit transaction")

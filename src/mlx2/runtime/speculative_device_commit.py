@@ -154,10 +154,37 @@ def enter(owner, lane):
         for entry in lane.draft_cache
     ]
     rows = int(lane.tail.shape[1])
-    if rows:
+    fixed = getattr(getattr(owner, "device_round", None), "fixed_shape", False)
+    menu_rows = int(owner.num_draft) + 1
+    ring_list = [r for r in rings if type(r) is DeviceRingKVCache]
+    # An empty tail pads only onto allocated rings: an empty ring would take its
+    # buffer dtype from the padding (an ``_empty_hidden`` tail is float32).
+    if (fixed and rows < menu_rows and ring_list
+            and (rows or all(r.keys is not None for r in ring_list))):
+        # slice 1a-5: the first round appends the menu width, as every later one
+        # does (an empty tail included); rows past the committed count are masked
+        # out of the ring.
+        tail = lane.tail
+        lane.tail = mx.concatenate(
+            [tail, mx.zeros((tail.shape[0], menu_rows - rows, *tail.shape[2:]), tail.dtype)],
+            axis=1)
         count = mx.array([rows], dtype=mx.int32)
         for ring in rings:
             ring.pending_count = count
+    elif rows:
+        count = mx.array([rows], dtype=mx.int32)
+        for ring in rings:
+            ring.pending_count = count
+    if fixed:
+        # The conversion runs here, once per entry, not inside the first device
+        # round: that round then builds the same graph as every later one.
+        from .models.cache import ArraysCache
+
+        mx.eval([lane.tail, *(a for ring in ring_list for a in ring.state if a is not None),
+                 *(a for entry in cache if type(entry) is DeviceOffsetKVCache
+                   for a in (entry.keys, entry.values, entry.pos) if a is not None),
+                 *(a for entry in cache if type(entry) is ArraysCache
+                   for a in entry.cache if a is not None)])
     lane.cache, lane.draft_cache = cache, rings
     lane.device_commit_tail_rows = rows
     # The target's exact committed length, kept on the host from the counts

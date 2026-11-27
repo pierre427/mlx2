@@ -758,10 +758,21 @@ class DeviceRound:
                         # The lane's committed target cache, as ``_propose``
                         # passes it (admitted by ``draft_lazy_target_caches``).
                         extra["target_caches"] = [lane.cache]
+                    from .speculative_device_presence import DeviceHistory, presence_contracts
+
+                    pad = self._pad_depth(owner, lane, draft_depth)
+                    device_history = None
+                    if lane.processors and pad is not None and presence_contracts(lane.processors):
+                        # slice 1a-5: the pipelined round's device history layout
+                        # (``DeviceHistory.first``), so a serial fixed-shape round
+                        # builds the same graph as a pipelined one.
+                        device_history = DeviceHistory.first(mx, lane.history, lane.anchor,
+                                                             owner.num_draft)
                     if lane.processors:
                         # Admitted by ``_lane_reason``/``run`` (``processors``).
                         extra.update(logits_processors=lane.processors,
-                                     processor_history=list(lane.history))
+                                     processor_history=(device_history if device_history is not None
+                                                        else list(lane.history)))
                     if (getattr(owner.draft, "draft_lazy_history", False)
                             and "processor_history" not in extra):
                         # A drafter whose draft reads the committed history itself
@@ -769,15 +780,18 @@ class DeviceRound:
                         # ``_propose`` / ``requires_processor_histories`` row passes it.
                         extra["processor_history"] = list(lane.history)
                     composed = getattr(owner.draft, "draft_lazy_composed", False)
-                    pad = self._pad_depth(owner, lane, draft_depth)
                     if pad is not None:
                         extra["pad_to"] = pad
                     if composed:
                         # The executor-owned lane states ``_propose`` passes.
-                        extra.update(processor_history=list(lane.history),
+                        extra.update(processor_history=(device_history if device_history is not None
+                                                        else list(lane.history)),
                                      proposal_score_state=lane.proposal_score_counts,
                                      proposal_trust_state=lane.proposal_trust_states,
                                      cohort_width=len(cohort))
+                        if device_history is not None:
+                            extra.update(planning_anchor=int(lane.anchor),
+                                         planning_history=list(lane.history))
                     drafts = owner.draft.draft_lazy(
                         lane.anchor, lane.tail, lane.draft_cache, draft_depth, sampler, **extra
                     )
@@ -814,6 +828,8 @@ class DeviceRound:
                     composition=composition,
                     source="device_round", seed=seed, ratio=ratio, keys=None,
                 ))
+                if device_history is not None:
+                    rows[-1].device_history = device_history
                 _bump(owner.scheduler_stats, "external_device_round_lazy_draft_lanes")
                 self._lane_count(lane, "lazy_draft_rounds")
             drafted = sum(row.source != "prompt_copy" for row in rows)

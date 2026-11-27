@@ -61,6 +61,24 @@ class DeviceHistory:
         # tail, so it is built once per round, not per verify row and draft.
         self._host_parts = {}
 
+    @classmethod
+    def first(cls, mx, host_history, anchor, menu):
+        """The history of a round with no unread round ahead of it (slice 1a-5).
+
+        ``H + [anchor] + tail``, laid out as a following round's history so a
+        ``fixed_shape`` round builds one graph whether or not a round is in
+        flight: ``menu`` masked previous drafts and ``last = anchor`` at the
+        anchor's own position (``prev_kept = -1``). The duplicate shares the
+        anchor's position, and the penalty marks distinct tokens, so the
+        window and the law are the host processor's."""
+        import numpy as np
+
+        anchor = int(anchor)
+        # Host-built constants and ``0 - 1`` (a following round's ``commit - 1``):
+        # the same ops in the round as a following round's history.
+        return cls(mx, host_history, anchor, mx.array(np.zeros((int(menu),), dtype=np.int32)),
+                   mx.array([0], dtype=mx.int32) - 1, mx.array([anchor], dtype=mx.int32))
+
     def _window(self, contract, tail):
         mx = self.mx
         _penalty, context, start = contract

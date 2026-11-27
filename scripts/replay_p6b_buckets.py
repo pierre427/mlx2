@@ -82,7 +82,9 @@ def main(argv=None):
               "distinct_layouts": len(layouts), "per_size": {}, "layout_sizes": {}, "transitions": [],
               "grid_only_differences": []}
     for digest in layouts:
-        report["layout_sizes"][digest] = sorted({r["size"] for r in rows if r["layout"] == digest})
+        # A layout may span sized cells and unsized (GSM8K) rounds: None sorts last.
+        report["layout_sizes"][digest] = sorted({r["size"] for r in rows if r["layout"] == digest},
+                                                key=lambda s: (s is None, s or 0))
     for size in sizes:
         rs = by_size.get(size, [])
         report["per_size"][str(size)] = {"recordings": len(rs), "layouts": sorted({r["layout"] for r in rs}),
