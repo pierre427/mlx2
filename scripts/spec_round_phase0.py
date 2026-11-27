@@ -885,8 +885,16 @@ def summarize(document):
         row["contended_period_increase"] = period_increase
         # Comparing different numbers of tokens per round confounds work per
         # round with host contention on this fixed, greedy prompt.
-        comparable = pair_complete and mal_drift == 0 and period_increase is not None
-        valid_host_share = quiet_complete and host_share is not None
+        # A cell where some request left the probed route (an MTP lane that
+        # decoded as a target-only plain fallback) averages two routes'
+        # rounds: neither criterion describes either route.  Older documents
+        # without transition data (None) keep their verdicts.
+        mixed = [name for name, cell in (("quiet", q), ("contended", c))
+                 if cell and cell.get("route_transitions")]
+        row["mixed_route_cells"] = mixed
+        comparable = (pair_complete and mal_drift == 0 and period_increase is not None
+                      and not mixed)
+        valid_host_share = quiet_complete and host_share is not None and "quiet" not in mixed
         reasons = []
         if comparable and period_increase >= GO_PERIOD_INCREASE - 1e-12:
             reasons.append(f"contended round period {period_increase:.1%} longer at unchanged tokens/round")
@@ -927,7 +935,8 @@ def report(args):
             f"{fmt(c.get('runnable_median'), '.0f')} ({fmt(c.get('load1_mean'), '.0f')})",
             fmt(r["quiet_host_share"], ".1%"),
             f"{fmt(q.get('route_transitions'), '.0f')}/{fmt(c.get('route_transitions'), '.0f')}",
-            {True: "go", False: "no-go", None: "incomplete"}[r["phase1_go"]]]) + " |")
+            {True: "go", False: "no-go", None: "mixed route" if r.get("mixed_route_cells")
+             else "incomplete"}[r["phase1_go"]]]) + " |")
     text = "\n".join(lines) + "\n"
     document = {"schema": SCHEMA + ".report", "rows": rows,
                 "criteria": {"contended_period_increase": GO_PERIOD_INCREASE, "quiet_host_share": GO_HOST_SHARE}}

@@ -902,3 +902,21 @@ def test_recording_reflection_follows_the_recordings_kernel_order(monkeypatch, t
     assert round_probe._record["errors"] == []
     doc = json.loads(next(tmp_path.glob("round-*.json")).read_text())
     assert [p["function"] for p in doc["pipelines"]] == doc["summary"]["kernels"]
+
+
+def test_mixed_route_cells_give_no_verdict():
+    """Maxwell 16K at a 2 GiB cap: one request decoded as a plain fallback, so
+    the quiet averages mixed two routes and a host-share "go" described neither."""
+    quiet = _cell("quiet", 100, 10.0, 0.2, 0.3, gpu=7.0)
+    contended = _cell("contended", 95, 10.5, 0.2, 0.2)
+    base = {"checkpoint": "c@f", "arm": "a", "cells": [quiet, contended]}
+    assert harness.summarize(base)["rows"][0]["phase1_go"] is True
+    for cell in (quiet, contended):
+        cell["route_transitions"], cell["probe_route_changes"] = [], []
+    clean = harness.summarize(base)["rows"][0]
+    assert clean["phase1_go"] is True and clean["mixed_route_cells"] == []
+    quiet["probe_route_changes"] = [{"request": 1, "routes": ["generate:GenerationBatch"],
+                                     "first_routes": ["generate:MTPGenerationBatch"]}]
+    row = harness.summarize(base)["rows"][0]
+    assert row["mixed_route_cells"] == ["quiet"]
+    assert row["phase1_go"] is None and row["go_reasons"] == []

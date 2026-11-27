@@ -5586,8 +5586,25 @@ class APCv2(PrefixIndex):
                 remaining = tokens
         cached_tokens = len(tokens) - len(remaining) if cache is not None else 0
         hit = cache is not None and cached_tokens > 0
+        # Depth of the draft checkpoint this route could resume from instead:
+        # the resident ancestor, or a disk-only one the admission restore can
+        # bring back.  A plain landing at the same depth saves no prefill and
+        # loses the draft route (Maxwell 16K at a 2 GiB cap: the spilled
+        # prompt boundary sat behind the resident finished turn, both at
+        # ``len - 1``).  A disk checkpoint deferred for lack of restore budget
+        # sets no floor: the plain hit still beats a cold prefill.  Both
+        # sources count: a shallower resident ancestor (an earlier turn's
+        # boundary) is returned beside a deeper disk one deferred for
+        # admission, and only the deeper one makes the plain landing lose.
+        sidecar_floor = int(ancestor[0]) if ancestor is not None else 0
+        if ancestor_deferred == "admission":
+            sidecar_floor = max(sidecar_floor, self._deferred_disk_depth_locked(
+                key, tokens, (), require_sidecar=True,
+                allow_target_only_plain=False,
+            ))
         plain_wins = (
             allow_target_only_plain and hit and cached_tokens >= len(tokens) - 1
+            and cached_tokens > sidecar_floor
         )
         if ancestor is not None and not plain_wins:
             # Only a plain landing at ``len - 1`` beats a draft checkpoint,
