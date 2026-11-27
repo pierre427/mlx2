@@ -831,6 +831,12 @@ class ComposedDraftModel:
             extra.update(logits_processors=logits_processors,
                          processor_history=(processor_history if device_history
                                             else list(processor_history or ())))
+        elif getattr(self.backend, "draft_lazy_history", False) and processor_history is not None:
+            # A backend whose draft reads the committed history itself (XPress's
+            # predecessor token, prompt lookup): the host path gives it
+            # ``processor_histories`` on every row, processors or not.
+            extra["processor_history"] = (processor_history if device_history
+                                          else list(processor_history))
         if pad_to is not None:
             extra["pad_to"] = pad_to
         tokens = backend_lazy(anchor, hidden, cache, plan.backend_length, sampler, **extra)

@@ -105,6 +105,32 @@ calls into this module.  Switches (``device_round`` policy object):
     (DC-6) is applied to all rows by ``DeviceHistory.apply_rows``.
     This slice fixes shapes; it does not wrap the round in ``mx.compile``.
 
+KV-sharing drafters (``requires_target_caches``: Hy4 DFly2) take part only
+if they declare ``draft_lazy_target_caches``; the lazy draft then receives
+``target_caches=[lane.cache]``, the lane's committed target cache that the
+host ``_propose`` passes. Others decline (``target_caches``), and so does
+proposal composition over such a backend (``composition_target_caches``):
+``ComposedDraftModel.draft_lazy`` does not forward the target caches.
+
+Context-pairing drafters (EAGLE ``requires_context_tokens``: native MTP
+heads, ``drafters/native_mtp.py``) take part only if they declare
+``draft_lazy_pairs_context``; the round then passes ``context_tokens`` (the
+token after each pending tail feature, ending with the anchor), exactly the
+pairing the host ``_propose`` passes, and counts it under
+``external_context_token_pairings``. Other pairing drafters decline
+(``context_pairing``).
+
+A drafter that declares ``draft_lazy_history`` (prompt lookup,
+``drafters/prompt_lookup_draft.py``) is passed the lane's committed history
+as ``processor_history`` on every lazy draft, the history the host
+``_propose`` passes as ``processor_histories``.
+
+A drafter may define ``draft_lazy_admission(anchor, history, depth, *,
+lookup)``, asked per lane before the round's snapshot; a returned reason
+declines the cohort (prompt lookup: ``prompt_lookup_graft``, and
+``prompt_lookup_no_copy`` so the host serves an anchor-only round with its
+plain single-token step).
+
 ``prompt_copy_round`` (separate policy object, ``prompt_copy_round.py``)
     replaces a round's drafter proposals with a long copy from the prompt.
 
@@ -398,7 +424,9 @@ class DeviceRound:
             return "dynamic_tree"
         if owner.fly_verification.enabled:
             return "fly_verification"
-        if owner.pair_context_tokens:
+        if owner.pair_context_tokens and not getattr(owner.draft, "draft_lazy_pairs_context", False):
+            # An EAGLE-paired drafter takes part only if its ``draft_lazy``
+            # accepts the lane's context pairing (native MTP heads).
             return "context_pairing"
         if getattr(owner, "predraft", False):
             return "predraft"
@@ -412,7 +440,16 @@ class DeviceRound:
             return "pairwise_selection"
         if getattr(owner.draft, "requires_proposal_contexts", False):
             return "proposal_contexts"
-        if getattr(owner.draft, "requires_target_caches", False):
+        if (getattr(owner.draft, "requires_target_caches", False)
+                and getattr(owner.draft, "draft_lazy_composed", False)):
+            # ComposedDraftModel forwards a KV-sharing backend's declarations
+            # (``__getattr__``) but its ``draft_lazy`` does not forward
+            # ``target_caches``; the composed host path serves such a backend.
+            return "composition_target_caches"
+        if (getattr(owner.draft, "requires_target_caches", False)
+                and not getattr(owner.draft, "draft_lazy_target_caches", False)):
+            # A KV-sharing drafter takes part only if its ``draft_lazy`` reads
+            # the lane's committed target cache (Hy4 DFly2; ``_run`` passes it).
             return "target_caches"
         if (getattr(owner.draft, "requires_proposal_score_states", False)
                 and not getattr(owner.draft, "draft_lazy_composed", False)):
@@ -420,7 +457,17 @@ class DeviceRound:
             # host proposal path unless the wrapper drafts composed rows
             # lazily (ComposedDraftModel.draft_lazy, slice 1a-1b).
             return "proposal_composition"
-        if getattr(getattr(owner.model, "model", None), "residual_taps", None) is not None:
+        taps = getattr(getattr(owner.model, "model", None), "residual_taps", None)
+        if taps is not None and (
+                getattr(taps, "steer", None) is not None
+                or getattr(taps, "capture", None) is not None
+                or any(getattr(processor, "residual_steer_block", None) is not None
+                       or getattr(processor, "residual_steer", None) is not None
+                       for lane in getattr(owner, "lanes", {}).values()
+                       for processor in (getattr(lane, "processors", None) or ()))):
+            # The host verify steers rows only for lanes whose processors ask
+            # (``verify_block_steer``); a target that merely exposes taps
+            # (North) verifies unsteered, as this round does.
             return "residual_steer"
         if os.environ.get("MLX2_EXTERNAL_VERIFY_PREBUILD", "0") == "1":
             return "verify_prebuild"
@@ -488,6 +535,11 @@ class DeviceRound:
                 # ``prompt_lookup_max_span``: the host plans copies for the
                 # engine depth, beyond the backend's; keep that path exact.
                 reason = "composition_long_copies"
+        if (reason is None and getattr(owner.draft, "requires_target_caches", False)
+                and (not lazy or self.copy is not None)):
+            # Only the lazy draft passes the target caches; copy rounds keep
+            # the host path for such drafters.
+            reason = "target_caches"
         if reason is None:
             for lane in cohort:
                 reason = self._lane_reason(lane)
@@ -510,6 +562,21 @@ class DeviceRound:
         base = min(owner.num_draft, min(l.maximum - l.generated - 1 for l in cohort))
         if base < 1:
             return False  # a final-budget round: the zero-count chain body serves it
+        draft_depth = min(base, int(getattr(owner.draft, "num_draft", base)))
+        admission = getattr(owner.draft, "draft_lazy_admission", None)
+        if (lazy and callable(admission)
+                and not getattr(owner.draft, "draft_lazy_composed", False)):
+            # A drafter's per-lane admission (prompt lookup: a graft, or no
+            # copy to propose), before the snapshot and any copy booking.
+            # Composition plans its own sources; its backend's hook is not
+            # asked here (its lazy draft declines the same rows itself).  With
+            # a prompt-copy round a lane's lookup may go unused (it copies),
+            # so only the static checks run (``lookup=False``).
+            for lane in cohort:
+                reason = admission(lane.anchor, list(lane.history), draft_depth,
+                                   lookup=self.copy is None)
+                if reason is not None:
+                    return _decline(owner, reason, len(cohort))
         copies = [None] * len(cohort)
         if self.copy is not None:
             cap = self._lane_exact_copy_cap(owner, cohort)
@@ -523,7 +590,6 @@ class DeviceRound:
                 return False
             for lane, outcome in zip(cohort, outcomes, strict=True):
                 self.copy.book(owner, lane, outcome)
-        draft_depth = min(base, int(getattr(owner.draft, "num_draft", base)))
         try:
             self._run(owner, cohort, copies, draft_depth)
         except HostRedo:
@@ -593,6 +659,10 @@ class DeviceRound:
             dict(owner.draft.composition_stats)
             if getattr(owner.draft, "draft_lazy_composed", False) else None
         )
+        # The drafter's own counters (e.g. native MTP ``draft_calls``): a
+        # restored round is redone on the host and must not count twice.
+        draft_stats = getattr(owner.draft, "stats", None)
+        draft_stats_snapshot = dict(draft_stats) if type(draft_stats) is dict else None
         owner._open = True
         transaction = None
         # Whether this cohort's decision runs on the device (``_plan`` keeps
@@ -636,10 +706,30 @@ class DeviceRound:
                 try:
                     extra = ({"rng": lane.rng}
                              if getattr(owner.draft, "draft_lazy_consumes_rng", False) else {})
+                    if owner.pair_context_tokens:
+                        # The pairing ``_propose`` passes: the token after each
+                        # pending tail feature, ending with the anchor.
+                        from .external_speculative import _context_pairing
+
+                        pairing = _context_pairing(lane.history, lane.anchor,
+                                                   int(lane.tail.shape[1]))
+                        _bump(owner.scheduler_stats, "external_context_token_pairings",
+                              len(pairing))
+                        extra["context_tokens"] = [pairing]
+                    if getattr(owner.draft, "requires_target_caches", False):
+                        # The lane's committed target cache, as ``_propose``
+                        # passes it (admitted by ``draft_lazy_target_caches``).
+                        extra["target_caches"] = [lane.cache]
                     if lane.processors:
                         # Admitted by ``_lane_reason``/``run`` (``processors``).
                         extra.update(logits_processors=lane.processors,
                                      processor_history=list(lane.history))
+                    if (getattr(owner.draft, "draft_lazy_history", False)
+                            and "processor_history" not in extra):
+                        # A drafter whose draft reads the committed history itself
+                        # (prompt lookup; XPress's predecessor token), as the host
+                        # ``_propose`` / ``requires_processor_histories`` row passes it.
+                        extra["processor_history"] = list(lane.history)
                     composed = getattr(owner.draft, "draft_lazy_composed", False)
                     pad = self._pad_depth(owner, lane, draft_depth)
                     if pad is not None:
@@ -808,6 +898,9 @@ class DeviceRound:
             if composition_snapshot is not None:
                 owner.draft.composition_stats.clear()
                 owner.draft.composition_stats.update(composition_snapshot)
+            if draft_stats_snapshot is not None:
+                owner.draft.stats.clear()
+                owner.draft.stats.update(draft_stats_snapshot)
             owner.scheduler_stats["recovery_checkpoint_restores"] += len(recovery)
             raise
         finally:

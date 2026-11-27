@@ -31,6 +31,10 @@ ordinary fallback.  A greedy chain records the head's top alternatives at
 each position for the continuation pool's confidence tree: the alternatives
 come from logits the chain already computed, so they cost no extra head
 step.
+
+``draft_lazy`` (default off; ``speculative_device_round`` ``lazy_draft``)
+builds the same greedy chain without a host read per position, so the
+device round can queue draft and verify as one graph.
 """
 
 from __future__ import annotations
@@ -360,6 +364,127 @@ class NativeMTPDraftModel:
                     processors=processors,
                 )
         return tokens_out, laws_out
+
+    # -- lazy drafts (speculative_device_round ``lazy_draft``) -----------------
+    # The device round passes the lane's EAGLE context pairing (this drafter
+    # ``requires_context_tokens``) and stateless processors to ``draft_lazy``.
+    draft_lazy_pairs_context = True
+    draft_lazy_processors = True
+
+    def draft_lazy(self, anchor, hidden, cache, proposal_length, sampler=None, *,
+                   context_tokens=None, logits_processors=None, processor_history=None):
+        """One lane's drafts as a lazy int32 ``[n]`` array, no host read.
+
+        ``speculative_device_round`` ``lazy_draft`` (default off, unqualified).
+        The ops are ``draft_distributions``' own for that lane: the pending
+        seeds (``hidden``, paired with ``context_tokens[0]``, which ends with
+        the anchor) extend the head cache, then the chain runs on a private
+        copy.  Each position takes the same top-``ALTERNATIVES_PER_POSITION
+        + 1`` partition and ``values[candidates] - logsumexp(values)`` the
+        host ranks, and selects as the host does (largest finite value, ties
+        to the smaller token id), on the device; the selected token feeds the
+        next head step as an array instead of a host int (same index, same
+        embedding row).  So greedy tokens are bitwise the host chain's.
+
+        ``logits_processors`` (stateless, history-pure; the device round's
+        ``processors`` switch) run on ``processor_history + [anchor] +
+        drafts so far`` as lazy token arrays, as the host prefix.  A position
+        the host would end early (non-finite normalizer or no finite
+        candidate: a grammar dead end) makes every token
+        ``DRAFT_LAZY_HOST_REDO``, so the round is restored and redone on the
+        host path, which drafts the shorter chain.
+
+        ``sampler(values [1, V]) -> [1]`` (``device_round.sampled_drafts``)
+        draws each token from the head's processed logits instead of the
+        argmax; the device ratio rule then verifies against the law it
+        recorded.  Without it the drafts are greedy point masses, as on the
+        host path, for greedy and sampled lanes alike.
+        """
+        import mlx.core as mx
+
+        from ..processor_probe import probe_logits_processors
+        from ..proposal_composition import LazyDecline
+        from .dflash2 import DRAFT_LAZY_HOST_REDO
+
+        count = int(proposal_length)
+        if count < 1:
+            raise ValueError("native MTP lazy drafts need a positive proposal length")
+        if hidden.shape[0] != 1:
+            raise ValueError("native MTP lazy drafts run one lane at a time")
+        if isinstance(anchor, mx.array):
+            # The pipelined round's unread anchor cannot close a host pairing.
+            raise ValueError("native MTP lazy drafts need a committed host anchor")  # noqa: TRY004
+        if callable(getattr(self.target, "mtp_start_cycle", None)) or callable(
+                getattr(self.target, "mtp_end_cycle", None)):
+            # Cycle hooks (shared index state) are validated only around the
+            # host chain's per-step reads; keep that path (no state touched).
+            raise LazyDecline("native_mtp_cycle_hooks")
+        if hidden.shape[1] == 0:
+            # No target seed yet (a one-token prompt): the host round serves it.
+            raise LazyDecline("native_mtp_no_seed")
+        anchor = int(anchor)
+        if context_tokens is None:
+            if hidden.shape[1] != 1:
+                raise ValueError("native MTP draft needs pairing for a multi-feature tail")
+            context_tokens = [[anchor]]
+        if len(context_tokens) != 1:
+            raise ValueError("native MTP lazy drafts take one lane's pairing")
+        pairing = [int(token) for token in context_tokens[0]]
+        if len(pairing) != hidden.shape[1] or pairing[-1] != anchor:
+            raise ValueError("native MTP pending pairing must end with the anchor")
+        processors = list(logits_processors or ())
+        if processors and callable(getattr(processor_history, "apply", None)):
+            raise ValueError("native MTP lazy drafts take a host processor history")
+        full_vocab = bool(processors)
+        rows = self._rows(cache, 1)[0]
+        self.stats["draft_calls"] += 1
+        if len(pairing) > 1:
+            self._step(
+                hidden[:, :-1], mx.array([pairing[:-1]], mx.uint32), rows, full_vocab=False,
+            )
+        logits, seed = self._step(
+            hidden[:, -1:], mx.array([pairing[-1:]], mx.uint32), rows, full_vocab=full_vocab,
+        )
+        self.stats["committed_positions"] += len(pairing)
+        top = logits[:, -1]
+        seed = seed[:, -1:]
+        private = copy.deepcopy(rows)
+        prefix = (mx.array(list(processor_history or ()) + [anchor], dtype=mx.int32)
+                  if processors else None)
+        drafted, dead = [], mx.array(False)
+        for position in range(count):
+            if position:
+                top, seed = self._step(
+                    seed, drafted[-1].astype(mx.uint32).reshape(1, 1), private,
+                    full_vocab=full_vocab,
+                )
+                top = top[:, -1]
+                self.stats["chain_steps"] += 1
+            values = top[0].astype(mx.float32)
+            if processors:
+                tokens = mx.concatenate([prefix, mx.stack(drafted)]) if drafted else prefix
+                values = probe_logits_processors(processors, tokens, values[None])[0].astype(
+                    mx.float32)
+            vocab = int(values.shape[-1])
+            width = min(ALTERNATIVES_PER_POSITION + 1, vocab)
+            candidates = mx.argpartition(-values, width - 1)[:width]
+            normalizer = mx.logsumexp(values)
+            chosen = values[candidates] - normalizer
+            finite = mx.isfinite(chosen)
+            dead = dead | ~mx.isfinite(normalizer) | ~mx.any(finite)
+            if sampler is not None:
+                token = sampler(values[None]).reshape(()).astype(mx.int32)
+            else:
+                ranked = mx.where(finite, chosen, mx.array(-float("inf"), dtype=mx.float32))
+                best = mx.max(ranked)
+                ids = candidates.astype(mx.int32)
+                token = mx.min(mx.where(finite & (ranked == best), ids,
+                                        mx.array(vocab, dtype=mx.int32)))
+            # A dead position's ``vocab`` sentinel never reaches the processor
+            # history or the next head step; the whole draft is redone below.
+            drafted.append(mx.where(dead, mx.array(0, dtype=mx.int32), token))
+        out = mx.stack(drafted).astype(mx.int32)
+        return mx.where(dead, mx.full((count,), DRAFT_LAZY_HOST_REDO, dtype=mx.int32), out)
 
     def draft_packed_paths(
         self, anchors, hidden, cache, pattern, *, context_tokens=None,

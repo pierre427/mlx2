@@ -690,6 +690,112 @@ class LiLiCorrDraftModel(XPressDraftModel):
         )
         return tokens, laws
 
+    # -- lazy drafts (speculative_device_round ``lazy_draft``; default off) -----
+    # The lattice walk starts at the anchor; XPress's predecessor history
+    # (``draft_lazy_history``) does not apply.
+    # One-lane cohorts only, like DFlash2: the host drafts a cohort in one
+    # batched call, and per-lane device drafts are not proven bitwise equal
+    # to it on the GPU (CPU-only evidence so far).
+    draft_lazy_width_one = True
+    draft_lazy_processors = True
+    draft_lazy_history = False
+
+    def draft_lazy(self, anchor, hidden, cache, proposal_length, sampler=None, *, rng=None,
+                   logits_processors=None, processor_history=None):
+        """One lane's LiLiCorr drafts as a lazy int32 ``[n]`` array, no host read.
+
+        The ops are ``draft_distributions``' for that lane: the full block
+        over ``batch_caches([cache])``, the anchor feature (the last pending
+        target row, or the invalid zero context at an empty committed
+        boundary), the top-K candidate lattice and correlation scores in
+        float32, and the greedy walk from column 0: per position the
+        predecessor column's score row, its argmax column and that column's
+        candidate, on the device.  With ``logits_processors`` the candidates
+        whose processed backbone logit (on ``history + [anchor] + drafts so
+        far``) is not finite are masked to -inf first, as on the host.  Where
+        the host raises (nonfinite scores, a NaN or +inf processed row) or
+        ends the draft early (no finite candidate) every token is
+        ``DRAFT_LAZY_HOST_REDO``, so the round is redone on the host path.
+
+        Point masses for greedy and sampled lanes alike; a ``sampler``
+        records that point mass (``lazy_point_mass_record``).  The feedback
+        manager's lattice capture and the verify prebuild are host-path
+        mechanisms: with either installed the round declines
+        (``LazyDecline``) before any state moves.
+        """
+        from ..processor_probe import probe_logits_processors
+        from ..proposal_composition import LazyDecline
+        from .dflash_base import (
+            lazy_anchors,
+            lazy_host_history,
+            lazy_mirrors,
+            lazy_one_lane,
+            lazy_point_mass_record,
+            lazy_prefix,
+            lazy_redo,
+        )
+
+        lazy_mirrors(self, LiLiCorrDraftModel)
+        if self.feedback_manager is not None:
+            raise LazyDecline("lilicorr_feedback_capture")
+        if getattr(self, "verify_prebuild", None) is not None:
+            raise LazyDecline("lilicorr_verify_prebuild")
+        count = int(proposal_length)
+        if not 1 <= count < self.config.block_size:
+            raise ValueError("LiLiCorr proposal length outside trained block")
+        caches = lazy_one_lane(self, hidden, cache, "LiLiCorr")
+        processors = list(logits_processors or ())
+        history = lazy_host_history(processors, processor_history, "LiLiCorr")
+        if hidden.shape[1]:
+            anchor_hidden = self.hidden_norm(self.fc(hidden[:, -1]))
+            anchor_valid = mx.ones((1,), dtype=mx.bool_)
+        else:
+            entries = caches[0].rows
+            if any(entry.offset > 0 for entry in entries):
+                raise ValueError("LiLiCorr cached context is missing pending anchor features")
+            anchor_hidden = mx.zeros((1, self.config.hidden_size))
+            anchor_valid = mx.zeros((1,), dtype=mx.bool_)
+        self.draft_feedback_payloads = None
+        self._ordered_alternative_context = None
+        self.adaptive_confidence_features = None
+        anchors = lazy_anchors(anchor)
+        inputs = mx.concatenate([anchors[:, None], mx.full(
+            (1, self.config.block_size - 1), self.config.mask_token_id, dtype=mx.int32)], axis=1)
+        features = self._hidden(inputs, hidden, caches)[:, 1:]
+        logits = self._logits(features)
+        candidates = mx.argsort(-logits, axis=-1)[..., : self.config.lilicorr_candidate_topk]
+        log_probs = logits.astype(mx.float32) - mx.logsumexp(
+            logits.astype(mx.float32), axis=-1, keepdims=True)
+        candidate_log_probs = mx.take_along_axis(log_probs, candidates, axis=-1)
+        embeddings = self.embed_tokens(candidates)
+        scores32 = self.lilicorr(
+            embeddings, candidate_log_probs, features, anchor_hidden, anchor_valid,
+        ).astype(mx.float32)
+        invalid = ~mx.all(mx.isfinite(scores32))
+        dense = logits.astype(mx.float32) if processors else None
+        prefix = lazy_prefix(history, anchors) if processors else None
+        column = mx.array(0, dtype=mx.int32)
+        drafted = []
+        for position in range(count):
+            value = mx.take(scores32[0, position], column, axis=0)
+            ids = candidates[0, position]
+            if processors:
+                tokens = mx.concatenate([prefix, mx.stack(drafted)]) if drafted else prefix
+                processed = probe_logits_processors(
+                    processors, tokens, dense[0, position][None])[0].astype(mx.float32)
+                invalid = invalid | mx.any(mx.isnan(processed)) | mx.any(mx.isposinf(processed))
+                value = mx.where(mx.isfinite(mx.take(processed, ids)), value,
+                                 mx.array(-float("inf"), dtype=mx.float32))
+                invalid = invalid | ~mx.any(mx.isfinite(value))
+            column = mx.argmax(value).astype(mx.int32)
+            drafted.append(mx.take(ids, column).astype(mx.int32))
+        self.stats["backbone_blocks"] += 1
+        self.stats["lattice_blocks"] += 1
+        chosen = mx.stack(drafted)
+        if sampler is not None:
+            lazy_point_mass_record(sampler, chosen, logits.shape[-1])
+        return lazy_redo(invalid, chosen)
+
     # -- tree tiles ---------------------------------------------------------
 
     # Children per expansion of the best-first tree; the lattice holds

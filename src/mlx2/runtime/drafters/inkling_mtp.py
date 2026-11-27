@@ -194,6 +194,15 @@ class CascadedMTPDraftModel(NativeMTPDraftModel):
 
     continuation_protocol = "native_mtp_head"
     receipt_kind = "external_native_mtp"
+    # ``draft_lazy`` (below) is the cascaded chain's own; the single-head
+    # ``NativeMTPDraftModel.draft_lazy`` steps ``mtp_step``, which a
+    # cascaded target does not have.
+    draft_lazy_pairs_context = True
+    draft_lazy_processors = True
+    # One-lane cohorts only: multi-lane device rounds of this drafter are not
+    # covered by an exactness test (CPU or GPU), so a wider cohort keeps the
+    # host round (counted ``lazy_draft_width``).
+    draft_lazy_width_one = True
 
     def __init__(self, target, *, num_draft, revision, sidecar=None, tree_pipeline=False):
         width, depths = require_depth_mtp_target(target)
@@ -603,6 +612,98 @@ class CascadedMTPDraftModel(NativeMTPDraftModel):
                 self._remember(histories[row], anchors[row], drafted, ranked, processors=[])
         self.stats["lazy_chain_calls"] = self.stats.get("lazy_chain_calls", 0) + 1
         return tokens_out, laws_out
+
+    # -- lazy drafts (speculative_device_round ``lazy_draft``) -----------------
+    def draft_lazy(self, anchor, hidden, cache, proposal_length, sampler=None, *,
+                   context_tokens=None, logits_processors=None, processor_history=None):
+        """One lane's cascaded chain as a lazy int32 ``[n]`` array, no host read.
+
+        ``speculative_device_round`` ``lazy_draft`` (default off, unqualified).
+        ``n = min(proposal_length, active_depths)``, the host chain's length.
+        The pending tail commits through ``_commit_rows`` (the host commit,
+        same cache state) and the chain runs ``_chain`` (the host depth
+        steps on the same private forks).  Each position ranks as the host
+        ``_rank`` does (top ``ALTERNATIVES_PER_POSITION + 1`` partition,
+        ``values[candidates] - logsumexp(values)``, largest finite value,
+        ties to the smaller token id) on the device, and the selected token
+        feeds the next depth as an array.  The processor-free host chain
+        consumes the raw argmax and redoes the row ranked when the two
+        differ, so its tokens are always the ranked ones: greedy tokens are
+        bitwise the host chain's.
+
+        ``logits_processors`` (stateless, history-pure) run on
+        ``processor_history + [anchor] + drafts so far``, the host prefix.
+        A position the host would end early (non-finite normalizer or no
+        finite candidate) makes every token ``DRAFT_LAZY_HOST_REDO``: the
+        round is restored and redone on the host, which drafts the shorter
+        chain.  ``sampler(values [1, V]) -> [1]`` (``sampled_drafts``) draws
+        each token from the processed logits instead, as
+        ``NativeMTPDraftModel.draft_lazy`` does.
+        """
+        import mlx.core as mx
+
+        from ..processor_probe import probe_logits_processors
+        from ..proposal_composition import LazyDecline
+        from .dflash2 import DRAFT_LAZY_HOST_REDO
+
+        if int(proposal_length) < 1:
+            raise ValueError("cascaded MTP lazy drafts need a positive proposal length")
+        if hidden.shape[0] != 1:
+            raise ValueError("cascaded MTP lazy drafts run one lane at a time")
+        if isinstance(anchor, mx.array):
+            # The pipelined round's unread anchor cannot close a host pairing.
+            raise ValueError("cascaded MTP lazy drafts need a committed host anchor")  # noqa: TRY004
+        if hidden.shape[1] == 0:
+            # No target seed yet (a one-token prompt): the host round serves it.
+            raise LazyDecline("native_mtp_no_seed")
+        anchor = int(anchor)
+        processors = list(logits_processors or ())
+        if processors and callable(getattr(processor_history, "apply", None)):
+            raise ValueError("cascaded MTP lazy drafts take a host processor history")
+        count = min(int(proposal_length), self.active_depths)
+        state = self._commit_rows(
+            [anchor], hidden, cache, None if context_tokens is None else list(context_tokens)
+        )[0]
+        self.stats["draft_calls"] += 1
+        prefix = (mx.array(list(processor_history or ()) + [anchor], dtype=mx.int32)
+                  if processors else None)
+        drafted = []
+        dead = [mx.array(False)]
+
+        def pick(top):
+            values = top[0].astype(mx.float32)
+            if processors:
+                tokens = mx.concatenate([prefix, mx.stack(drafted)]) if drafted else prefix
+                values = probe_logits_processors(processors, tokens, values[None])[0].astype(
+                    mx.float32)
+            vocab = int(values.shape[-1])
+            width = min(ALTERNATIVES_PER_POSITION + 1, vocab)
+            candidates = mx.argpartition(-values, width - 1)[:width]
+            normalizer = mx.logsumexp(values)
+            chosen = values[candidates] - normalizer
+            finite = mx.isfinite(chosen)
+            dead[0] = dead[0] | ~mx.isfinite(normalizer) | ~mx.any(finite)
+            if sampler is not None:
+                token = sampler(values[None]).reshape(()).astype(mx.int32)
+            else:
+                ranked = mx.where(finite, chosen, mx.array(-float("inf"), dtype=mx.float32))
+                best = mx.max(ranked)
+                ids = candidates.astype(mx.int32)
+                token = mx.min(mx.where(finite & (ranked == best), ids,
+                                        mx.array(vocab, dtype=mx.int32)))
+            # A dead position's ``vocab`` sentinel never reaches a processor
+            # history or the next depth step; the whole draft is redone.
+            drafted.append(mx.where(dead[0], mx.array(0, dtype=mx.int32), token))
+            return drafted[-1].astype(mx.uint32).reshape(1, 1)
+
+        self._chain(state, pick(self._first_logits(state)), count,
+                    lambda top, _drafts: pick(top))
+        if not processors:
+            # The host's processor-free chain is ``_lazy_distributions``,
+            # which books one ``lazy_chain_calls`` per call.
+            self.stats["lazy_chain_calls"] = self.stats.get("lazy_chain_calls", 0) + 1
+        out = mx.stack(drafted).astype(mx.int32)
+        return mx.where(dead[0], mx.full((count,), DRAFT_LAZY_HOST_REDO, dtype=mx.int32), out)
 
     def draft_packed_paths(
         self, anchors, hidden, cache, pattern, *, context_tokens=None,

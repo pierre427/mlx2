@@ -61,6 +61,10 @@ class UBTreeDraftModel(DFlashDraftModel):
     supports_empty_target_context = True
     supports_continuation_tree_reuse = True
     receipt_kind = "external_ubtree"
+    # Tree-only: there is no chain draft to mirror, so no lazy chain draft;
+    # the device round declines (``tree_topology``, or
+    # ``drafter_without_lazy_draft`` for any chain round).
+    draft_lazy = None
 
     def __init__(self, config: UBTreeConfig):
         super().__init__(config)

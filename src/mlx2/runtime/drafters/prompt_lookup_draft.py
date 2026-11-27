@@ -78,6 +78,9 @@ class PromptLookupDraftModel:
         self.ngram_min, self.ngram_max = int(ngram_min), int(ngram_max)
         self.copy_first_ngram = int(copy_first_ngram)
         self._indexes: list[IndexedPromptLookup] = []
+        # The lookup ``draft_lazy_admission`` ran for this round, consumed by
+        # the next ``copy_paths`` (see there).
+        self._pending_copy = None
         self.stats = {"tree_calls": 0, "copy_paths": 0, "copy_first": 0,
                       "index_rebuilds": 0, "index_extends": 0}
 
@@ -155,6 +158,18 @@ class PromptLookupDraftModel:
         """
 
         tokens = [int(token) for token in history] + [int(anchor)]
+        pending, self._pending_copy = self._pending_copy, None
+        if pending is not None:
+            # ``draft_lazy_admission`` already looked this round up.  The
+            # result is a pure function of (tokens, depth, limit); an empty
+            # one is empty at every depth.  Its statistics are booked here,
+            # by the lookup that uses it, so the round books them once
+            # (as on the host) whichever path serves it.
+            key, pending_depth, result, booked = pending
+            if key == (tuple(tokens), limit) and (pending_depth == depth or not result[0]):
+                for name, amount in booked.items():
+                    self.stats[name] += amount
+                return result
         index = self._index(tokens)
         paths, seen, best = [], set(), 0
         for size in range(min(self.ngram_max, len(tokens)), self.ngram_min - 1, -1):
@@ -171,6 +186,91 @@ class PromptLookupDraftModel:
                 if len(paths) >= limit:
                     return paths, best
         return paths, best
+
+    # -- lazy drafts (speculative_device_round ``lazy_draft``) -----------------
+    # The device round passes the lane's committed history (``processor_history``)
+    # on every lazy draft.  A copy reads no logits, so logits processors (which
+    # the host path also ignores here) never change it.
+    draft_lazy_history = True
+    draft_lazy_processors = True
+    # One-lane cohorts only: multi-lane device rounds of this drafter are not
+    # covered by an exactness test (CPU or GPU), so a wider cohort keeps the
+    # host round (counted ``lazy_draft_width``).
+    draft_lazy_width_one = True
+
+    def draft_lazy_admission(self, anchor, history, proposal_length, *, lookup=True):
+        """Counted decline reason for this lane's lazy round, or None.
+
+        Called by the device round before its snapshot, so a decline moves
+        nothing.  ``prompt_lookup_graft``: a grafted PLD drafts the base
+        drafter's chain on the host path.  ``prompt_lookup_no_copy``: no copy
+        follows the latest n-gram; the host runs that anchor-only round as its
+        plain single-token decode step (``external_plain_single_token_rounds``),
+        which a width-1 verify transaction is not (another kernel path on
+        hybrid targets).  ``lookup=False`` (a prompt-copy round, whose lane may
+        copy instead) runs only the graft check.  The lookup is kept for this round's ``copy_paths``
+        (the lazy draft's or the host path's), which books its statistics.
+        """
+        import mlx.core as mx
+
+        if self.base is not None:
+            return "prompt_lookup_graft"
+        if (not lookup or isinstance(anchor, mx.array)
+                or not isinstance(history, (list, tuple))
+                or int(proposal_length) < 1):
+            return None  # ``draft_lazy`` declines or raises these itself
+        before = dict(self.stats)
+        paths, best = self.copy_paths(history, int(anchor), int(proposal_length), 1)
+        booked = {name: self.stats[name] - before[name] for name in self.stats}
+        self.stats.update(before)
+        tokens = tuple(int(token) for token in history) + (int(anchor),)
+        self._pending_copy = (
+            (tokens, 1), int(proposal_length), (paths, best), booked)
+        return None if paths else "prompt_lookup_no_copy"
+
+    def draft_lazy(self, anchor, hidden, cache, proposal_length, sampler=None, *,
+                   logits_processors=None, processor_history=None, **_unused):
+        """One lane's copy as an int32 ``[n]`` array (``0 <= n <= proposal_length``).
+
+        ``speculative_device_round`` ``lazy_draft`` (default off, unqualified).
+        The lookup runs on the host over the host-known committed history and
+        anchor, exactly as ``draft_distributions`` does, so the tokens are the
+        host path's (a model-free copy has nothing to queue on the device).
+        Counted declines (``LazyDecline``, nothing touched):
+
+        - ``prompt_lookup_graft``: a grafted PLD drafts the base drafter's
+          chain on the host path; its lazy draft is the base's, whose
+          declarations this wrapper does not carry.
+        - ``prompt_lookup_device_anchor`` / ``prompt_lookup_device_history``:
+          a pipelined round's unread anchor or device history; the host-side
+          lookup needs both on the host (a device n-gram search is not built).
+        - ``prompt_lookup_sampled_drafts``: a copy has no draft law q for the
+          ratio rule; point-mass sampled lanes keep it without that switch.
+        - ``prompt_lookup_history``: no committed history was passed.
+        - ``prompt_lookup_no_copy``: no copy follows (normally declined at
+          admission by ``draft_lazy_admission``; this is the backstop).
+        """
+        import mlx.core as mx
+
+        from ..proposal_composition import LazyDecline
+
+        if self.base is not None:
+            raise LazyDecline("prompt_lookup_graft")
+        if isinstance(anchor, mx.array):
+            raise LazyDecline("prompt_lookup_device_anchor")
+        if sampler is not None:
+            raise LazyDecline("prompt_lookup_sampled_drafts")
+        if processor_history is None:
+            raise LazyDecline("prompt_lookup_history")
+        if not isinstance(processor_history, (list, tuple)):
+            raise LazyDecline("prompt_lookup_device_history")
+        if int(proposal_length) < 1:
+            raise ValueError("prompt lookup lazy drafts need a positive proposal length")
+        paths, _ = self.copy_paths(processor_history, int(anchor), int(proposal_length), 1)
+        if not paths:
+            # The host runs an anchor-only round as its plain single-token step.
+            raise LazyDecline("prompt_lookup_no_copy")
+        return mx.array(list(paths[0]), dtype=mx.int32)
 
     # -- proposals -------------------------------------------------------------
     def draft_distributions(self, anchors, hidden, cache, proposal_length, rngs, temperatures,

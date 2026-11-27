@@ -2012,6 +2012,12 @@ class Model(nn.Module):
     # forwards cannot consume, and batched MTP is unqualified here anyway.
     # Segmented cohorts therefore take the exact serial B1 consumer.
     mtp_segmented_true_batch = False
+    # Adapter-selected external feature: ``None`` (post-layer, pre-final-norm
+    # taps) or ``"mtp_seed"``: the post-``norm_f`` backbone hidden, exactly the
+    # seed ``mtp_backbone``/``mtp_verify_backbone`` hand ``mtp_step`` on the
+    # self-MTP route, so the external engine's native-MTP drafter
+    # (``drafters/native_mtp.py``) teacher-forces the head on the same rows.
+    external_feature_source = None
 
     def __init__(self, args: ModelArgs):
         super().__init__()
@@ -2454,7 +2460,15 @@ class Model(nn.Module):
                 )
                 for rows in hidden
             ]
-            features = [mx.concatenate(row_taps, axis=-1) for row_taps in taps]
+            # Under ``mtp_seed`` this B>1 path's seed is ``norm_f`` per row,
+            # not the row-independent final norm of the B1 seed: the feature
+            # only feeds the drafter (draft quality, never the verified
+            # tokens), and no external native-MTP route reaches this path at
+            # width > 1 (Lightning's is capped at width one).
+            features = (
+                hidden if self.external_feature_source == "mtp_seed"
+                else [mx.concatenate(row_taps, axis=-1) for row_taps in taps]
+            )
         finally:
             for cache, lengths_value, left_padding in recurrent_metadata:
                 cache.lengths = lengths_value
@@ -2650,12 +2664,39 @@ class Model(nn.Module):
             "real_artifact_qualification": False,
         }
 
+    def select_external_feature_source(self, source):
+        """Adapter-owned choice of the external feature law (see class attr)."""
+        if source not in (None, "mtp_seed"):
+            raise ValueError("unsupported Nemotron-H external feature source")
+        if source == "mtp_seed" and getattr(self, "mtp", None) is None:
+            raise ValueError("the MTP seed feature requires a loaded MTP head")
+        object.__setattr__(self, "external_feature_source", source)
+
+    @property
+    def external_feature_width(self):
+        if self.external_feature_source == "mtp_seed":
+            return int(self.args.hidden_size)
+        return None
+
+    def _mtp_seed_capture(self, capture_layers):
+        """Under ``mtp_seed`` the only feature is the last layer's post-norm hidden."""
+        if self.external_feature_source != "mtp_seed":
+            return False
+        if tuple(capture_layers) != (len(self.layers) - 1,):
+            raise ValueError("the MTP seed feature is the last layer's post-norm hidden")
+        return True
+
     def forward_with_taps(self, inputs, cache, capture_layers, *, body_only=False):
         """Post-layer, pre-final-norm taps; IDs index the full hybrid backbone.
 
         Only Mamba and attention layers own caches. MLP/MoE layers still count
         in capture IDs, using the ordinary backbone's compact cache mapping.
+
+        Under ``external_feature_source == "mtp_seed"`` the feature is the
+        post-``norm_f`` hidden each path already computes for its logits (the
+        self-MTP seed), not a re-normalized tap.
         """
+        seed = self._mtp_seed_capture(capture_layers)
         capture_layers = tuple(capture_layers)
         if (
             not capture_layers
@@ -2670,6 +2711,9 @@ class Model(nn.Module):
             raise ValueError("Target cache must match compact hybrid layer topology")
         short_refusal = self._short_segment_refusal(inputs, cache)
         if short_refusal is None:
+            if seed:
+                hidden, _taps = self._layerwise_short_hidden(inputs, cache, capture_layers)
+                return (None if body_only else self._row_exact_head(hidden)), hidden
             return self._forward_layerwise_short_exact(
                 inputs, cache, capture_layers, body_only=body_only
             )
@@ -2729,6 +2773,9 @@ class Model(nn.Module):
         hidden = self.backbone(
             inputs, cache=cache, capture_layers=capture_layers, hidden_sink=taps
         )
+        if seed:
+            # The backbone's own return value, as ``mtp_backbone`` hands it on.
+            return (None if body_only else self.logits(hidden)), hidden
         return (None if body_only else self.logits(hidden)), mx.concatenate(
             taps, axis=-1
         )
@@ -2913,6 +2960,8 @@ class Model(nn.Module):
         counts["tiles"] += 1
         counts["rows"] += rows
         counts["max_rows"] = max(counts["max_rows"], rows)
+        if self.external_feature_source == "mtp_seed":
+            return self._row_exact_head(hidden), hidden
         return self._row_exact_head(hidden), mx.concatenate(taps, axis=-1)
 
     def tree_status(self) -> dict:

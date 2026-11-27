@@ -45,7 +45,7 @@ from ..technologies.drafter_blocks import (
     GatedMLPSpec,
     chain_attend_rows,
 )
-from .cohere_eagle import EagleWindowKVCache, _Rows
+from .cohere_eagle import EagleWindowKVCache, _Rows, check_lazy_lane, lazy_greedy_token
 
 ARCHITECTURE = "Eagle3Speculator"
 EAGLE3_NUMERICS_VERSION = "mlx2.eagle3-chain.v1"
@@ -501,6 +501,82 @@ class Eagle3DraftModel(nn.Module):
                 tokens[row].append(token)
                 laws[row].append(q)
         return tokens, laws
+
+    # -- lazy drafts (speculative_device_round ``lazy_draft``) -----------------
+    # The device round passes the lane's EAGLE context pairing and stateless
+    # processors.  Greedy, one lane: a sampled host draft draws from the lane
+    # RNG on the host, and a batched host draft is a different matmul shape
+    # than the device round's per-lane draft, so neither is bitwise ours.
+    draft_lazy_pairs_context = True
+    draft_lazy_processors = True
+    draft_lazy_consumes_rng = True
+    draft_lazy_greedy_only = True
+    draft_lazy_width_one = True
+
+    def draft_lazy(self, anchor, hidden, cache, proposal_length, sampler=None, *,
+                   rng=None, context_tokens=None, logits_processors=None,
+                   processor_history=None):
+        """One lane's greedy chain as a lazy int32 ``[n]`` array, no host read.
+
+        ``speculative_device_round`` ``lazy_draft`` (default off, unqualified).
+        The ops are ``draft_distributions``' for a one-row batch: the pending
+        features (paired with ``context_tokens[0]``, ending with the anchor)
+        are committed to the draft KV, then the chain feeds the draft's own
+        prenorm on round-local KV, each drafted token as a device array.  The
+        host takes ``softmax(dense, 0)``'s argmax over the reduced logits
+        scattered on the target ids (``-inf`` elsewhere), i.e. the smallest
+        mapped target id among the maxima; that selection runs here on the
+        reduced row and the ``d2t`` image directly.  With the lane's
+        processors the dense row is built on the device and processed on
+        ``processor_history + [anchor] + drafts so far``, falling back to
+        the raw dense row when no processed score is finite, as the host
+        does.  ``rng`` gives up one uniform per position (``rng.sample``).
+        A row the host ``softmax`` refuses (NaN, nothing finite) makes every
+        token ``DRAFT_LAZY_HOST_REDO``: the round is redone on the host.
+        """
+        from ..processor_probe import probe_logits_processors
+        from .dflash2 import DRAFT_LAZY_HOST_REDO
+
+        anchor, pairing = check_lazy_lane(
+            "EAGLE-3", anchor, hidden, proposal_length, sampler, context_tokens,
+            logits_processors, processor_history,
+        )
+        count = int(proposal_length)
+        processors = list(logits_processors or ())
+        rows = self._rows(cache)
+        normed, prenorm = self.append_context(hidden, cache, context_tokens=[pairing])
+        normed, prenorm = normed[:, -1:], prenorm[:, -1:]
+        self.stats["draft_calls"] += 1
+        chain = [(None, None)]
+        vocab = int(self.config.vocab_size)
+        targets = mx.array(np.asarray(self._target_ids, dtype=np.int32))
+        prefix = (mx.array(list(processor_history or ()) + [anchor], dtype=mx.int32)
+                  if processors else None)
+        drafted, redo = [], mx.array(False)
+        for step in range(count):
+            if step:
+                normed, prenorm = self._forward(
+                    drafted[-1].reshape(1, 1), prenorm, rows, commit=False, chain=chain,
+                    fused=True,
+                )
+                self.stats["chain_steps"] += 1
+            small = self.draft_logits(normed[:, -1, :]).astype(mx.float32)[0]
+            if processors:
+                dense = mx.full((vocab,), -float("inf"), dtype=mx.float32)
+                dense[targets] = small
+                tokens = mx.concatenate([prefix, mx.stack(drafted)]) if drafted else prefix
+                processed = probe_logits_processors(processors, tokens, dense[None])[0].astype(
+                    mx.float32)
+                value = mx.where(mx.any(mx.isfinite(processed)), processed, dense)
+                token, bad = lazy_greedy_token(value, sentinel=vocab)
+            else:
+                token, bad = lazy_greedy_token(small, targets, sentinel=vocab)
+            redo = redo | bad
+            if rng is not None:
+                rng.uniform()  # ``rng.sample(one-hot)`` draws one uniform per position
+            drafted.append(token)
+        out = mx.stack(drafted).astype(mx.int32)
+        return mx.where(redo, mx.full((count,), DRAFT_LAZY_HOST_REDO, dtype=mx.int32), out)
 
 
 Model = Eagle3DraftModel

@@ -320,5 +320,89 @@ class XPressDraftModel(DFlashDraftModel):
                 laws[row].append(q)
         return tokens, laws
 
+    # -- lazy drafts (speculative_device_round ``lazy_draft``; default off) -----
+    # One-lane cohorts only, like DFlash2: the host drafts a cohort in one
+    # batched call, and per-lane device drafts are not proven bitwise equal
+    # to it on the GPU (CPU-only evidence so far).
+    draft_lazy_width_one = True
+    draft_lazy_processors = True
+    # The predecessor is the lane's last committed token: the device round
+    # passes ``processor_history`` on every round, not only with processors.
+    draft_lazy_history = True
+
+    def draft_lazy(self, anchor, hidden, cache, proposal_length, sampler=None, *, rng=None,
+                   logits_processors=None, processor_history=None):
+        """One lane's XPress drafts as a lazy int32 ``[n]`` array, no host read.
+
+        The ops are ``draft_distributions``' for that lane: the full trained
+        block over ``batch_caches([cache])``, the Jacobi refinement from the
+        predecessor ``processor_history[-1]`` (the anchor for an empty
+        history), and the refined argmax chain, so tokens are bitwise the
+        host's.  With ``logits_processors`` each position's token is the
+        argmax of the processed refined row on ``history + [anchor] + drafts
+        so far``, as on the host.  Where the host raises (nonfinite refined
+        logits, a NaN or +inf processed row) or ends the draft early (no
+        finite processed value) every token is ``DRAFT_LAZY_HOST_REDO``, so
+        the round is redone on the host path.
+
+        Drafts are deterministic point masses for greedy and sampled lanes
+        alike (as on the host); a ``sampler`` (``device_round.sampled_drafts``)
+        records that point mass (``lazy_point_mass_record``).  Without a
+        ``processor_history`` (a wrapper that does not pass one) the
+        predecessor is unknown: ``LazyDecline``.
+        """
+        from ..processor_probe import probe_logits_processors
+        from ..proposal_composition import LazyDecline
+        from .dflash_base import (
+            lazy_anchors,
+            lazy_host_history,
+            lazy_mirrors,
+            lazy_one_lane,
+            lazy_point_mass_record,
+            lazy_prefix,
+            lazy_redo,
+        )
+
+        lazy_mirrors(self, XPressDraftModel)
+        if processor_history is None:
+            raise LazyDecline("xpress_without_history")
+        count = int(proposal_length)
+        if not 1 <= count < self.config.block_size:
+            raise ValueError("XPress proposal length must fit the trained block")
+        caches = lazy_one_lane(self, hidden, cache, "XPress")
+        processors = list(logits_processors or ())
+        # The predecessor is read from the history even without processors.
+        history = lazy_host_history(True, processor_history, "XPress")
+        anchors = lazy_anchors(anchor)
+        predecessor = (mx.array([int(history[-1])], dtype=mx.int32) if history else anchors)
+        inputs = mx.concatenate([anchors[:, None], mx.full(
+            (1, self.config.block_size - 1), self.config.mask_token_id, dtype=mx.int32)], axis=1)
+        features = self._hidden(inputs, hidden, caches)
+        base = self._logits(features)
+        proposals, refined = self.xpress_head.jacobi_refine_greedy(
+            base, features, anchors, predecessor, self.config.xpress_num_passes)
+        dense = refined.astype(mx.float32)
+        invalid = ~mx.all(mx.isfinite(dense))
+        self.stats["backbone_blocks"] += 1
+        self.stats["jacobi_passes"] += self.config.xpress_num_passes
+        # The host's confidence rows feed adaptive depth, which the device
+        # round declines; none is published for a lazy row.
+        self.adaptive_confidence_features = None
+        chosen = proposals[0, :count].astype(mx.int32)
+        if processors:
+            prefix = lazy_prefix(history, anchors)
+            drafted = []
+            for position in range(count):
+                tokens = mx.concatenate([prefix, mx.stack(drafted)]) if drafted else prefix
+                value = probe_logits_processors(
+                    processors, tokens, dense[0, position][None])[0].astype(mx.float32)
+                invalid = (invalid | mx.any(mx.isnan(value)) | mx.any(mx.isposinf(value))
+                           | ~mx.any(mx.isfinite(value)))
+                drafted.append(mx.argmax(value).astype(mx.int32))
+            chosen = mx.stack(drafted)
+        if sampler is not None:
+            lazy_point_mass_record(sampler, chosen, dense.shape[-1])
+        return lazy_redo(invalid, chosen)
+
 
 Model = XPressDraftModel

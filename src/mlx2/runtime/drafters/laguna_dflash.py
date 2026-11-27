@@ -35,6 +35,7 @@ from ..technologies.drafter_blocks import (
     inject_target_taps,
     prenorm_block_layers,
 )
+from . import dense_block_lazy
 from .cohere_eagle import EagleWindowKVCache, _Rows
 
 _ARCHITECTURE = "DFlashLagunaForCausalLM"
@@ -312,6 +313,10 @@ class LagunaDFlashDraftModel(nn.Module):
                 laws[row].append(q)
         return tokens, laws
 
+
+# ``speculative_device_round`` ``lazy_draft`` (default off): the host loop's
+# ops on the device (drafters/dense_block_lazy.py).
+dense_block_lazy.install(LagunaDFlashDraftModel)
 
 Model = LagunaDFlashDraftModel
 

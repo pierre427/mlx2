@@ -472,6 +472,45 @@ class DSpineDraftModel(DFlashDraftModel):
         self.stats["proposed"] += batch * proposal_length
         return tokens, laws
 
+    # -- lazy drafts (speculative_device_round ``lazy_draft``; default off) -----
+    # The chain applies no logits processors (the host path refuses them), so
+    # the device round declines processed lanes (``lazy_draft_processors``).
+    # One-lane cohorts only, like DFlash2: the host drafts a cohort in one
+    # batched call, and per-lane device drafts are not proven bitwise equal
+    # to it on the GPU (CPU-only evidence so far).
+    draft_lazy_width_one = True
+    draft_lazy_processors = False
+
+    def draft_lazy(self, anchor, hidden, cache, proposal_length, sampler=None, **_options):
+        """One lane's greedy refined chain as a lazy int32 ``[n]`` array.
+
+        The ops are ``draft_distributions``' (``propose_chain`` over
+        ``batch_caches([cache])``), so tokens are bitwise the host's; chain
+        mode only (tree rounds are declined by the device round).  Point
+        masses for greedy and sampled lanes alike; a ``sampler`` records that
+        point mass (``lazy_point_mass_record``).
+        """
+        from .dflash_base import (
+            lazy_anchors,
+            lazy_mirrors,
+            lazy_one_lane,
+            lazy_point_mass_record,
+        )
+
+        lazy_mirrors(self, DSpineDraftModel, ("draft_distributions", "propose_chain"))
+        if _options.get("logits_processors"):
+            raise ValueError("DSpine chain does not apply logits processors")
+        count = int(proposal_length)
+        if not 1 <= count <= self.proposal_rows:
+            raise ValueError("DSpine proposal geometry differs")
+        caches = lazy_one_lane(self, hidden, cache, "DSpine")
+        chosen = self.propose_chain(lazy_anchors(anchor), hidden, caches, count)[0].astype(mx.int32)
+        self.stats["backbone_blocks"] += 1
+        self.stats["proposed"] += count
+        if sampler is not None:
+            lazy_point_mass_record(sampler, chosen, self.config.vocab_size)
+        return chosen
+
 
 __all__ = [
     "DSpineCodeBridge", "DSpineDraftModel", "HeadRows", "build_serial_tables",

@@ -464,3 +464,73 @@ class DFlashDraftModel(nn.Module):
 
 
 DFlashKVCache = KVCache
+
+
+# -- lazy drafts (``speculative_device_round`` ``lazy_draft``; default off) -----
+#
+# ``DFlashDraftModel`` itself declares no ``draft_lazy``: each family's lazy
+# draft mirrors one host ``draft_distributions`` (plain_dflash, xpress, dspark,
+# lilicorr, dspine) and is declared on that class, so a subclass that changes
+# the host draft declines (``lazy_mirrors``) instead of inheriting the wrong ops.
+
+
+def lazy_anchors(anchor):
+    """The one-lane anchor as an int32 ``[1]`` array (a device anchor as is)."""
+    if isinstance(anchor, mx.array):
+        return anchor.reshape(1).astype(mx.int32)
+    return mx.array([int(anchor)], dtype=mx.int32)
+
+
+def lazy_mirrors(model, owner, names=("draft_distributions",)):
+    """Decline (counted ``lazy_draft_host_override``) when ``model`` no longer
+    runs ``owner``'s host draft: an override of any of ``names`` on a subclass
+    or on the instance means ``owner.draft_lazy`` would not mirror it."""
+    from ..proposal_composition import LazyDecline
+
+    for name in names:
+        if name in model.__dict__ or getattr(type(model), name) is not getattr(owner, name):
+            raise LazyDecline("lazy_draft_host_override")
+
+
+def lazy_one_lane(model, hidden, cache, label):
+    if hidden.shape[0] != 1:
+        raise ValueError(f"{label} lazy drafts run one lane at a time")
+    return model.batch_caches([cache])
+
+
+def lazy_host_history(processors, history, label):
+    if processors and callable(getattr(history, "apply", None)):
+        raise ValueError(f"{label} lazy drafts take a host processor history")
+    return list(history or ())
+
+
+def lazy_prefix(history, anchors):
+    """``processor_history + [anchor]`` as the host prefix (int32)."""
+    return mx.concatenate([mx.array(list(history), dtype=mx.int32), anchors])
+
+
+def lazy_point_mass_record(sampler, tokens, vocab):
+    """Record a deterministic drafter's point-mass law through ``sampler``.
+
+    ``device_round.sampled_drafts`` verifies a sampled lane's drafts by the
+    ratio rule against the law the sampler recorded.  A point-mass drafter
+    hands it logits that are 0 at its token and -inf elsewhere (scaling by
+    1/T keeps that), so q is the exact point mass: the ratio rule accepts
+    with probability p(token) and resamples from normalized(p - q)+, which is
+    the point-mass verification law.  The sampler's own draw is the token
+    with certainty; the drafted ``tokens`` are returned unchanged."""
+    ids = mx.arange(int(vocab), dtype=mx.int32)
+    for position in range(int(tokens.shape[0])):
+        sampler(mx.where(ids == tokens[position], 0.0, -float("inf"))[None].astype(mx.float32))
+    return tokens
+
+
+def lazy_redo(invalid, tokens):
+    """``tokens``, or ``DRAFT_LAZY_HOST_REDO`` everywhere where ``invalid``
+    (a lane the host path ends early or refuses): the round is restored and
+    redone on the host path, which then drafts or raises exactly as before."""
+    from .dflash2 import DRAFT_LAZY_HOST_REDO
+
+    count = int(tokens.shape[0])
+    return mx.where(invalid, mx.full((count,), DRAFT_LAZY_HOST_REDO, dtype=mx.int32),
+                    tokens.astype(mx.int32))

@@ -53,6 +53,15 @@ stated otherwise.
   mlx2 policy, validated, bound into the drafter fingerprint and reported in
   route receipts. The default shape is unchanged.
 
+### 2026-11-27: lazy chain draft for the device round
+
+- `src/mlx2/runtime/drafters/eagle4.py`: `draft_lazy`, the greedy chain draft
+  as lazy device tokens for mlx2's opt-in speculative device round (one lane,
+  chain only, no logits processors), with the same candidate-law ops as the
+  host chain; `_candidate_rows` now delegates to `_candidate_law`, which can
+  skip its host-side all-forbidden check (same ops otherwise). Host behaviour
+  is unchanged.
+
 mlx2 retains ownership of scheduling, target verification, exact target
 sampling and acceptance, state commit, prefix caching, route selection and
 receipts; those parts are original mlx2 code under the Apache License 2.0 and

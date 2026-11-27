@@ -15,6 +15,10 @@ class MuseDSparkConfig(MuseDFlashConfig):
 
 class MuseDSparkDraftModel(MuseDFlashDraftModel):
     receipt_kind = "external_muse_dspark"
+    # Not inherited: the assistant's lazy chain draft has no Markov factor,
+    # and this drafter has no chain law at all (AST trees only).  The device
+    # round counts ``drafter_without_lazy_draft`` (or ``ast`` first).
+    draft_lazy = None
 
     def __init__(self, config):
         super().__init__(config)

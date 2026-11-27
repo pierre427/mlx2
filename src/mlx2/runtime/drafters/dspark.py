@@ -307,6 +307,90 @@ class DSparkDraftModel(XPressDraftModel):
                 confidence[row].append(float(np.clip(predicted_confidence[row], -40., 40.)))
         return tokens, confidence
 
+    # -- lazy drafts (speculative_device_round ``lazy_draft``; default off) -----
+    # The Markov chain starts from the anchor; no history is needed beyond the
+    # processor prefix (XPress's ``draft_lazy_history`` does not apply).
+    # One-lane cohorts only, like DFlash2: the host drafts a cohort in one
+    # batched call, and per-lane device drafts are not proven bitwise equal
+    # to it on the GPU (CPU-only evidence so far).
+    draft_lazy_width_one = True
+    draft_lazy_processors = True
+    draft_lazy_history = False
+
+    def draft_lazy(self, anchor, hidden, cache, proposal_length, sampler=None, *, rng=None,
+                   logits_processors=None, processor_history=None):
+        """One lane's DSpark drafts as a lazy int32 ``[n]`` array, no host read.
+
+        The ops are ``draft_distributions``' for that lane: the full block
+        over ``batch_caches([cache])``, the base logits, then the in-graph
+        greedy Markov chain and its confidence head (``_fast_chain``) or,
+        with ``logits_processors``, ``_processed_chain``'s per-position
+        ``base + markov(previous)`` -> processors on ``history + [anchor] +
+        drafts so far`` -> argmax, with the selected token fed back as an
+        array (the same embedding row).  Tokens are bitwise the host's.
+        Where the host raises (NaN, +inf or no finite proposal logit, a
+        nonfinite confidence) every token is ``DRAFT_LAZY_HOST_REDO``, so the
+        round is redone on the host path, which raises there as before.
+
+        Point masses for greedy and sampled lanes alike; a ``sampler``
+        records that point mass (``lazy_point_mass_record``).  Ordered
+        alternatives and adaptive confidence rows (both declined by the
+        device round) are not published for a lazy row.
+        """
+        from ..processor_probe import probe_logits_processors
+        from .dflash_base import (
+            lazy_anchors,
+            lazy_host_history,
+            lazy_mirrors,
+            lazy_one_lane,
+            lazy_point_mass_record,
+            lazy_prefix,
+            lazy_redo,
+        )
+
+        lazy_mirrors(self, DSparkDraftModel,
+                     ("draft_distributions", "_fast_chain", "_processed_chain", "_block"))
+        count = int(proposal_length)
+        if not 1 <= count <= self.proposal_rows:
+            raise ValueError("DSpark proposal geometry differs")
+        caches = lazy_one_lane(self, hidden, cache, "DSpark")
+        processors = list(logits_processors or ())
+        history = lazy_host_history(processors, processor_history, "DSpark")
+        self._ordered_alternative_context = None
+        self.adaptive_confidence_features = None
+        anchors = lazy_anchors(anchor)
+        inputs = mx.concatenate([anchors[:, None], mx.full(
+            (1, self.proposal_rows - 1), self.config.mask_token_id, mx.int32)], axis=1)
+        features = self._hidden(inputs, hidden, caches)
+        base = self._logits(features)
+        if processors:
+            prefix = lazy_prefix(history, anchors)
+            previous, drafted, invalid = anchors, [], mx.array(False)
+            for position in range(count):
+                embedding = self.markov_head.markov_w1(previous)
+                logits = base[:, position] + self.markov_head.markov_w2(embedding)
+                confidence = self.confidence_head(features[:, position], embedding)
+                tokens = mx.concatenate([prefix, mx.stack(drafted)]) if drafted else prefix
+                dense = probe_logits_processors(processors, tokens, logits).astype(mx.float32)[0]
+                invalid = (invalid | mx.any(mx.isnan(dense)) | mx.any(mx.isposinf(dense))
+                           | ~mx.any(mx.isfinite(dense)) | ~mx.all(mx.isfinite(confidence)))
+                token = mx.argmax(dense).astype(mx.int32)
+                drafted.append(token)
+                previous = token.reshape(1)
+            chosen = mx.stack(drafted)
+        else:
+            tokens, logits, embeddings = self._markov_chain(base, anchors, count)
+            confidence = self.confidence_head(features[:, :count], embeddings)
+            invalid = (mx.any(mx.isnan(logits) | (logits == float("inf")))
+                       | mx.any(~mx.any(mx.isfinite(logits), axis=-1))
+                       | ~mx.all(mx.isfinite(confidence)))
+            chosen = tokens[0].astype(mx.int32)
+        self.stats["backbone_blocks"] += 1
+        self.stats["markov_steps"] += count
+        if sampler is not None:
+            lazy_point_mass_record(sampler, chosen, base.shape[-1])
+        return lazy_redo(invalid, chosen)
+
     # -- tree tiles ---------------------------------------------------------
 
     def start_tree(self, anchors, hidden, cache, max_nodes, *, forbidden_token_ids=None,

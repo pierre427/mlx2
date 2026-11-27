@@ -8,10 +8,12 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from dataclasses import replace
 from pathlib import Path
 
 from ..contracts import Capability, ModelDescriptor, StatePlane
 from ..sampling_defaults import GENERATION_CONFIG, SamplingDefaults, VendorSampling
+from .external_draft_policy import ExternalDraftAdapterMixin
 from .nemotron3_super import (
     SHORT_EXACT_POLICY_KEYS,
     Nemotron3SuperAdapter,
@@ -30,6 +32,15 @@ MTP_SIZE = 2_670_685_240
 MTP_MANIFEST = "mlx2-nemotron35-mtp.json"
 MTP_SHARD = "model-00014-of-00014.safetensors"
 CACHE_LAYOUT = "nemotron35-lightning-hybrid-mamba-kv-v1"
+# Opt-in external-draft route over the bound MTP head (implemented,
+# unqualified): ``draft_model`` names the target artifact itself, as on
+# Qwen3.8 / Flash-Next / Ling, and the generic ``drafters/native_mtp.py``
+# backend drafts a chain the external engine verifies exactly.  Only these
+# keys select or tune it; the self-MTP ``--native-mtp`` route is unchanged.
+EXTERNAL_NATIVE_MTP_KEYS = frozenset({
+    "draft_model", "device_round", "prompt_copy_round", "exact_verification",
+})
+EXTERNAL_NATIVE_MTP_MAX_DRAFT = 3
 
 SAMPLING = VendorSampling.single(
     SamplingDefaults(temperature=1.0, top_p=0.95, source=GENERATION_CONFIG),
@@ -64,7 +75,10 @@ def descriptor_for(*, has_mtp: bool) -> ModelDescriptor:
             # (nemotron_h.Model.pld_verify_forward) and committed through the
             # exact hybrid record-and-trim transaction.
             "prompt_lookup": "implemented-row-exact-b1-verify",
-            "external_draft": "unsupported-no-bound-draft-artifact",
+            "external_draft": (
+                "implemented-unqualified-native-mtp-head" if has_mtp
+                else "unsupported-no-mtp-head"
+            ),
         },
     )
 
@@ -258,7 +272,24 @@ def _runtime_config(config: dict) -> dict:
     return result
 
 
-class Nemotron35LightningAdapter(Nemotron3SuperAdapter):
+def split_external_native_mtp_policy(execution_policy):
+    """``(self_policy, external_policy)``: a ``draft_model`` selects the
+    external native-MTP route, and ``num_draft`` then follows it."""
+    policy = dict(execution_policy or {})
+    if "draft_model" not in policy:
+        stray = sorted(set(policy) & (EXTERNAL_NATIVE_MTP_KEYS - {"draft_model"}))
+        if stray:
+            raise ValueError(
+                f"Nemotron 3.5 Lightning external-draft options {stray} require draft_model"
+            )
+        return policy, {}
+    external = {key: policy.pop(key) for key in list(policy) if key in EXTERNAL_NATIVE_MTP_KEYS}
+    if "num_draft" in policy:
+        external["num_draft"] = policy.pop("num_draft")
+    return policy, external
+
+
+class Nemotron35LightningAdapter(ExternalDraftAdapterMixin, Nemotron3SuperAdapter):
     descriptor = descriptor_for(has_mtp=True)
     sampling_defaults = SAMPLING
     artifact_inspector = staticmethod(inspect_artifact)
@@ -267,6 +298,9 @@ class Nemotron35LightningAdapter(Nemotron3SuperAdapter):
     # No Lightning-specific native-MTP/ordinary handoff has been selected.
     default_mtp_ordinary_handoff_max_width = None
     think_close_separator = ""
+    EXTERNAL_DEFAULT_NUM_DRAFT = 2
+    EXTERNAL_ROUTE_TAG = "external-nemotron35-lightning-native-mtp-v1"
+    EXTERNAL_PROFILE = "nemotron35-lightning-q8-apcv2-external-native-mtp"
 
     def __init__(self, model_path: str, *, execution_policy=None):
         from .process_globals import guarded_construction
@@ -280,7 +314,13 @@ class Nemotron35LightningAdapter(Nemotron3SuperAdapter):
 
         if execution_policy is not None and not isinstance(execution_policy, dict):
             raise ValueError("Nemotron 3.5 Lightning execution policy must be an object")
-        execution_policy = dict(execution_policy or {})
+        execution_policy, external_policy = split_external_native_mtp_policy(execution_policy)
+        external = self._parse_external_policy(
+            external_policy, family="Nemotron 3.5 Lightning"
+        )
+        if external and int(self.external_policy.get(
+                "num_draft", self.EXTERNAL_DEFAULT_NUM_DRAFT)) > EXTERNAL_NATIVE_MTP_MAX_DRAFT:
+            raise ValueError("Nemotron 3.5 Lightning MTP depth above three awaits qualification")
         # The short-segment exact kernels (prompt-lookup verify rows through
         # nemotron_h.Model.pld_verify_forward); applied after load.
         short_exact = {
@@ -301,6 +341,20 @@ class Nemotron35LightningAdapter(Nemotron3SuperAdapter):
             raise ValueError("Nemotron 3.5 Lightning MTP depth above three awaits qualification")
         artifact = inspect_artifact(model_path)
         self.identity = artifact["identity"]
+        draft_record = None
+        if external:
+            if not artifact["has_mtp"]:
+                raise ValueError(
+                    "Nemotron 3.5 Lightning external native MTP requires the verified MTP head"
+                )
+            from ..runtime.drafters.native_mtp import inspect_native_mtp_policy
+
+            self.external_policy.setdefault("num_draft", self.EXTERNAL_DEFAULT_NUM_DRAFT)
+            # Refused before any tensor load: draft_model must be this artifact.
+            draft_record = inspect_native_mtp_policy(
+                self.external_policy, self.identity["path"], self.identity["fingerprint"]
+            )
+            self._check_num_draft(draft_record)
         self.descriptor = descriptor_for(has_mtp=artifact["has_mtp"])
         self.layout = self.descriptor.cache_layout
         self.environment = configure_environment()
@@ -344,6 +398,33 @@ class Nemotron35LightningAdapter(Nemotron3SuperAdapter):
         )
         self.max_context = config["max_position_embeddings"]
         self._has_mtp = artifact["has_mtp"]
+        if draft_record is not None:
+            self._bind_external_native_mtp(draft_record)
+
+    def _bind_external_native_mtp(self, record):
+        """Serve the bound MTP head through the external draft/verify engine.
+
+        The target's external feature becomes the MTP seed (the post-norm_f
+        hidden the self-MTP path feeds ``mtp_step``), so the generic head
+        backend teacher-forces on exactly the rows the self-MTP route would.
+        Implemented, not qualified.
+        """
+        from ..runtime.drafters.native_mtp import load_native_mtp_drafter
+
+        self.model.select_external_feature_source("mtp_seed")
+        self.identity = {
+            **self.identity,
+            "draft_revision": record["draft_revision"],
+            "target_revision": record["target_revision"],
+        }
+        self._bind_external_drafter(record, load_native_mtp_drafter, descriptor_for(has_mtp=True))
+        self.descriptor = replace(
+            self.descriptor,
+            metadata={
+                **(self.descriptor.metadata or {}),
+                "external_draft": "implemented-unqualified-native-mtp-head-selected",
+            },
+        )
 
     def profile_name(self, mtp):
         if mtp and not self._has_mtp:
@@ -355,6 +436,18 @@ class Nemotron35LightningAdapter(Nemotron3SuperAdapter):
 
     def execution_config(self, *, max_lanes, prefill_step):
         """Expose draft depth only when the verified sidecar is present."""
+        if getattr(self, "draft_model", None) is not None:
+            if max_lanes != 1:
+                # Wider cohorts verify through the batched backbone, not the
+                # serial B1 law, so ordinary-greedy exactness holds only at
+                # width one (no lane-exact progressive fidelity is wired).
+                raise ValueError(
+                    "Nemotron 3.5 Lightning external native MTP is exact at width one; "
+                    "serve it with max_lanes=1"
+                )
+            return self._external_execution_config(
+                max_lanes=max_lanes, prefill_step=prefill_step
+            )
         return {
             "persistent": True,
             "num_draft": self._num_draft if self._has_mtp else 0,
@@ -410,17 +503,64 @@ class Nemotron35LightningAdapter(Nemotron3SuperAdapter):
                 "selected": None,
                 "selection_authority": "serving_route_receipt",
             },
-            "external_draft": {
-                "implemented": False,
-                "reason": "no revision-bound draft artifact",
-            },
+            # Opt-in (``--external-draft`` with ``draft_model`` = this
+            # artifact): the MTP head as the external engine's drafter.
+            "external_draft": (
+                {
+                    "implemented": True,
+                    "drafter": "native_mtp_head",
+                    "feature_source": "mtp_seed",
+                    "verification": "exact at width one",
+                    "max_lanes": 1,
+                    "wider_lanes": "refused: batched verify is not the serial B1 law",
+                    "default": False,
+                    "selected": getattr(self, "draft_model", None) is not None,
+                    "observed_used": False,
+                    "qualified": False,
+                    "selection_authority": "serving_route_receipt",
+                    "device_round": self._device_round_contract(),
+                }
+                if has_mtp
+                else {"implemented": False, "reason": "no verified MTP head bound"}
+            ),
         }
+
+    def _device_round_contract(self):
+        """What the opt-in ``device_round`` engine can do on this route."""
+        from ..runtime.speculative_device_round import DeviceRoundPolicy
+
+        policy = DeviceRoundPolicy.from_value(
+            (getattr(self, "external_policy", None) or {}).get("device_round"))
+        return {
+            "implemented": True,
+            "qualified": False,
+            # An all-false policy is inert: not selected.
+            "selected": policy is not None,
+            "policy": None if policy is None else policy.as_dict(),
+            "lazy_draft": "implemented-native-mtp-draft-lazy",
+            "decide": "implemented",
+            # Mamba state (NemotronMambaCache) has no device rollback, so a
+            # device-commit round commits on the host, counted under
+            # external_device_round_device_commit_skips["target_cache"].
+            "device_commit": "declined-host-commit-no-mamba-device-rollback",
+            "pipeline": "declined-needs-device-commit",
+        }
+
+    def create_external_batch(self, **kwargs):
+        if kwargs.get("completion_batch_size") not in (None, 1):
+            raise ValueError(
+                "Nemotron 3.5 Lightning external native MTP is exact at width one; "
+                "completion_batch_size must be 1"
+            )
+        return super().create_external_batch(**kwargs)
 
     def cache_budget(self, *, mtp):
         from .nemotron35_lightning_memory import LightningCacheBudget
         if mtp and not self._has_mtp:
             raise ValueError("Nemotron 3.5 Lightning MTP head is absent")
-        return LightningCacheBudget.from_config(self.model.args, mtp=mtp)
+        # The external route keeps the head's KV per lane as well.
+        external = getattr(self, "draft_model", None) is not None
+        return LightningCacheBudget.from_config(self.model.args, mtp=mtp or external)
 
     def diagnostics(self):
         return {

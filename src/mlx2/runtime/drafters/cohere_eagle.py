@@ -232,6 +232,61 @@ class EagleWindowKVCache(_BaseCache):
         return int(self.keys.nbytes + self.values.nbytes)
 
 
+def lazy_greedy_token(values, ids=None, *, sentinel):
+    """``softmax(value, 0)``'s argmax for one row, on the device.
+
+    ``values``: float32 ``[n]`` scores; ``ids``: int32 ``[n]`` token ids of
+    those scores (``None``: the position is the id).  The host draws its
+    greedy token as ``np.argmax`` over the dense target-vocabulary row, so
+    the token is the smallest id among the maxima; ``bad`` marks a row the
+    host ``softmax`` refuses (a NaN or no finite score).  A bad row's token
+    is 0 (in vocabulary); its draft is redone on the host.
+    """
+    if ids is None:
+        ids = mx.arange(int(values.shape[-1]), dtype=mx.int32)
+    bad = mx.any(mx.isnan(values)) | ~mx.any(mx.isfinite(values))
+    best = mx.max(values)
+    token = mx.min(mx.where(values == best, ids, mx.array(int(sentinel), dtype=mx.int32)))
+    return mx.where(bad, mx.array(0, dtype=mx.int32), token.astype(mx.int32)), bad
+
+
+def check_lazy_lane(name, anchor, hidden, proposal_length, sampler, context_tokens,
+                    logits_processors, processor_history):
+    """Shared ``draft_lazy`` argument checks of the EAGLE chain drafters.
+
+    Runs before any state is touched.  Returns ``(anchor, pairing)``; raises
+    ``LazyDecline`` for a lane the host round serves instead (no feature
+    yet) and ``ValueError`` for a call outside the contract.
+    """
+    from ..proposal_composition import LazyDecline
+
+    if sampler is not None:
+        raise ValueError(f"{name} lazy drafts are greedy only (no drafting sampler)")
+    if int(proposal_length) < 1:
+        raise ValueError(f"{name} lazy drafts need a positive proposal length")
+    if hidden.shape[0] != 1:
+        raise ValueError(f"{name} lazy drafts run one lane at a time")
+    if isinstance(anchor, mx.array):
+        # A pipelined round's unread anchor cannot close a host pairing.
+        raise ValueError(f"{name} lazy drafts need a committed host anchor")  # noqa: TRY004
+    if hidden.shape[1] == 0:
+        # No target feature yet: the host round proposes nothing (ordinary).
+        raise LazyDecline("eagle_no_feature")
+    anchor = int(anchor)
+    if context_tokens is None:
+        if hidden.shape[1] != 1:
+            raise ValueError(f"{name} needs the token following each feature")
+        context_tokens = [[anchor]]
+    if len(context_tokens) != 1:
+        raise ValueError(f"{name} lazy drafts take one lane's pairing")
+    pairing = [int(token) for token in context_tokens[0]]
+    if len(pairing) != hidden.shape[1] or pairing[-1] != anchor:
+        raise ValueError(f"{name} pending pairing must end with the anchor")
+    if logits_processors and callable(getattr(processor_history, "apply", None)):
+        raise ValueError(f"{name} lazy drafts take a host processor history")
+    return anchor, pairing
+
+
 class _Rows:
     """Per-lane cache rows for one batched draft call (lanes keep own planes)."""
 
@@ -442,6 +497,72 @@ class CohereEagleDraftModel(nn.Module):
                 tokens[row].append(token)
                 laws[row].append(q)
         return tokens, laws
+
+    # -- lazy drafts (speculative_device_round ``lazy_draft``) -----------------
+    # The device round passes the lane's EAGLE context pairing and stateless
+    # processors.  Greedy, one lane: a sampled host draft draws from the lane
+    # RNG on the host, and a batched host draft is a different matmul shape
+    # than the device round's per-lane draft, so neither is bitwise ours.
+    draft_lazy_pairs_context = True
+    draft_lazy_processors = True
+    draft_lazy_consumes_rng = True
+    draft_lazy_greedy_only = True
+    draft_lazy_width_one = True
+
+    def draft_lazy(self, anchor, hidden, cache, proposal_length, sampler=None, *,
+                   rng=None, context_tokens=None, logits_processors=None,
+                   processor_history=None):
+        """One lane's greedy chain as a lazy int32 ``[n]`` array, no host read.
+
+        ``speculative_device_round`` ``lazy_draft`` (default off, unqualified).
+        The ops are ``draft_distributions``' for a one-row batch: the pending
+        features (paired with ``context_tokens[0]``, ending with the anchor)
+        are committed to the draft KV, then the chain runs on round-local KV;
+        each drafted token feeds the next step as a device array (same
+        embedding row).  Each position's token is ``softmax(value, 0)``'s
+        argmax (smallest id among the maxima) of the same float32 logits, or
+        of the lane's processors' output on ``processor_history + [anchor] +
+        drafts so far`` (falling back to the raw row when no processed score
+        is finite, as the host does).  ``rng`` (the lane's RequestRNG) gives
+        up one uniform per position, as ``rng.sample`` does on the host.  A
+        row the host ``softmax`` refuses (NaN, nothing finite) makes every
+        token ``DRAFT_LAZY_HOST_REDO``: the round is redone on the host.
+        """
+        from ..processor_probe import probe_logits_processors
+        from .dflash2 import DRAFT_LAZY_HOST_REDO
+
+        anchor, pairing = check_lazy_lane(
+            "Cohere EAGLE", anchor, hidden, proposal_length, sampler, context_tokens,
+            logits_processors, processor_history,
+        )
+        count = int(proposal_length)
+        processors = list(logits_processors or ())
+        rows = self._rows(cache)
+        top = self.append_context(hidden, cache, context_tokens=[pairing])[:, -1:]
+        self.stats["draft_calls"] += 1
+        chain = [[(None, None) for _ in self.layers]]
+        prefix = (mx.array(list(processor_history or ()) + [anchor], dtype=mx.int32)
+                  if processors else None)
+        vocab = int(self.config.vocab_size)
+        drafted, redo = [], mx.array(False)
+        for step in range(count):
+            if step:
+                top = self._forward(drafted[-1].reshape(1, 1), top, rows, commit=False,
+                                    chain=chain)
+                self.stats["chain_steps"] += 1
+            value = self._logits(top[:, -1, :]).astype(mx.float32)[0]
+            if processors:
+                tokens = mx.concatenate([prefix, mx.stack(drafted)]) if drafted else prefix
+                processed = probe_logits_processors(processors, tokens, value[None])[0].astype(
+                    mx.float32)
+                value = mx.where(mx.any(mx.isfinite(processed)), processed, value)
+            token, bad = lazy_greedy_token(value, sentinel=vocab)
+            redo = redo | bad
+            if rng is not None:
+                rng.uniform()  # ``rng.sample(one-hot)`` draws one uniform per position
+            drafted.append(token)
+        out = mx.stack(drafted).astype(mx.int32)
+        return mx.where(redo, mx.full((count,), DRAFT_LAZY_HOST_REDO, dtype=mx.int32), out)
 
 
 Model = CohereEagleDraftModel

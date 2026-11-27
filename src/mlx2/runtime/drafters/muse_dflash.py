@@ -52,6 +52,7 @@ from ..technologies.drafter_blocks import (
     inject_target_taps,
     prenorm_block_layers,
 )
+from . import dense_block_lazy
 from .cohere_eagle import EagleWindowKVCache, _Rows
 
 ARCHITECTURE = "MuseGlimmerAssistantModel"
@@ -432,6 +433,11 @@ class MuseDFlashDraftModel(nn.Module):
         state = self.start_tree(anchors, hidden, cache, max_nodes, **options)
         return self.finish_tree(state, mark=mark)
 
+
+# ``speculative_device_round`` ``lazy_draft`` (default off; chain rounds
+# only, the device round declines tree and AST engines): the host loop's ops
+# on the device (drafters/dense_block_lazy.py).
+dense_block_lazy.install(MuseDFlashDraftModel)
 
 Model = MuseDFlashDraftModel
 

@@ -1,6 +1,7 @@
 # Copyright 2026 Eagle AI Corp.
 # Modified 2026-10-21 by mlx2 contributors: ported the dense Qwen3.8 draft
 # architecture and candidate law to MLX and mlx2-owned scheduling/state.
+# Modified 2026-11-27: lazy greedy chain draft (``draft_lazy``).
 # SPDX-License-Identifier: LicenseRef-Eagle-4-Source-Available
 # Eagle 4 Source-Available License (not an OSI-approved open-source license):
 # see third_party/eagle4/ (LICENSE, NOTICE, MODIFICATIONS.md, README.md).
@@ -196,6 +197,11 @@ class Eagle4DraftModel(nn.Module):
 
     def _candidate_rows(self, hidden, *, forbidden=()):
         """Candidate ids, exact logits and their normalized law for each row."""
+        return self._candidate_law(hidden, forbidden=forbidden, check=True)
+
+    def _candidate_law(self, hidden, *, forbidden=(), check):
+        """``_candidate_rows``' ops; ``check=False`` skips its host read
+        (an all-forbidden row), for ``draft_lazy``, which flags it instead."""
         low = self.efficient_lm_head_down_proj(
             hidden.astype(self.efficient_lm_head_down_proj.weight.dtype)
         )
@@ -212,7 +218,7 @@ class Eagle4DraftModel(nn.Module):
             logits = mx.where(
                 mx.any(ids[..., None] == blocked, axis=-1), -float("inf"), logits
             )
-        if bool(mx.any(mx.all(mx.isneginf(logits), axis=-1)).item()):
+        if check and bool(mx.any(mx.all(mx.isneginf(logits), axis=-1)).item()):
             raise ValueError("EAGLE-4 candidate set is entirely forbidden")
         logits = logits - mx.max(logits, axis=-1, keepdims=True)
         probs = mx.exp(logits)
@@ -314,6 +320,70 @@ class Eagle4DraftModel(nn.Module):
                 tokens[row].append(token)
                 laws[row].append(dense)
         return tokens, laws
+
+    # -- lazy drafts (speculative_device_round ``lazy_draft``, chain only) ------
+    # The device round passes the lane's EAGLE context pairing.  Chain rounds
+    # only: the device round declines tree15 and AST rounds before drafting.
+    # Greedy, one lane, no processors: a sampled host draft draws from the
+    # lane RNG on the host, a batched host draft is a different matmul shape
+    # than the per-lane device draft, and the host processes
+    # ``float32(log(float64(p)))`` of the candidate law, which a device
+    # float32 log need not reproduce bit for bit (declined, counted under
+    # ``lazy_draft_processors``).
+    draft_lazy_pairs_context = True
+    draft_lazy_processors = False
+    draft_lazy_consumes_rng = False
+    draft_lazy_greedy_only = True
+    draft_lazy_width_one = True
+
+    def draft_lazy(self, anchor, hidden, cache, proposal_length, sampler=None, *,
+                   context_tokens=None, logits_processors=None, processor_history=None):
+        """One lane's greedy chain as a lazy int32 ``[n]`` array, no host read.
+
+        ``speculative_device_round`` ``lazy_draft`` (default off, unqualified).
+        The ops are ``draft_distributions``' for a one-row batch: the pending
+        features (paired with ``context_tokens[0]``, ending with the anchor)
+        are committed through the window view, the chain feeds the draft's
+        feedback on round-local KV, each drafted token as a device array, and
+        each position takes the same low-rank candidates and float32 law
+        (``_candidate_law``).  The host greedy token is ``np.argmax`` of that
+        law scattered on the vocabulary, i.e. the smallest candidate id among
+        the maximal probabilities; that selection runs here on the candidate
+        row.  A greedy host draft draws no uniform.  A row the host would
+        refuse or treat differently (a non-finite law) makes every token
+        ``DRAFT_LAZY_HOST_REDO``: the round is redone on the host.
+        """
+        from .cohere_eagle import check_lazy_lane, lazy_greedy_token
+        from .dflash2 import DRAFT_LAZY_HOST_REDO
+
+        if logits_processors:
+            raise ValueError("EAGLE-4 lazy drafts take no logits processors")
+        _anchor, pairing = check_lazy_lane(
+            "EAGLE-4", anchor, hidden, proposal_length, sampler, context_tokens,
+            logits_processors, processor_history,
+        )
+        count = int(proposal_length)
+        rows = self._rows(cache)
+        normed, feedback = self.append_context(hidden, cache, context_tokens=[pairing])
+        normed, feedback = normed[:, -1:], feedback[:, -1:]
+        chain = [(None, None)]
+        self.stats["draft_calls"] += 1
+        vocab = int(self.config.vocab_size)
+        drafted, redo = [], mx.array(False)
+        for step in range(count):
+            if step:
+                normed, feedback = self._forward(
+                    drafted[-1].reshape(1, 1), feedback, rows, commit=False, chain=chain,
+                    fused=True,
+                )
+                self.stats["chain_steps"] += 1
+            ids, _, probs = self._candidate_law(normed[:, -1], check=False)
+            law = probs[0]
+            token, bad = lazy_greedy_token(law, ids[0].astype(mx.int32), sentinel=vocab)
+            redo = redo | bad | ~mx.all(mx.isfinite(law))
+            drafted.append(token)
+        out = mx.stack(drafted).astype(mx.int32)
+        return mx.where(redo, mx.full((count,), DRAFT_LAZY_HOST_REDO, dtype=mx.int32), out)
 
     def propose_tree(
         self,

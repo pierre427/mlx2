@@ -291,6 +291,56 @@ class Hy4DFlyDraftModel:
         self.stats["block_drafts"] += len(anchors)
         return tokens, laws
 
+    # -- lazy drafts (speculative_device_round ``lazy_draft``) -----------------
+    # The device round passes ``target_caches=[lane.cache]`` to a drafter that
+    # declares this (chain rounds only: it declines tree, AST and target-tree
+    # engines before any draft).
+    draft_lazy_target_caches = True
+    # One-lane cohorts only: multi-lane device rounds of this drafter are not
+    # covered by an exactness test (CPU or GPU), so a wider cohort keeps the
+    # host round (counted ``lazy_draft_width``).
+    draft_lazy_width_one = True
+
+    def draft_lazy(self, anchor, hidden, cache, proposal_length, sampler=None, *,
+                   target_caches=None):
+        """One lane's drafts as a lazy int32 ``[n]`` array, no host read.
+
+        Default off, unqualified.  The ops are ``draft_distributions``' own
+        greedy row for that lane: consume the pending feature tail, then one
+        ``head.propose`` over the lane's committed target cache with the
+        default argmax ``choose`` (the drafted token feeds the next step's
+        hidden correction as a device array either way), so greedy tokens and
+        the feature cache are bitwise the host's.  Greedy rows draw no RNG on
+        the host either.  ``sampler(logits [1, V]) -> [1]``
+        (``device_round.sampled_drafts``) replaces ``choose``: each step is
+        drawn from its conditioned row and the device ratio rule verifies
+        against the law it recorded.  Without a sampler a sampled lane gets
+        the greedy point masses (exact under the point-mass verifier).  A lane
+        without a committed feature or index selection raises the host
+        path's ``DraftUnavailable``.
+        """
+        from ..proposal_composition import LazyDecline
+
+        if isinstance(anchor, mx.array):
+            # A pipelined round's unread anchor: declined before any check or
+            # state change, so the host round serves it.
+            raise LazyDecline("dfly_device_anchor")
+        if target_caches is None or len(target_caches) != 1:
+            raise ValueError("DFly2 lazy drafts require the lane's target cache")
+        count = int(proposal_length)
+        if not 1 <= count <= self.maximum_proposal_length:
+            raise ValueError("DFly2 proposal length exceeds its block")
+        if hidden.shape[0] != 1 or len(self._entries(cache)) != 1:
+            raise ValueError("DFly2 lazy drafts run one lane at a time")
+        features = self._features(hidden, cache)
+        choose = None
+        if sampler is not None:
+            def choose(_step, logits):
+                return sampler(logits).reshape(-1)
+        drafted, _ = self._lane(0, anchor, features[0], count, target_caches, choose)
+        self.stats["block_drafts"] += 1
+        return drafted[0].astype(mx.int32)
+
     def propose_tree(self, anchors, hidden, cache, max_nodes, *, forbidden_token_ids=None,
                      topology=None, mark=None, target_caches=None, **_options):
         """Per-row ``(tokens, parents)`` trees (``-1`` = anchor), parents first.

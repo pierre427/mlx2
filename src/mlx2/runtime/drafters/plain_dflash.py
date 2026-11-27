@@ -223,6 +223,87 @@ class PlainDFlashDraftModel(DFlashDraftModel):
                 laws[row].append(q)
         return tokens, laws
 
+    # -- lazy drafts (speculative_device_round ``lazy_draft``; default off) -----
+    # One-lane cohorts only, like DFlash2: the host drafts a cohort in one
+    # batched call, and per-lane device drafts are not proven bitwise equal
+    # to it on the GPU (CPU-only evidence so far).
+    draft_lazy_width_one = True
+    draft_lazy_processors = True
+    # The processed host loop draws one uniform per position (``rng.sample``).
+    draft_lazy_consumes_rng = True
+
+    def draft_lazy(self, anchor, hidden, cache, proposal_length, sampler=None, *, rng=None,
+                   logits_processors=None, processor_history=None):
+        """One lane's drafts as a lazy int32 ``[n]`` array, no host read.
+
+        The ops are ``draft_distributions``' for that lane: the full trained
+        block over ``batch_caches([cache])`` (the pending ``hidden`` rows
+        enter the draft KV as there), the float32 block logits, then
+
+        * unprocessed, no ``sampler``: the per-position float32 argmax the
+          greedy host row takes, so tokens are bitwise those it returns;
+        * ``logits_processors`` (stateless, history-pure; the device round's
+          ``processors`` switch): per position the lane's processors on
+          ``processor_history + [anchor] + drafts so far`` (lazy), then the
+          argmax ``softmax(value, 0)`` selects, consuming one ``rng`` uniform
+          per position as the host's ``rng.sample`` does.  A position the host
+          ends early (no finite value: a grammar dead end) or refuses (NaN)
+          turns every token into ``DRAFT_LAZY_HOST_REDO``, so the round is
+          redone on the host path;
+        * ``sampler(values [1, V]) -> [1]`` (``device_round.sampled_drafts``):
+          each position drawn from its (processed) law; positions after the
+          anchor are mask inputs, so position ``j``'s law is that row alone.
+
+        A sampled lane without ``sampler`` drafts the argmax point masses
+        (verified by the point-mass law), not the host's sampled tokens.
+        """
+        from ..processor_probe import probe_logits_processors
+        from .dflash_base import (
+            lazy_anchors,
+            lazy_host_history,
+            lazy_mirrors,
+            lazy_one_lane,
+            lazy_prefix,
+            lazy_redo,
+        )
+
+        lazy_mirrors(self, PlainDFlashDraftModel, ("draft_distributions", "_block_logits"))
+        count = int(proposal_length)
+        if not 1 <= count <= self.maximum_proposal_length:
+            raise ValueError(f"{self.label} proposal length exceeds the trained block")
+        caches = lazy_one_lane(self, hidden, cache, self.label)
+        processors = list(logits_processors or ())
+        history = lazy_host_history(processors, processor_history, self.label)
+        anchors = lazy_anchors(anchor)
+        inputs = mx.concatenate([anchors[:, None], mx.full(
+            (1, int(self.config.block_size) - 1), int(self.config.mask_token_id),
+            dtype=mx.int32)], axis=1)
+        logits = self._logits(self._hidden(inputs, hidden, caches)[:, 1:1 + count]).astype(
+            mx.float32)
+        self.stats["block_drafts"] += 1
+        if not processors:
+            if sampler is None:
+                return mx.argmax(logits[0], axis=-1).astype(mx.int32)
+            return mx.concatenate([
+                sampler(logits[:, position]).reshape(1).astype(mx.int32)
+                for position in range(count)
+            ])
+        prefix = lazy_prefix(history, anchors)
+        drafted, invalid = [], mx.array(False)
+        for position in range(count):
+            tokens = mx.concatenate([prefix, mx.stack(drafted)]) if drafted else prefix
+            value = probe_logits_processors(processors, tokens, logits[:, position]).astype(
+                mx.float32)
+            invalid = invalid | ~mx.any(mx.isfinite(value)) | mx.any(mx.isnan(value))
+            if sampler is None:
+                if rng is not None:
+                    rng.uniform()  # ``rng.sample(one-hot)`` draws one uniform per position
+                token = mx.argmax(value[0])
+            else:
+                token = sampler(value).reshape(())
+            drafted.append(token.astype(mx.int32))
+        return lazy_redo(invalid, mx.stack(drafted))
+
     def propose_tree(self, anchors, hidden, cache, max_nodes, *, forbidden_token_ids=None,
                      topology=None, mark=None, **_options):
         """Per-row trees from one block pass (``-1`` = anchor).

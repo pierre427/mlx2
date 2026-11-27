@@ -1020,3 +1020,79 @@ def test_chain_forks_depth_caches_as_descriptors_and_lends_the_global_kv(monkeyp
             assert after_commit == before
     assert results["descriptor"][:3] == results["deepcopy"][:3]
     _assert_same_state(results["descriptor"][3], results["deepcopy"][3])
+
+
+# -- draft_lazy (speculative_device_round ``lazy_draft``) ---------------------
+
+
+@pytest.mark.parametrize("depth", [1, 2, 3, 5])
+@pytest.mark.parametrize("processed", [False, True])
+def test_draft_lazy_equals_the_host_chain_and_its_committed_state(depth, processed):
+    from mlx2.runtime.sample_utils import make_logits_processors
+
+    prompt = [5, 17, 2, 33, 8, 21, 4, 11]
+    pairing = [prompt[1:] + [13]]
+    processors = make_logits_processors(presence_penalty=1.5) if processed else []
+    model, draft = attached()
+    features, _ = _features(model, prompt)
+    host_cache, lazy_cache = draft.make_cache(), draft.make_cache()
+    tokens, _ = draft.draft_distributions(
+        [13], features, host_cache, depth, [None], [0.0], context_tokens=pairing,
+        logits_processors=[processors] if processed else None,
+        processor_histories=[list(prompt)] if processed else None,
+    )
+    host_steps = draft.stats["chain_steps"]
+    lazy = draft.draft_lazy(
+        13, features, lazy_cache, depth, context_tokens=pairing,
+        logits_processors=processors or None, processor_history=list(prompt),
+    )
+    assert lazy.dtype == mx.int32 and lazy.shape == (min(depth, DEPTHS),)
+    assert [int(t) for t in lazy.tolist()] == tokens[0]
+    assert draft.stats["chain_steps"] - host_steps == host_steps
+    _assert_same_state(host_cache[0], lazy_cache[0])
+
+
+def test_draft_lazy_takes_the_ranked_token_on_a_rounded_tie():
+    prompt = [5, 17, 2, 33, 8, 21, 4, 11]
+    model, draft = attached()
+    draft._first_logits = lambda state: _tied_first_logits(draft)
+    features, _ = _features(model, prompt)
+    pairing = [prompt[1:] + [13]]
+    tokens, _ = draft.draft_distributions(
+        [13], features, draft.make_cache(), 3, [None], [0.0], context_tokens=pairing)
+    lazy = draft.draft_lazy(13, features, draft.make_cache(), 3, context_tokens=pairing)
+    assert [int(t) for t in lazy.tolist()] == tokens[0] and tokens[0][0] == 0
+
+
+def test_draft_lazy_dead_end_redoes_on_the_host_and_refusals():
+    from mlx2.runtime.drafters.dflash2 import DRAFT_LAZY_HOST_REDO
+    from mlx2.runtime.proposal_composition import LazyDecline
+
+    prompt = [5, 17, 2, 33, 8, 21, 4, 11]
+    model, draft = attached()
+    features, _ = _features(model, prompt)
+    pairing = [prompt[1:] + [13]]
+    vocab = draft.config.vocab_size
+    seen = []
+
+    def dead_after_first(tokens, logits):
+        seen.append([int(t) for t in tokens.tolist()])
+        if tokens.shape[0] > len(prompt) + 1:
+            return mx.full(logits.shape, -float("inf"), dtype=logits.dtype)
+        return logits
+
+    dead_after_first.probe = dead_after_first
+    lazy = draft.draft_lazy(13, features, draft.make_cache(), 3, context_tokens=pairing,
+                            logits_processors=[dead_after_first],
+                            processor_history=list(prompt))
+    assert [int(t) for t in lazy.tolist()] == [DRAFT_LAZY_HOST_REDO] * 3
+    assert all(0 <= value < vocab for tokens in seen for value in tokens)
+    with pytest.raises(ValueError, match="end with the anchor"):
+        draft.draft_lazy(1, features, draft.make_cache(), 2, context_tokens=pairing)
+    with pytest.raises(ValueError, match="pairing"):
+        draft.draft_lazy(13, features, draft.make_cache(), 2)
+    with pytest.raises(LazyDecline):
+        draft.draft_lazy(13, features[:, :0], draft.make_cache(), 2, context_tokens=[[]])
+    with pytest.raises(ValueError, match="host anchor"):
+        draft.draft_lazy(mx.array([13]), features, draft.make_cache(), 2,
+                         context_tokens=pairing)
