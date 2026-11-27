@@ -35,7 +35,10 @@ def load_cpu():
         "array", "zeros", "arange", "concatenate", "pad", "expand_dims", "roll", "int32")})
     mx.fast = SimpleNamespace(scaled_dot_product_attention=attention)
     namespace = dict(mx=mx, copy=copy, Integral=Integral, deque=deque,
-                     _BaseCache=object, _state_checkpoint_max=lambda: 0)
+                     _BaseCache=object, _state_checkpoint_max=lambda: 0,
+                     # causal_window_mask's opt-in native-window bridge (off).
+                     native_window_requested=lambda: False,
+                     _register_native_window=lambda *args: None)
     nodes = [ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0)]
     # create_causal_mask and the ring masks delegate to the window-attention
     # technology's masks.

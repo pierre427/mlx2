@@ -129,6 +129,28 @@ _FUSED_D256_UNAVAILABLE = set()
 def fast_sdpa(queries, keys, values, *, scale, mask, sinks=None):
     """``mx.fast.scaled_dot_product_attention`` with the fused d256 range widened."""
     L = queries.shape[2]
+    if _window_attention._NATIVE_WINDOW_MASKS and isinstance(mask, mx.array):
+        # Opt-in MLX2_SDPA_NATIVE_WINDOW: a recorded pure causal-window mask
+        # goes to MLX's built-in window (no array; out-of-window KV tiles are
+        # never visited by the fused kernels).
+        window = _window_attention.native_window_of(mask, L, keys.shape[2])
+        if window is not None:
+            try:
+                out = mx.fast.scaled_dot_product_attention(
+                    queries, keys, values, scale=scale, mask="causal",
+                    window_size=window, sinks=sinks,
+                )
+            except TypeError:
+                # An MLX without ``window_size``: stop recording, keep arrays.
+                _window_attention.NATIVE_WINDOW_STATS["native_window_unavailable"] += 1
+                _window_attention._NATIVE_WINDOW_SUPPORTED[0] = False
+                _window_attention._NATIVE_WINDOW_MASKS.clear()
+            except ValueError:
+                # MLX refused this window geometry: this call keeps the array.
+                _window_attention.NATIVE_WINDOW_STATS["native_window_declined"] += 1
+            else:
+                _window_attention.NATIVE_WINDOW_STATS["native_window_calls"] += 1
+                return out
     if (
         0 < _FUSED_D256_MIN_L <= L < _FUSED_D256_MAX_L
         and queries.shape[-1] == 256

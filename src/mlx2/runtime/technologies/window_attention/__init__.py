@@ -208,7 +208,78 @@ def causal_window_mask(
         mask = mask & (rinds < mx.expand_dims(offset + N - right_padding, (1, 2, 3)))
     if left_padding is not None:
         mask = mask & (mx.expand_dims(left_padding, (1, 2, 3)) <= rinds)
+    if (
+        window_size is not None
+        and window_size > 0
+        and right_padding is None
+        and left_padding is None
+        and native_window_requested()
+    ):
+        _register_native_window(mask, int(window_size), N, offset)
     return mask
+
+
+# --------------------------------------------------------------------------
+# Native-window bridge (opt-in, MLX2_SDPA_NATIVE_WINDOW=1)
+# --------------------------------------------------------------------------
+#
+# A pure causal-window mask (no padding) equals MLX >= 0.32.5's built-in
+# ``mask="causal", window_size=W`` whenever the keys are in temporal order and
+# end at the newest query (MLX's causal diagonal is ``kL - qL``).  The built-in
+# form needs no mask array and its fused prefill kernels bound the KV-tile
+# loop to the window, so out-of-window tiles are never read; with the dense
+# array they are computed and discarded (ml-explore/mlx#4983 skips them by
+# scanning the mask instead).  ``causal_window_mask`` records the masks it
+# built here, identity-checked like ``qsdpa_verify_metal.register_causal_mask``;
+# ``models.base.fast_sdpa`` hands a recorded mask whose geometry matches the
+# call to MLX as the built-in window.  Any other array (sliced, lifted,
+# overlaid, padded, sink-prefix) is not recorded and keeps the array path.
+# Default off: see docs/research/mlx-pr4983-mask-tile-skip-2026-11-27.md.
+#
+# The registry holds strong references (so an id cannot be reused while it is
+# recorded).  A bridged mask is never evaluated, so it costs nothing; a
+# recorded mask some other consumer evaluates (a BatchRotatingKVCache
+# intermediate, a sliced parent) stays pinned until evicted, so the cap is
+# small: a forward builds one window mask per window size.
+
+_NATIVE_WINDOW_MASKS: dict[int, tuple] = {}
+_NATIVE_WINDOW_LIMIT = 4
+NATIVE_WINDOW_STATS = {
+    "registered": 0, "native_window_calls": 0,
+    "native_window_unavailable": 0, "native_window_declined": 0,
+}
+# False once this MLX has shown it has no ``window_size`` argument.
+_NATIVE_WINDOW_SUPPORTED = [True]
+
+
+def native_window_requested() -> bool:
+    return _NATIVE_WINDOW_SUPPORTED[0] and os.environ.get("MLX2_SDPA_NATIVE_WINDOW", "0") == "1"
+
+
+def _register_native_window(mask, window: int, n_queries: int, offset: int) -> None:
+    while len(_NATIVE_WINDOW_MASKS) >= _NATIVE_WINDOW_LIMIT:
+        try:
+            _NATIVE_WINDOW_MASKS.pop(next(iter(_NATIVE_WINDOW_MASKS)), None)
+        except (StopIteration, RuntimeError):  # emptied/resized by another thread
+            break
+    _NATIVE_WINDOW_MASKS[id(mask)] = (mask, window, n_queries, offset)
+    NATIVE_WINDOW_STATS["registered"] += 1
+
+
+def native_window_of(mask, n_queries: int, n_keys: int) -> Optional[int]:
+    """The window ``mask`` was built with, when it is a recorded pure causal
+    window whose geometry is this call's (``[qL, kL]``, diagonal ``kL - qL``);
+    otherwise None (also once the flag is turned off)."""
+    if not native_window_requested():
+        _NATIVE_WINDOW_MASKS.clear()
+        return None
+    entry = _NATIVE_WINDOW_MASKS.get(id(mask))
+    if entry is None or entry[0] is not mask:
+        return None
+    _, window, n, offset = entry
+    if n != n_queries or offset + n != n_keys or tuple(mask.shape) != (n_queries, n_keys):
+        return None
+    return window
 
 
 def sink_prefix_window_mask(N: int, offset: int, window_size: int, keep: int) -> mx.array:

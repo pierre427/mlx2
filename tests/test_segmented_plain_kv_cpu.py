@@ -45,7 +45,10 @@ def load_cpu_classes():
     )
     mx.contiguous = np.ascontiguousarray
     mx.fast = SimpleNamespace(scaled_dot_product_attention=attention)
-    namespace = {"mx": mx, "Integral": Integral, "_BaseCache": object}
+    namespace = {"mx": mx, "Integral": Integral, "_BaseCache": object,
+                 # causal_window_mask's opt-in native-window bridge (off).
+                 "native_window_requested": lambda: False,
+                 "_register_native_window": lambda *args: None}
     future = ast.ImportFrom(
         module="__future__", names=[ast.alias(name="annotations")], level=0
     )
