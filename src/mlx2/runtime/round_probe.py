@@ -540,6 +540,11 @@ def clean_dispatches(table, kernels, reflection):
     when no buffer it reads is written by a later dispatch, and every buffer
     it writes is written last by it (so its post-round contents are its own
     output, which the replay arms copy before running).
+
+    A recorded dispatch carries the encoder's whole binding table, including
+    slots an earlier kernel bound that this kernel does not use (MLX never
+    clears bindings). Only the slots in the kernel's reflection count; for an
+    unreflected kernel every slot counts (access unknown).
     """
     def name(entry):
         pipeline = entry["pipeline"]
@@ -550,7 +555,8 @@ def clean_dispatches(table, kernels, reflection):
         slots = reflection.get(name(entry))
         for slot in entry["slots"]:
             # Unreflected kernels: access unknown, so every binding may write.
-            if slot[1] == "buffer" and (slots is None or slots.get(slot[0])):
+            # Leftover bindings (not in the reflection) are not this kernel's.
+            if slot[1] == "buffer" and (slots is None or slots.get(slot[0], False)):
                 last_write[slot[2]] = i
     clean = []
     for i, entry in enumerate(table):
@@ -562,6 +568,8 @@ def clean_dispatches(table, kernels, reflection):
             if slot[1] != "buffer":
                 continue
             last = last_write.get(slot[2], -1)
+            if slot[0] not in slots:
+                continue  # left over from an earlier kernel in this encoder
             if (slots.get(slot[0]) and last != i) or (not slots.get(slot[0]) and last > i):
                 ok = False
                 break
@@ -579,19 +587,19 @@ def _flag_ab_indices():
 
 
 def flag_ab_instance(table, kernels, clean):
-    """One replay-safe dispatch per kernel for the P2 timing: a clean instance
-    if any, else (for kernels outside ``_WRITE_UNSAFE``) the first one."""
+    """One replay-safe dispatch per kernel for the P2 timing: the first clean
+    instance (record-time inputs). Kernels with no clean instance are not
+    timed: a stale input can steer a write (scatter indices, the destination
+    offset of MLX's ``copy_gg_dynamic`` slice update) outside the private
+    copies, so name lists cannot make a non-clean replay safe (review,
+    2026-11-26)."""
     clean = set(clean)
     chosen = {}
     for i, entry in enumerate(table):
         name = kernels[entry["pipeline"]] if entry["pipeline"] < len(kernels) else None
-        if name is None or entry.get("form") == "indirect":
+        if name is None or entry.get("form") == "indirect" or i not in clean:
             continue
-        if i in clean:
-            if name not in chosen or not chosen[name][1]:
-                chosen[name] = (i, True)
-        elif name not in chosen and not any(tag in name for tag in _WRITE_UNSAFE):
-            chosen[name] = (i, False)
+        chosen.setdefault(name, (i, True))
     return chosen
 
 
@@ -615,6 +623,9 @@ def statistics_median(values):
 
 def _flag_ab_pass(route, handle, index, summary):
     """P2: rank kernels by GPU time per round, then A/B the hot ones (module docstring)."""
+    if not summary.get("drained"):
+        _record["errors"].append(f"P2 refused recording {index}: not drained")
+        return
     started = time.perf_counter()
     kernels = summary.get("kernels") or []
     table = handle.dispatch_table()
@@ -656,7 +667,7 @@ def _flag_ab_pass(route, handle, index, summary):
         "schema": "mlx2.round-probe.flag-ab.v1", "probe": "P2", "route": route,
         "recording_index": index, "distinct_kernels": len(set(kernels)),
         "kernels_timed": len(ranking), "kernels_untimed": failures,
-        "unsafe_without_clean_instance": sorted(n for n in set(kernels) if n not in chosen),
+        "untimed_no_clean_instance": sorted(n for n in set(kernels) if n not in chosen),
         "builds_failed": [r["kernel"] for r in ranking if not (r["build_plain"] and r["build_flag"])],
         "ranked_round_us_total": round(total, 1),
         "hot_share_of_ranked": round(sum(r["round_us"] for r in ranking[:10]) / total, 4) if total else None,
@@ -673,6 +684,9 @@ def _flag_ab_pass(route, handle, index, summary):
 
 def _substitution_pass(route, handle, index, summary):
     """P4: every dispatch of one recording, once per alignment (module docstring)."""
+    if not summary.get("drained"):
+        _record["errors"].append(f"P4 refused recording {index}: not drained")
+        return
     kernels = summary.get("kernels") or []
     started = time.perf_counter()
     passes = []
@@ -829,6 +843,14 @@ class _Scope:
 
     def _arm_recording(self):
         rec = _record
+        if _native.recording_open():
+            # A recording left open on this thread (an exit on another thread,
+            # or an exception before record_end): end it before it grows.
+            try:
+                _native.record_end(0.0)
+            except Exception:
+                pass
+            rec["leaked_recordings"] = rec.get("leaked_recordings", 0) + 1
         last = rec["last_round_end"]
         if last is not None and self._h0 - last > rec["gap_s"]:
             rec["left"] = rec["per_gap"]
@@ -1005,7 +1027,9 @@ def _gpu_status_locked():
         out.update(_timeline_counts, pending_rounds=len(_pending),
                    pending_command_buffers=_native.timeline_pending(),
                    dropped_entries=_native.timeline_dropped(),
-                   recordings={k: _record[k] for k in ("per_gap", "dir", "gap_s", "max", "written", "errors")})
+                   recordings={k: _record.get(k) for k in ("per_gap", "dir", "gap_s", "max", "written", "errors",
+                                                            "leaked_recordings")},
+                   open_recordings=_native.open_recordings() if hasattr(_native, "open_recordings") else None)
     return out
 
 

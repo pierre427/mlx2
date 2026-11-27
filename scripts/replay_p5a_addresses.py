@@ -26,14 +26,27 @@ import sys
 from pathlib import Path
 
 
+def own_slots(entry, reflected):
+    """The slots this dispatch's kernel uses. A recording carries the encoder's whole binding
+    table, including bindings an earlier kernel left behind (MLX never clears them); keep only
+    the slot indices in the kernel's reflection (buffer or threadgroup), or every slot when the
+    kernel is unreflected."""
+    if reflected is None:
+        return list(entry.get("slots", []))
+    return [s for s in entry.get("slots", []) if s[0] in reflected]
+
+
 def roles(doc):
     kernels = doc["summary"]["kernels"]
     refl = {p["function"]: {s[0]: s[2] for s in p["slots"] if s[1] == "buffer"} for p in doc["pipelines"]}
     first, written, read_after_write = {}, set(), set()
     for entry in doc["dispatches"]:
-        slots = refl.get(kernels[entry["pipeline"]], {})
-        reads = [s[2] for s in entry["slots"] if s[1] == "buffer" and not slots.get(s[0], True)]
-        writes = [s[2] for s in entry["slots"] if s[1] == "buffer" and slots.get(s[0], True)]
+        name = kernels[entry["pipeline"]]
+        slots = refl.get(name, {})
+        mine = own_slots(entry, set(slots) if name in refl else None)
+        # Unreflected kernels: access unknown, so a binding counts as both read and write.
+        reads = [s[2] for s in mine if s[1] == "buffer" and not slots.get(s[0], False)]
+        writes = [s[2] for s in mine if s[1] == "buffer" and slots.get(s[0], name not in refl)]
         for b in reads:
             first.setdefault(b, "read")
             if b in written:
@@ -86,8 +99,10 @@ def main(argv=None):
         counts = collections.defaultdict(lambda: [0, 0])
         bufs = collections.defaultdict(lambda: [0, 0])
         seen_buffers = {}
+        k0 = members[0]["summary"]["kernels"]
+        refl0 = {p["function"]: {sl[0] for sl in p["slots"]} for p in members[0]["pipelines"]}
         for d_index, entry in enumerate(members[0]["dispatches"]):
-            for s_index, slot in enumerate(entry["slots"]):
+            for s_index, slot in enumerate(own_slots(entry, refl0.get(k0[entry["pipeline"]]))):
                 if slot[1] != "buffer":
                     continue
                 values = set()

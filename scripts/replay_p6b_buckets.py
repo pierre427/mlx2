@@ -29,10 +29,15 @@ from pathlib import Path
 
 
 def layout(doc):
+    """Leftover bindings from earlier kernels in the same encoder are excluded: they move
+    with MLX's encoder boundaries and are not part of the kernel's own layout."""
     kernels = doc["summary"]["kernels"]
+    reflected = {p["function"]: {sl[0] for sl in p.get("slots", [])} for p in doc.get("pipelines", [])}
     parts = []
     for e in doc["dispatches"]:
-        slots = tuple((s[0], s[1], s[3] if s[1] in ("bytes", "threadgroup") else None) for s in e["slots"])
+        own = reflected.get(kernels[e["pipeline"]])
+        mine = e["slots"] if own is None else [s for s in e["slots"] if s[0] in own]
+        slots = tuple((s[0], s[1], s[3] if s[1] in ("bytes", "threadgroup") else None) for s in mine)
         parts.append((kernels[e["pipeline"]], e.get("form"), slots))
     return tuple(parts)
 

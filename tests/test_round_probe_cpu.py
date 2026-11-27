@@ -859,3 +859,15 @@ def test_flag_ab_instance_prefers_clean_and_skips_unsafe_writers():
 def test_bootstrap_ratio_brackets_the_median():
     stats = round_probe._bootstrap_ratio([10.0] * 20, [10.0 + 0.1 * (i % 3) for i in range(20)])
     assert stats["pairs"] == 20 and stats["ci95"][0] <= stats["median"] <= stats["ci95"][1]
+
+
+def test_clean_dispatches_ignores_leftover_bindings():
+    # "r" uses only slot 0; slot 5 is a leftover from an earlier kernel in the same encoder.
+    reflection = {"w": {0: False, 1: True}, "r": {0: False}}
+    kernels = ["w", "r"]
+    table = [
+        {"pipeline": 1, "slots": [(0, "buffer", 10, 0), (5, "buffer", 11, 0)]},  # leftover 11
+        {"pipeline": 0, "slots": [(0, "buffer", 12, 0), (1, "buffer", 11, 0)]},  # writes 11 later
+    ]
+    # Dispatch 0 does not read 11, so the later write does not make it unclean.
+    assert round_probe.clean_dispatches(table, kernels, reflection) == [0, 1]

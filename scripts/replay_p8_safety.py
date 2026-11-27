@@ -62,6 +62,47 @@ def equal(a, b):
     return bool(mx.array_equal(a, b).item())
 
 
+def classify(sr, prog, z, K, previous=None):
+    """What a replay output equals when it is wrong (diagnosis of P8 failures)."""
+    y = sr.replay_apply(prog, z)
+    mx.eval(y, z)
+    want = reference(z, K)
+    if equal(y, want):
+        return "ok", y
+    for label, other in (("input_passed_through", z), ("zeros", mx.zeros_like(z)),
+                         ("one_step_only", reference(z, 1))):
+        if equal(y, other):
+            return label, y
+    if previous is not None and equal(y, previous):
+        return "previous_output", y
+    diff = (y - want)
+    return f"other(max_abs_diff={float(mx.max(mx.abs(diff)).item())}, frac_wrong={float(mx.mean((diff != 0).astype(mx.float32)).item()):.3f})", y
+
+
+def diagnose(sr, K=8, trials=40):
+    """Single replays, each evaluated on its own: lazy inputs from ordinary ops, same and other stream."""
+    from collections import Counter
+    out = {}
+    s1 = mx.new_stream(mx.gpu)
+    for label, make in (("materialized_input", lambda t: mx.array(list(range(N)), dtype=mx.float32) + float(t)),
+                        ("lazy_same_stream", lambda t: data(t) * 2.0 + 1.0),
+                        ("lazy_other_stream", None)):
+        prog = sr.replay_program(K, N, 4)
+        counts, previous = Counter(), None
+        for t in range(trials):
+            if make is None:
+                with mx.stream(s1):
+                    z = data(t) * 2.0 + 1.0
+            else:
+                z = make(t)
+            if label == "materialized_input":
+                mx.eval(z)
+            verdict, previous = classify(sr, prog, z, K, previous)
+            counts[verdict] += 1
+        out[label] = {"counts": dict(counts), "stats": prog.stats()}
+    return out
+
+
 def correctness(sr):
     out = []
     for K in (1, 8, 64):
@@ -83,6 +124,7 @@ def graph(fn_replay, seed, K):
 
 
 def interleave(sr, ring, trials=200, inflight=4, K=8):
+    """``ring`` >= 2 * inflight keeps every in-flight replay on its own ICB slot."""
     prog = sr.replay_program(K, N, ring)
     bad, batch, refs = 0, [], []
     for t in range(trials):
@@ -97,28 +139,33 @@ def interleave(sr, ring, trials=200, inflight=4, K=8):
             "bad": bad, "stats": prog.stats()}
 
 
-def concurrent(sr, trials=200):
-    stop = threading.Event()
+def concurrent(sr, trials=200, K=8, inflight=4):
+    """Replays while another stream has heavy MLX work queued: before each batch, a chain of
+    2048x2048 matmuls is submitted on stream s2 with ``async_eval`` (one thread; a background
+    Python thread evaluating on its own stream made no progress on 2026-11-26)."""
     s2 = mx.new_stream(mx.gpu)
-    done = {"iters": 0}
-
-    def background():
-        m = mx.random.normal((1024, 1024), key=mx.random.key(99))
-        with mx.stream(s2):
-            while not stop.is_set():
-                m = (m @ m) / 1024.0
-                mx.eval(m)
-                done["iters"] += 1
-
-    thread = threading.Thread(target=background, daemon=True)
-    thread.start()
-    try:
-        result = interleave(sr, ring=4, trials=trials)
-    finally:
-        stop.set()
-        thread.join(timeout=30)
-    result["background_matmuls"] = done["iters"]
-    return result
+    prog = sr.replay_program(K, N, 4 * inflight)
+    with mx.stream(s2):
+        m = mx.random.normal((2048, 2048), key=mx.random.key(99))
+    bad, batch, refs, chains, heavy = 0, [], [], 0, []
+    for t in range(trials):
+        if not batch:
+            with mx.stream(s2):
+                for _ in range(8):
+                    m = mx.tanh(m @ m)
+            mx.async_eval(m)
+            heavy.append(m)
+            chains += 1
+        batch.append(graph(lambda v: sr.replay_apply(prog, v), t, K))
+        refs.append(graph(lambda v: reference(v, K), t, K))
+        if len(batch) == inflight:
+            mx.async_eval(batch)
+            for got, want in zip(batch, refs):
+                bad += not equal(got, want)
+            batch, refs = [], []
+    mx.eval(heavy)
+    return {"trials": trials, "bad": bad, "background_chains": chains, "matmuls_per_chain": 8,
+            "stats": prog.stats()}
 
 
 def cross_stream(sr, trials=100, K=8):
@@ -137,9 +184,42 @@ def cross_stream(sr, trials=100, K=8):
     return {"trials": trials, "bad": bad, "stats": prog.stats()}
 
 
+def cross_stream_variants(sr, trials=100, K=8):
+    """Localize cross-stream failures: the same s1 -> s2 -> s1 round trip with ordinary MLX ops
+    instead of the replay (control), the replay consumed on the default stream, and the
+    replay with its output evaluated before the consumer is built."""
+    from collections import Counter
+    s1, s2 = mx.new_stream(mx.gpu), mx.new_stream(mx.gpu)
+    prog = sr.replay_program(K, N, 4)
+    out = {}
+    for label in ("control_mlx_ops", "replay_round_trip", "replay_consumer_default_stream",
+                  "replay_eval_between"):
+        bad, kinds = 0, Counter()
+        for t in range(trials):
+            with mx.stream(s1):
+                z = data(t) * 2.0 + 1.0
+            with mx.stream(s2):
+                y = reference(z, K) if label == "control_mlx_ops" else sr.replay_apply(prog, z)
+            if label == "replay_eval_between":
+                mx.eval(y)
+            if label == "replay_consumer_default_stream":
+                got = y * 3.0
+            else:
+                with mx.stream(s1):
+                    got = y * 3.0
+            want = reference(data(t) * 2.0 + 1.0, K) * 3.0
+            if not equal(got, want):
+                bad += 1
+                zc = data(t) * 2.0 + 1.0
+                kinds["consumer_saw_input" if equal(got, zc * 3.0) else
+                      "consumer_saw_zeros" if equal(got, mx.zeros_like(got)) else "other"] += 1
+        out[label] = {"trials": trials, "bad": bad, "kinds": dict(kinds)}
+    return out
+
+
 def retire(sr, K=8):
     before = sr.replay_programs_destroyed()
-    prog = sr.replay_program(K, N, 8)
+    prog = sr.replay_program(K, N, 64)
     xs = [data(1000 + i) for i in range(32)]
     mx.eval(xs)
     ys = [sr.replay_apply(prog, x) for x in xs]
@@ -217,10 +297,12 @@ def main(argv=None):
                     "macos_build": subprocess.run(["sw_vers", "-buildVersion"], capture_output=True, text=True).stdout.strip(),
                     "MLX_MAX_OPS_PER_BUFFER": os.environ.get("MLX_MAX_OPS_PER_BUFFER")},
            "m1_m2_residency": "not run: needs an M2 and Pierre's OK; ICB replay gated to Apple9+ until then"}
-    for name, fn in (("correctness", lambda: correctness(sr)),
-                     ("interleave_ring4", lambda: interleave(sr, 4)),
+    for name, fn in (("diagnose", lambda: diagnose(sr)),
+                     ("correctness", lambda: correctness(sr)),
+                     ("interleave_ring16", lambda: interleave(sr, 16)),
                      ("concurrent", lambda: concurrent(sr)),
                      ("cross_stream", lambda: cross_stream(sr)),
+                     ("cross_stream_variants", lambda: cross_stream_variants(sr)),
                      ("retire", lambda: retire(sr)),
                      # Last but one: ring 1 rebinds in-flight commands on purpose, and its
                      # wrong bindings may write anywhere this process owns.

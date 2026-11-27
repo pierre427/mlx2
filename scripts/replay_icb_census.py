@@ -37,6 +37,16 @@ from pathlib import Path
 
 MAX_SEGMENTS = 8  # kill criterion (probe doc, P3)
 
+def own_slots(entry, reflected):
+    """The slots this dispatch's kernel uses. A recording carries the encoder's whole binding
+    table, including bindings an earlier kernel left behind (MLX never clears them); keep only
+    the slot indices in the kernel's reflection (buffer or threadgroup), or every slot when the
+    kernel is unreflected."""
+    if reflected is None:
+        return list(entry.get("slots", []))
+    return [s for s in entry.get("slots", []) if s[0] in reflected]
+
+
 
 def kernel_origin(name):
     if name.startswith("custom_kernel"):
@@ -46,8 +56,8 @@ def kernel_origin(name):
     return "mlx_builtin_or_library"
 
 
-def classify(dispatch, unsupported):
-    kinds = [slot[1] for slot in dispatch.get("slots", [])]
+def classify(dispatch, unsupported, slots=None):
+    kinds = [slot[1] for slot in (dispatch.get("slots", []) if slots is None else slots)]
     if unsupported:
         return "ineligible", f"recording_unsupported:{unsupported}"
     if dispatch.get("form") == "indirect":
@@ -62,6 +72,8 @@ def census_one(doc):
     kernels = summary.get("kernels") or []
     unsupported = summary.get("unsupported") or ""
     rows = doc.get("dispatches") or []
+    reflected = {p["function"]: {sl[0] for sl in p.get("slots", [])} for p in doc.get("pipelines", [])}
+    leftover = 0
     classes = collections.Counter()
     reasons = collections.Counter()
     segments, in_segment = 0, False
@@ -69,7 +81,10 @@ def census_one(doc):
     origins = collections.Counter()
     per_kernel = collections.Counter()
     for d in rows:
-        cls, why = classify(d, unsupported)
+        name0 = kernels[d["pipeline"]] if d["pipeline"] < len(kernels) else None
+        mine = own_slots(d, reflected.get(name0))
+        leftover += len(d.get("slots", [])) - len(mine)
+        cls, why = classify(d, unsupported, mine)
         classes[cls] += 1
         if why:
             reasons[why] += 1
@@ -77,7 +92,7 @@ def census_one(doc):
         if eligible and not in_segment:
             segments += 1
         in_segment = eligible
-        slots = d.get("slots", [])
+        slots = mine
         bindings = sum(1 for s in slots if s[1] in ("buffer", "bytes"))
         bindings_max = max(bindings_max, bindings)
         for s in slots:
@@ -93,6 +108,7 @@ def census_one(doc):
         "file": doc.get("_file"), "route": doc.get("route"), "index": doc.get("index"),
         "compare_with_previous": doc.get("compare_with_previous"),
         "dispatches": len(rows),
+        "leftover_slots_ignored": leftover,
         "barriers": summary.get("barriers"),
         "command_buffers_committed": summary.get("command_buffers_committed"),
         "encoders_opened": summary.get("encoders_opened"),
@@ -117,7 +133,8 @@ def census_one(doc):
         "_kernel_sequence": [kernels[d["pipeline"]] if d["pipeline"] < len(kernels) else "<missing>"
                              for d in rows],
         "_grids": [tuple(d.get("grid", ())) + tuple(d.get("group", ())) for d in rows],
-        "_tg": [tuple(s[3] for s in d.get("slots", []) if s[1] == "threadgroup") for d in rows],
+        "_tg": [tuple(s[3] for s in own_slots(d, reflected.get(kernels[d["pipeline"]] if d["pipeline"] < len(kernels) else None))
+                      if s[1] == "threadgroup") for d in rows],
     }
 
 
