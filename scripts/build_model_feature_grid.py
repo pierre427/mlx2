@@ -69,6 +69,7 @@ FEATURES = (
     "device_round.lagged_width", "mla_decode_nax_absorbed", "mla_decode_nax_absorbed_packed",
     # DC-6 (2026-11-26): lagged proposal-composition planning under the pipeline.
     "device_round.lagged_composition",
+    "device_round.fixed_shape",
     # Raon-1-mini levers (2026-11-25): merged decode projections, fused mHC sites.
     "merged_projections", "mhc_fused", "mla_flash_expanded", "moe_nax_gather_affine",
     # Hy4-flash (2026-11-18): embedded DFly2 drafter, chain-packed AST executor.
@@ -145,6 +146,7 @@ FEATURES = (
     "ast_tree_gdn_chains",
     "ast_tree_hc_rows", "ast_tree_hc_multirow", "ast_tree_hc_matrix", "ast_tree_experts_lane",
     "ast_tree_tile_shape_sweep", "ast_tree_end_to_end_projection",
+    "ast_device_tree", "ast_256k_memory_admission",
     "inkling2_moe_fused", "inkling2_moe_weighted_sum", "inkling2_moe_nax_gather",
     "inkling2_moe_act_quant", "inkling2_kv_q8",
     "inkling2_fuse_controllers", "inkling2_fuse_residual", "inkling2_fuse_sconv",

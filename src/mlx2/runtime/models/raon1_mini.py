@@ -593,9 +593,11 @@ def absorbed_flash_canary(heads: int, dtype, *, seed: int = 20261125, bound: flo
 class MLA(kimi.MultiLatentAttention):
     """Kimi's NoPE latent attention with a low-rank query and a sigmoid output gate."""
 
-    # "off" (default): absorbed decode rows take Kimi's latent_single law.
-    # "nax_absorbed": the head-group-generic absorbed NAX latent flash for
-    # decode/verify rows (<= auto_rows) at NAX_DECODE_HEADS behind its probe.
+    # "off" (the reference law; the attribute default before configure):
+    # absorbed decode rows take Kimi's latent_single law.  "nax_absorbed"
+    # (the adapter's default policy since 2026-11-27): the head-group-generic
+    # absorbed NAX latent flash for decode/verify rows (<= auto_rows) at
+    # NAX_DECODE_HEADS behind its probe.
     decode_nax = "off"
 
     @property

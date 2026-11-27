@@ -344,18 +344,19 @@ def test_affine_install_and_merged_affine_projection_match_parts():
     assert float(mx.abs(plain - merged).max()) < 1e-4
 
 
-def test_nax_levers_are_opt_in_and_decline_cleanly_on_cpu():
+def test_nax_levers_defaults_and_decline_cleanly_on_cpu():
     from mlx2.adapters import raon1_mini as A
 
     policy = A.parse_policy({})
-    assert policy["mla_flash"] == "off" and policy["moe_nax"] == "off"
+    # mla_flash expanded is the default (Pierre, 2026-11-27); moe_nax stays off.
+    assert policy["mla_flash"] == "expanded" and policy["moe_nax"] == "off"
     with pytest.raises(ValueError):
         A.parse_policy({"mla_flash": "all"})
     with pytest.raises(ValueError):
         A.parse_policy({"moe_nax": "nvfp4"})
     model = _model()
     tokens = mx.array([list(range(1, 40))])
-    model.configure(A.parse_policy({}))
+    model.configure(A.parse_policy({"mla_flash": "off"}))
     base = model(tokens)
     model.configure(A.parse_policy({"mla_flash": "expanded"}))
     flashed = model(tokens)
@@ -397,7 +398,7 @@ def test_nax_receipts_distinguish_selection_from_calls():
     mla = {}
     adapter.model = SimpleNamespace(mechanism_status=lambda: dict(mla=mla, rda={}, effort_alpha=0),
                                     effort_alpha=lambda _: 0)
-    adapter.policy = parse_policy()
+    adapter.policy = parse_policy({"mla_flash": "off"})
     receipts = adapter.capability_receipts()
     assert all(receipts[key]["selected"] is False for key in ("mla_flash", "moe_nax_gather"))
     adapter.policy = parse_policy({"mla_flash": "expanded", "moe_nax": "gather"})
@@ -876,3 +877,26 @@ def test_hq_diag_variants_swap_and_mxfp8_roundtrip_is_exact():
     finally:
         mp.undo()
     assert mx.array_equal(model(ids), before).item()
+
+
+def test_dflash2_chain_defaults_to_the_pipelined_device_round(monkeypatch):
+    """Pierre 2026-11-27: pipeline on by default on the measured shape; an
+    explicit device_round (``false``: the host chain) or any other external
+    key keeps the caller's policy."""
+    from mlx2.adapters import raon1_mini as A
+    from mlx2.runtime.speculative_device_round import DeviceRoundPolicy
+
+    policy = DeviceRoundPolicy.from_value(dict(A.DEVICE_ROUND_DEFAULT))
+    assert policy.pipeline and policy.lagged_width and policy.device_commit and policy.processors
+    assert policy.lagged_composition and not policy.fixed_shape
+
+    def parsed(external):
+        adapter = object.__new__(A.RaonAdapter)
+        assert adapter._parse_external_policy(external, family="Raon-1-mini")
+        adapter._default_device_round()
+        return adapter.external_policy.get("device_round")
+
+    assert parsed({"draft_model": "d", "num_draft": 5}) == A.DEVICE_ROUND_DEFAULT
+    assert parsed({"draft_model": "d", "proposal_composition": False}) == A.DEVICE_ROUND_DEFAULT
+    assert parsed({"draft_model": "d", "device_round": False}) is False
+    assert parsed({"draft_model": "d", "adaptive_verification": False}) is None

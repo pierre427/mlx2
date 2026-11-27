@@ -221,6 +221,13 @@ def inspect_artifact(model_path):
     return artifact
 
 
+# The DFlash2 chain's default device round (see RaonAdapter._load) and the
+# external-policy keys it is applied under.
+DEVICE_ROUND_DEFAULT = {"lazy_draft": True, "decide": True, "processors": True,
+                        "device_commit": True, "lagged_width": True, "pipeline": True,
+                        "lagged_composition": True}
+DEVICE_ROUND_DEFAULT_SHAPE = frozenset({"draft_model", "num_draft", "proposal_composition"})
+
 NUMERIC_POLICY_KEYS = frozenset({"moe_nax", "mla", "mla_flash", "mla_decode", "rda", "fused_norm",
                                  "reasoning_effort", "mhc", "merged_projections", "rms_law", "mla_expanded_gib"})
 
@@ -250,15 +257,23 @@ def parse_policy(policy=None):
     # off (2026-11-25, NAX unit 56a957a87): engaged (6192 gathers) but no
     # prefill gain at 2K-128K.  mla_flash expanded: +11-20 % prefill at
     # 8K/32K and 2.55x at 128K on NVFP4, 128K needle found, but GSM8K30 one
-    # question flipped wrong (flash-c5fa61ac4); stays opt-in.
+    # question flipped wrong (flash-c5fa61ac4, unclassified).  DEFAULT ON
+    # (Pierre, 2026-11-27: "flip to the faster flash option"), unqualified;
+    # probe-gated, a decline keeps the fused D256 SDPA / tiled latent law
+    # and is counted (flash_declined).  "off" is the reference law.
     # mla_decode "nax_absorbed": the absorbed NAX latent flash for decode /
     # verify rows (<= 16) at 40 heads (3 head groups, zero-query padding to
     # 48), behind a memoized probe against absorbed_reference.  Replaces the
     # latent_single law, which casts the whole cached latent to FP32 every
     # token in all 7 MLA layers (week ladder 2026-11-25: 54 tok/s at 32K,
-    # 27.7 at 128K).  Opt-in, unmeasured: needs the GPU unit
-    # (scripts/raon1_mini_nax_decode_unit_20261125.sh) first.
-    defaults = {"moe_nax": "off", "mla": "auto", "mla_flash": "off", "mla_decode": "off", "rda": "kernel", "fused_norm": False,
+    # 27.7 at 128K).  DEFAULT ON under mla "auto" (Pierre, 2026-11-27), not
+    # qualified: Metal canary 14/14; decode-at-depth vs latent_single 4K
+    # identical (0.96x), 32K/64K exact-tie near-tie candidates (1.18x/1.43x),
+    # 128K token-identical with the needle found (1.44x); served 128K needle
+    # passes cold and warm (qualification/runs/raon1-mini-nax-decode-20261126/
+    # nvfp4-e3f1bb841-128k-r2/).  An explicit mla law other than "auto"
+    # without an explicit mla_decode keeps "off"; "off" is the reference law.
+    defaults = {"moe_nax": "off", "mla": "auto", "mla_flash": "expanded", "mla_decode": "nax_absorbed", "rda": "kernel", "fused_norm": False,
                 # mhc "fused" (two-launch mHC sites for decode/verify rows,
                 # <= 8 rows) DEFAULT ON, Pierre 2026-11-25: +11 % decode on top
                 # of merged projections, teacher-forced top-1 100 %, KL 0.0024,
@@ -294,6 +309,9 @@ def parse_policy(policy=None):
     if policy.keys() - defaults.keys():
         raise ValueError(f"unsupported Raon policy: {sorted(policy.keys() - defaults.keys())}")
     result = {**defaults, **policy}
+    if "mla_decode" not in policy and result["mla"] != "auto":
+        # The absorbed NAX default rides the auto law only (see the check below).
+        result["mla_decode"] = "off"
     if result["mla"] not in {"expanded", "latent_tiled", "latent_single", "auto"}:
         raise ValueError("unsupported Raon MLA law")
     if result["mla_flash"] not in {"off", "expanded"}:
@@ -378,6 +396,8 @@ class RaonAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
         numerics, speculative = split_policy(execution_policy)
         self.policy = parse_policy(numerics)
         external = self._parse_external_policy(speculative, family="Raon-1-mini")
+        if external:
+            self._default_device_round()
         artifact = inspect_artifact(model_path)
         self.config, self.identity = artifact["config"], artifact["identity"]
         self.artifact_layout = layout = artifact["layout"]
@@ -439,6 +459,20 @@ class RaonAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             self.descriptor = replace(self.descriptor, variant=stem + "-external-dflash2",
                                       metadata={**self.descriptor.metadata, "qualification": "unqualified",
                                                 "speculative_route": "external_raon_dflash2_chain"})
+
+    def _default_device_round(self):
+        # The pipelined device round is the DFlash2 chain's default (Pierre,
+        # 2026-11-27: "pipeline on by default"), unqualified, on the shape
+        # it was measured on: draft_model / num_draft / proposal_composition
+        # only. DC-6 GPU @46ca23e7b on Raon-1-mini-mlx@sha256:089f6390:
+        # GSM8K100 token-exact against the serial lagged-width round, acc
+        # 0.95, +12-14 % decode with composition off. lagged_composition is
+        # on too (Pierre, 2026-11-27), so the default composed rounds
+        # pipeline: DC-6 full arm GSM8K100 token-exact against the serial
+        # composed round, +9-12 % quiet decode, +1.5 % GSM8K decode. An
+        # explicit device_round (``false`` for the host chain) always wins.
+        if DEVICE_ROUND_DEFAULT_SHAPE.issuperset(self.external_policy):
+            self.external_policy["device_round"] = dict(DEVICE_ROUND_DEFAULT)
 
     # ------------------------------------------------------------ routes
 

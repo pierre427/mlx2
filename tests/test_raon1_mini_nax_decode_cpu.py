@@ -230,10 +230,14 @@ def _model(config, seed=0, scale=0.05, dtype=None):
     return model
 
 
-def test_policy_key_is_opt_in_and_validated():
+def test_policy_key_defaults_on_under_auto_and_is_validated():
     from mlx2.adapters import raon1_mini as A
 
-    assert A.parse_policy({})["mla_decode"] == "off"
+    # Default on under mla auto (Pierre, 2026-11-27); another explicit law
+    # without an explicit mla_decode keeps the reference "off".
+    assert A.parse_policy({})["mla_decode"] == "nax_absorbed"
+    assert A.parse_policy({"mla": "latent_single"})["mla_decode"] == "off"
+    assert A.parse_policy({"mla_decode": "off"})["mla_decode"] == "off"
     assert A.parse_policy({"mla_decode": "nax_absorbed"})["mla_decode"] == "nax_absorbed"
     assert "mla_decode" in A.NUMERIC_POLICY_KEYS
     for bad in ("on", "all", None):
@@ -262,7 +266,7 @@ def test_off_and_other_head_counts_decline_bitwise(monkeypatch):
     # 4 heads; dense layers only (CPU GatherMM is FP32-only).
     model = _model(tiny_config(first_k_dense_replace=99), dtype=mx.bfloat16)
     prompt = list(range(1, 30))
-    base = _decode(model, {}, prompt)
+    base = _decode(model, {"mla_decode": "off"}, prompt)
     mla = model.layers[3].self_attn
     assert mla.decode_nax == "off" and mla.calls.get("decode_nax_declined", 0) == 0
     opted = _decode(model, {"mla_decode": "nax_absorbed"}, prompt)
@@ -326,7 +330,7 @@ def test_engaged_decode_at_40_heads_matches_default(monkeypatch, emulated):
     monkeypatch.setattr(R, "absorbed_flash_available", lambda heads, dtype: True)
     model = _model(raon40_config(), dtype=mx.bfloat16)
     prompt = list(range(3, 40))
-    base = _decode(model, {}, prompt)
+    base = _decode(model, {"mla_decode": "off"}, prompt)
     mla = model.layers[3].self_attn
     assert mla.calls.get("latent_flash", 0) == 0
     opted = _decode(model, {"mla_decode": "nax_absorbed"}, prompt)
