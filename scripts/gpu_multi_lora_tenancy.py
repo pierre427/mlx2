@@ -97,6 +97,10 @@ def parse():
     p.add_argument("--deadline-epoch", type=float, default=0.0, help="skip phases that would end after this")
     p.add_argument("--out", help="evidence directory (must be empty or absent)")
     p.add_argument("--lora-dir", help="where adapters are written (default: temp, removed at the end)")
+    p.add_argument("--delta-precision", choices=("fp32", "adapter"),
+                   help="multi-LoRA slot/delta precision (default: engine default, fp32)")
+    p.add_argument("--phases", default="throughput,longtail,churn",
+                   help="comma list of throughput,longtail,churn (startup/reference/reload always run)")
     p.add_argument("--i-own-the-gpu", action="store_true")
     p.add_argument("--tiny-cpu-smoke", action="store_true")
     p.add_argument("--summarize")
@@ -112,6 +116,8 @@ def build_engine(args, lora_root):
         max_loras=args.slots, max_lora_rank=args.rank, max_lanes=args.lanes,
         max_inflight=max(args.concurrency * 2, 64), coalesce_window_ms=50.0,
     )
+    if args.delta_precision:
+        kwargs["multi_lora_delta_precision"] = args.delta_precision
     if args.tiny_cpu_smoke:
         sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests"))
         from test_approximate_kv_serving import make_adapter, tiny_model
@@ -239,10 +245,16 @@ def phase_throughput(engine, args, names, report, rng):
                 gate = f"adapter arm K={k} moved no adapter rows: {d}"
             if not k and d.get("rows_adapter", 0):
                 gate = f"base arm ran adapter rows: {d}"
-            if k > args.slots and not d.get("slot_evictions", 0):
-                gate = f"K={k} > slots={args.slots} but no slot_evictions: {d}"
+            # An eviction is only forced when the arm itself asks for more
+            # distinct adapters than there are slots; 32 requests over 256
+            # tenants touch at most 32, which fit in 64 slots (2026-11-27 night
+            # run: 24 loads, 0 evictions, correct). Eviction under pressure is
+            # exercised by the long-tail phase.
+            distinct = len({b.get("model") for b in bodies if b.get("model")})
+            if distinct > args.slots and not d.get("slot_evictions", 0):
+                gate = f"{distinct} distinct adapters > slots={args.slots} but no slot_evictions: {d}"
             entry = out.setdefault(str(k), {"runs": []})
-            entry["runs"].append({**summ, "wall_s": wall, "tok_s": summ["tokens"] / wall,
+            entry["runs"].append({**summ, "distinct_adapters": distinct, "wall_s": wall, "tok_s": summ["tokens"] / wall,
                                   "req_s": (summ["requests"] - summ["failed"]) / wall, "counters": d, "gate": gate})
             print(json.dumps({"phase": "throughput", "K": k, "round": rnd, "tok_s": round(summ["tokens"] / wall, 2),
                               "failed": summ["failed"], "gate": gate}), flush=True)
@@ -474,7 +486,7 @@ def main():
             m = modules[key]
             out_dims, packed = m.weight.shape
             dims[key] = (packed * 32 // m.bits if isinstance(m, nn.QuantizedLinear) else packed, out_dims)
-        n_spares = int(args.phase_s // args.churn_s) + 2
+        n_spares = int(args.phase_s // args.churn_s) + 2 if "churn" in args.phases.split(",") else 0
         dtype = None if args.tiny_cpu_smoke else mx.bfloat16
         t0 = time.perf_counter()
         names = []
@@ -515,10 +527,11 @@ def main():
         cap = tp.get(k_cal, {}).get("median_req_s") or 0.1
         rate = max(0.02, args.load * cap)
         report["open_loop_rate_req_s"] = rate
-        if time_left(args.phase_s + 120):
+        phases = set(args.phases.split(","))
+        if "longtail" in phases and time_left(args.phase_s + 120):
             phase_longtail(engine, args, names, rate, report, rng)
             save()
-        if time_left(args.phase_s + 120):
+        if "churn" in phases and time_left(args.phase_s + 120):
             phase_churn(engine, args, names, spares, rate, report, rng)
             save()
         # Reload parity: the reference adapters were evicted and reloaded many times by now.
@@ -533,6 +546,8 @@ def main():
                            "before": (a or "")[:100], "after": (b or "")[:100]}
         report["phases"]["reload_parity"] = parity
         report["multi_lora_status"] = engine.multi_lora.status()
+        report["multi_lora_settings"] = engine.multi_lora.settings()
+        report["slot_dtype"] = str(next(iter(engine.multi_lora.wrapped.values())).lora_a.dtype)
     except SystemExit as exc:
         report["fatal"] = str(exc)
         raise
@@ -555,13 +570,22 @@ def fmt(v, nd=2):
 
 
 def summarize(d: Path):
-    files = sorted(p for p in d.rglob("*.json"))  # one subdirectory per config
+    # One subdirectory per config (<label>/<label>.json); the root also holds
+    # queue receipts (gpu-receipt-*.json), which are not ours.
+    files = []
+    for p in sorted(d.glob("*/*.json")):
+        try:
+            if json.loads(p.read_text()).get("schema") == "mlx2.multi-lora-tenancy.v1":
+                files.append(p)
+        except (OSError, ValueError):
+            continue
     lines = ["# Multi-LoRA tenancy test", ""]
     for p in files:
         r = json.loads(p.read_text())
         a = r["args"]
         lines += [f"## {r['label']}: rank {a['rank']}, {a['adapters']} adapters, {a['slots']} slots", "",
-                  f"- checkpoint `{r['checkpoint']}`, mlx2 `{r['source_revision']}`, {r['started']} → {r.get('finished')}"]
+                  f"- checkpoint `{r['checkpoint']}`, mlx2 `{r['source_revision']}`, {r['started']} → {r.get('finished')}",
+                  f"- delta precision `{(r.get('multi_lora_settings') or {}).get('delta_precision', a.get('delta_precision') or 'adapter')}`, slot dtype `{r.get('slot_dtype')}`"]
         if r.get("fatal"):
             lines.append(f"- **FATAL:** {r['fatal']}")
         if r.get("skipped"):
@@ -604,6 +628,21 @@ def summarize(d: Path):
             bad = [k for k, v in rp.items() if not v["identical"]]
             lines += [f"**Reload parity** (B=1 greedy, before vs after eviction): "
                       + ("all identical" if not bad else f"DIVERGED: {', '.join(bad)}"), ""]
+    # Cross-config output identity: the same B=1 greedy reference requests
+    # (base + first four adapters, same seeds) in every config.
+    refs = [(json.loads(p.read_text())["label"], json.loads(p.read_text())["phases"].get("reference") or {}) for p in files]
+    if len(refs) > 1:
+        lines += ["## Reference outputs across configs (B=1 greedy, vs the first config)", "",
+                  "| config | " + " | ".join(refs[0][1]) + " |", "|---|" + "---|" * len(refs[0][1])]
+        for label, ref in refs:
+            cells = []
+            for key, val in refs[0][1].items():
+                a_text, b_text = val.get("text") or "", (ref.get(key) or {}).get("text") or ""
+                first = None if a_text == b_text else next(
+                    (i for i, (x, y) in enumerate(zip(a_text, b_text)) if x != y), min(len(a_text), len(b_text)))
+                cells.append("same" if first is None else f"differs @{first}")
+            lines.append(f"| {label} | " + " | ".join(cells) + " |")
+        lines.append("")
     (d / "REPORT.md").write_text("\n".join(lines) + "\n")
     print(d / "REPORT.md")
     return 0
