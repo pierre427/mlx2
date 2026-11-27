@@ -546,7 +546,7 @@ def test_hq_kl_probe_on_mxfp8_banks_restores_in_place_and_survives_a_failing_sco
     assert mx.array_equal(model(mx.array([seqs[6]])), logits).item()
     # While substituted, the affine biases are what ``.biases`` reads (no stale None attribute).
     index, layer = next((i, l) for i, l in enumerate(model.layers) if l.is_moe)
-    saved = HQ.apply_expert_format(layer, index, hessians, 4, 32, damp=0.01)
+    saved = HQ.apply_expert_format(layer, index, hessians, "a4g32", damp=0.01)
     bank = layer.moe.switch_mlp.gate_proj
     assert bank.mode == "affine" and bank.biases is not None and bank.biases is bank.get("biases")
     HQ.restore_experts(saved)
@@ -565,6 +565,134 @@ def test_hq_kl_probe_on_mxfp8_banks_restores_in_place_and_survives_a_failing_sco
         HQ.kl_costs(model, hessians, seqs[6:], settings, tmp_path / "b", checkpoint="tiny@0", log=lambda *_: None)
     assert state() == before
     assert mx.array_equal(model(mx.array([seqs[6]])), logits).item()
+
+
+def _mxfp8_tiny(seed=3):
+    from mlx2.adapters import raon1_mini as A
+
+    model = _model(seed=seed, scale=0.2)
+    model.configure(A.parse_policy({"merged_projections": False, "mhc": "ops"}))
+    for layer in model.layers:
+        if layer.is_moe:
+            glu = layer.moe.switch_mlp
+            for name in ("gate_proj", "up_proj", "down_proj"):
+                setattr(glu, name, glu[name].to_quantized(group_size=32, bits=8, mode="mxfp8"))
+    return model
+
+
+def test_hq_v4_mixed_menu_probe_export_and_reload(tmp_path, monkeypatch):
+    """Recipe v4: mxfp8 keeps the source codes (cost exactly 0, exported byte for byte), mxfp4 and
+    nvfp4 are RTN, affine is GPTQ; the mixed artifact reloads through the loader with each bank's mode."""
+    from mlx2.adapters import raon1_mini as A
+    from mlx2.conversion import raon1_mini_hq as HQ
+    from mlx2.runtime.models import raon1_mini as R
+
+    menu = ("mxfp4", "nvfp4", "a4g32", "mxfp8")
+    model = _mxfp8_tiny()
+    mx.random.seed(7)
+    seqs = [mx.random.randint(1, 96, (24,)).tolist() for _ in range(8)]
+    hessians, _rows, counts = HQ.calibrate(model, seqs[:6], log=lambda *_: None)
+    settings = HQ.HQSettings(formats=menu, budget_bpw=6.0, dense_group=32, seq=24, kl_rows=2, kl_skip=8)
+    assert settings.recipe == "raon1-mini-affine-mix-v4"
+    costs, receipt = HQ.kl_costs(model, hessians, seqs[6:], settings, tmp_path, checkpoint="tiny@0",
+                                 log=lambda *_: None)
+    assert receipt["restore_check"] == "bit-equal"
+    for i, c in costs.items():
+        assert c["mxfp8"] == 0.0 and receipt["per_layer"][str(i)]["mxfp8"] == {"exact_source_codes": True}
+        assert c["mxfp4"] > 0 and c["nvfp4"] > 0
+    # Force one layer of each format so the export covers every mode.
+    moe = sorted(costs)
+    forced = {i: {f: (0.0 if f == menu[k % len(menu)] else 1.0) for f in menu} for k, i in enumerate(moe)}
+    planes, quant, plan = HQ.plan_and_quantize(model, hessians, counts,
+                                               HQ.HQSettings(formats=menu, budget_bpw=9.0, dense_group=32, seq=24, kl_skip=8),
+                                               log=lambda *_: None, costs=forced)
+    schedule = {int(k): v for k, v in plan["schedule"].items()}
+    assert set(schedule.values()) == set(menu)
+    for i, fmt in schedule.items():
+        path = f"model.layers.{i}.moe.switch_mlp.gate_proj"
+        spec = HQ.fmt_spec(fmt)
+        assert quant[path]["bits"] == spec.bits and quant[path]["group_size"] == spec.group
+        assert quant[path].get("mode", "affine") == spec.mode
+        assert (path + ".biases" in planes) == (spec.mode == "affine")
+        if fmt == "mxfp8":  # the source codes, byte for byte
+            src = model.layers[i].moe.switch_mlp.gate_proj
+            assert mx.array_equal(planes[path + ".weight"], src["weight"]).item()
+            assert mx.array_equal(planes[path + ".scales"], src["scales"]).item()
+    tensors = {**HQ._untouched(model, planes), **planes}
+    config = {**A._TOPOLOGY, "rda_config": A._RDA,
+              "reasoning_effort_steering": {"layers": A.STEERING_LAYERS, "default": "high", "alpha": {"high": 0}},
+              "mlx2_conversion": {"recipe": settings.recipe, "source_revision": A.SOURCE_REVISION},
+              "quantization": {"group_size": 32, "bits": 8, "mode": "affine", **quant}}
+    assert A.validate_config(config) == "mlx2_affine"
+    fresh = R.Model(R.ModelArgs.from_dict(tiny_config()))
+    receipt = R.install_affine(fresh, config, tensors.keys())
+    fresh.load_weights(list(fresh.sanitize(dict(tensors)).items()), strict=True)
+    fresh.configure(A.parse_policy({"merged_projections": False, "mhc": "ops"}))
+    for i, fmt in schedule.items():
+        assert fresh.layers[i].moe.switch_mlp.up_proj.mode == HQ.fmt_spec(fmt).mode
+    ids = mx.array([seqs[0]])
+    agree = float((mx.argmax(fresh(ids), -1) == mx.argmax(model(ids), -1)).astype(mx.float32).mean())
+    assert agree >= 0.9, agree
+    # Microscaled modes only on routed experts, and not under an older recipe id.
+    bad = dict(config, quantization={**config["quantization"],
+                                     "model.layers.0.self_attn.o_proj": {"bits": 8, "group_size": 32, "mode": "mxfp8"}})
+    with pytest.raises(ValueError, match="mixed affine"):
+        A.validate_config(bad)
+    with pytest.raises(ValueError, match="not allowed"):
+        R.install_affine(R.Model(R.ModelArgs.from_dict(tiny_config())), bad,
+                         list(tensors) + ["model.layers.0.self_attn.o_proj.scales"])
+    assert receipt["expert_banks_by_mode"] == {
+        f"{HQ.fmt_spec(f).mode} {HQ.fmt_spec(f).bits}/{HQ.fmt_spec(f).group}": 3 * list(schedule.values()).count(f)
+        for f in menu}
+    wrong = dict(config, quantization={**config["quantization"],
+                                       f"model.layers.{moe[0]}.moe.switch_mlp.gate_proj": {"bits": 4, "group_size": 32,
+                                                                                          "mode": "nvfp4"}})
+    with pytest.raises(ValueError, match="mixed affine"):
+        A.validate_config(wrong)
+    with pytest.raises(ValueError, match="not allowed"):
+        R.install_affine(R.Model(R.ModelArgs.from_dict(tiny_config())), wrong, tensors.keys())
+    old = dict(config, mlx2_conversion={"recipe": "raon1-mini-affine-mix-v3", "source_revision": A.SOURCE_REVISION})
+    with pytest.raises(ValueError, match="mixed affine"):
+        A.validate_config(old)
+
+
+def test_hq_v4_costs_reuse_is_bound_to_source_and_probe(tmp_path):
+    from mlx2 import layer_kl
+    from mlx2.conversion import raon1_mini_hq as HQ
+
+    probe = [[1, 2, 3] * 10, [4, 5, 6] * 10]
+    texts = [{"id": f"probe-{i}", "split": "dev", "ids": ids} for i, ids in enumerate(probe)]
+    settings = HQ.HQSettings(formats=("nvfp4", "mxfp8"), seq=30, kl_skip=8, kl_rows=2)
+    binding = HQ._probe_binding(HQ.HQSettings(formats=("nvfp4", "mxfp8", "a4g64"), seq=30, kl_skip=8))
+    doc = {"source": "src@1", "recipe": "raon1-mini-affine-mix-v4",
+           "kl_probe": {"texts_sha256": layer_kl.texts_sha256(texts), "skip": 8, **binding},
+           "kl_costs": {"1": {"nvfp4": 0.2, "mxfp8": 0.0, "a4g64": 0.3}}}
+    path = tmp_path / "r.json"
+    path.write_text(json.dumps(doc))
+    costs, receipt = HQ.reuse_costs(path, settings, "src@1", probe)
+    assert costs == {1: {"nvfp4": 0.2, "mxfp8": 0.0}} and receipt["reused"]["from"] == str(path)
+    assert "restore_check" not in receipt  # not claimed for a run that did not probe
+    with pytest.raises(ValueError, match="damp"):
+        HQ.reuse_costs(path, HQ.HQSettings(formats=("nvfp4",), seq=30, kl_skip=8, damp=0.02), "src@1", probe)
+    path2 = tmp_path / "r2.json"
+    path2.write_text(json.dumps({**doc, "kl_probe": {**doc["kl_probe"], "format_specs": {
+        **binding["format_specs"], "nvfp4": [4, 16, 4.5, "nvfp4", "gptq"]}}}))
+    with pytest.raises(ValueError, match="format definitions"):
+        HQ.reuse_costs(path2, settings, "src@1", probe)
+    path3 = tmp_path / "r3.json"
+    path3.write_text(json.dumps({**doc, "kl_probe": receipt}))
+    with pytest.raises(ValueError, match="themselves reused"):
+        HQ.reuse_costs(path3, settings, "src@1", probe)
+    with pytest.raises(ValueError, match="probed"):
+        HQ.reuse_costs(path, settings, "src@2", probe)
+    with pytest.raises(ValueError, match="different probe"):
+        HQ.reuse_costs(path, settings, "src@1", [probe[1], probe[0]])
+    with pytest.raises(ValueError, match="no KL costs"):
+        HQ.reuse_costs(path, HQ.HQSettings(formats=("mxfp4",), seq=30, kl_skip=8), "src@1", probe)
+    with pytest.raises(ValueError, match="affine menu"):
+        HQ.HQSettings(scorer="hessian")
+    assert HQ.HQSettings(scorer="hessian", formats=("a4g64", "a4g32", "a8g64")).recipe == "raon1-mini-affine-mix-v2"
+    assert HQ.HQSettings(formats=("a4g64", "a4g32", "a8g64")).recipe == "raon1-mini-affine-mix-v3"
 
 
 def test_hq_probe_rows_follow_the_calibration_rows_unchanged(monkeypatch):

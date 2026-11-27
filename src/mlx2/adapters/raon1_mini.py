@@ -37,9 +37,14 @@ PACK_REVISION = "3804c11410aa9d3e51d7667d6d6d5de596d3cc41"
 CONVERSION_RECIPE = "raon1-mini-mxfp8e-v1"
 AFFINE_RECIPE = "raon1-mini-affine-a4g64-h8g64-v1"
 # v1: greedy schedule over the Hessian error (2026-11-25); v2: exact DP over the Hessian error;
-# v3: exact DP over a per-layer KL probe (2026-11-26).  Same storage layout for all three.
-MIX_RECIPE = "raon1-mini-affine-mix-v3"
-MIX_RECIPES = ("raon1-mini-affine-mix-v1", "raon1-mini-affine-mix-v2", MIX_RECIPE)
+# v3: exact DP over a per-layer KL probe (2026-11-26); v4: the KL probe over a mixed-mode menu
+# (routed experts per layer in affine, mxfp4, nvfp4 or the source's mxfp8 codes).
+MIX_RECIPE = "raon1-mini-affine-mix-v4"
+# The one table of routed-expert microscaled modes a mixed artifact may declare: mode -> (bits, group).
+# Allowed only for these recipes (an allow-list: a new recipe opts in explicitly).
+MIX_EXPERT_MODES = {"mxfp4": (4, 32), "nvfp4": (4, 16), "mxfp8": (8, 32)}
+MIX_MICROSCALED_RECIPES = frozenset({"raon1-mini-affine-mix-v4"})
+MIX_RECIPES = ("raon1-mini-affine-mix-v1", "raon1-mini-affine-mix-v2", "raon1-mini-affine-mix-v3", MIX_RECIPE)
 RECIPE_LAYOUTS = {CONVERSION_RECIPE: "mlx2_mxfp8e", AFFINE_RECIPE: "mlx2_affine",
                   **{recipe: "mlx2_affine" for recipe in MIX_RECIPES}}
 DEFAULT_CONTEXT = 262144
@@ -129,13 +134,20 @@ def validate_config(config: dict) -> str:
                         or quant.get("lm_head") != {"group_size": 64, "bits": 8}):
                     raise ValueError("Raon affine artifact must declare a4g64 with an 8-bit g64 head")
             else:
-                # Calibrated mixed recipe: affine everywhere, per-module 4/8-bit, group 32/64.
-                specs = [quant] + [v for v in quant.values() if isinstance(v, dict)]
-                if (quant.get("mode") != "affine"
-                        or any(v.get("mode", "affine") != "affine"
-                               or v.get("bits", quant.get("bits")) not in (4, 8)
-                               or v.get("group_size", quant.get("group_size")) not in (32, 64) for v in specs)):
-                    raise ValueError("Raon mixed affine artifact must be affine 4/8-bit, group 32/64")
+                # Calibrated mixed recipe: affine 4/8-bit group 32/64 per module; from v4 a routed-expert
+                # bank (".switch_mlp.") may instead keep mxfp4 4/32, nvfp4 4/16 or mxfp8 8/32.
+                def ok(path, v):
+                    mode = v.get("mode", "affine")
+                    shape = (v.get("bits", quant.get("bits")), v.get("group_size", quant.get("group_size")))
+                    if mode == "affine":
+                        return shape[0] in (4, 8) and shape[1] in (32, 64)
+                    return (path is not None and ".switch_mlp." in path and MIX_EXPERT_MODES.get(mode) == shape
+                            and conversion["recipe"] in MIX_MICROSCALED_RECIPES)
+
+                specs = [(None, quant)] + [(k, v) for k, v in quant.items() if isinstance(v, dict)]
+                if quant.get("mode") != "affine" or not all(ok(k, v) for k, v in specs):
+                    raise ValueError("Raon mixed affine artifact must be affine 4/8-bit group 32/64 "
+                                     "(v4: routed experts may be mxfp4/nvfp4/mxfp8)")
         return layout
     quant = config.get("quantization") or {}
     if (quant.get("mode"), quant.get("bits"), quant.get("group_size")) == ("nvfp4", 4, 16):

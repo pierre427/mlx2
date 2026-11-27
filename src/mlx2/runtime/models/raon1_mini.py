@@ -1196,17 +1196,30 @@ def install_affine(model: Model, config: dict, weight_names) -> dict:
     mlx2 ``QuantizedSwitchLinear``) at its declared bits/group; the rest keeps
     its stored dtype.  The stock switch module keeps mlx2's routed-expert
     levers available (rhs row pad, NAX gather, fused gate/up)."""
+    from ...adapters.raon1_mini import MIX_EXPERT_MODES
+
     names = set(weight_names)
     quant = config.get("quantization") or {}
     default = {"group_size": int(quant["group_size"]), "bits": int(quant["bits"])}
     counts = {"linear": 0, "switch": 0}
+    switch_modes = {}
 
     def predicate(path, module):
         if not hasattr(module, "to_quantized") or f"{path}.scales" not in names:
             return False
-        counts["switch" if ".switch_mlp." in path else "linear"] += 1
+        switch = ".switch_mlp." in path
+        counts["switch" if switch else "linear"] += 1
         spec = quant.get(path)
-        return {**default, **spec, "mode": "affine"} if isinstance(spec, dict) else {**default, "mode": "affine"}
+        spec = {**default, **spec} if isinstance(spec, dict) else dict(default)
+        mode = spec.get("mode", "affine")
+        # Mixed recipe v4: a routed-expert bank may keep a microscaled mode (layer-uniform, so each
+        # gather sees one format); everything else is affine.
+        if mode != "affine" and (not switch or (spec["bits"], spec["group_size"]) != MIX_EXPERT_MODES.get(mode)):
+            raise ValueError(f"{path}: quantization mode {mode} {spec['bits']}/{spec['group_size']} is not allowed here")
+        if switch:
+            label = f"{mode} {spec['bits']}/{spec['group_size']}"
+            switch_modes[label] = switch_modes.get(label, 0) + 1
+        return {"group_size": spec["group_size"], "bits": spec["bits"], "mode": mode}
 
     nn.quantize(model, class_predicate=predicate)
     expected = {n[: -len(".scales")] for n in names if n.endswith(".scales")}
@@ -1216,7 +1229,7 @@ def install_affine(model: Model, config: dict, weight_names) -> dict:
     # Storage label without the recipe version: mix v1 and v2 differ only in the schedule.
     storage = "mlx2-" + re.sub(r"-v\d+$", "", recipe.removeprefix("raon1-mini-")) if recipe else "mlx2-affine"
     return {"format": storage, "quantized_linears": counts["linear"],
-            "expert_banks": counts["switch"]}
+            "expert_banks": counts["switch"], "expert_banks_by_mode": dict(sorted(switch_modes.items()))}
 
 
 def install_mxfp8_experts(model: Model) -> dict:

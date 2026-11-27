@@ -118,7 +118,10 @@ def _variant_module(variant, module, H, *, damp):
             raise ValueError("mxfp8_roundtrip needs an mxfp8 source bank")
         return base.to_quantized(group_size=module.group_size, bits=module.bits, mode="mxfp8")
     fmt, method = variant.split("_")
-    bits, group, _ = HQ.FORMATS[fmt]
+    spec = HQ.fmt_spec(fmt)
+    if spec.mode != "affine":
+        raise ValueError(f"{variant}: the floor variants are affine only (got {spec.mode})")
+    bits, group = spec.bits, spec.group
     q = base.to_quantized(group_size=group, bits=bits, mode="affine")
     if method == "gptq":
         (w, sc, bi), _ = HQ.gptq_bank(dense, H, bits, group, damp=damp)

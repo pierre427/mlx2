@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Calibrated mixed-precision affine Raon-1-mini artifact (recipe raon1-mini-affine-mix-v3; --scorer hessian gives v2).
+"""Calibrated mixed-precision affine Raon-1-mini artifact (recipe raon1-mini-affine-mix-v4; --scorer hessian gives v2).
 
     PYTHONPATH=src python -s scripts/convert_raon1_mini_hq.py \
         --source ~/mlx-models/Raon-1-mini-mlx2-mxfp8e --dest ~/mlx-models/Raon-1-mini-mlx2-amix \
@@ -25,14 +25,20 @@ def main(argv=None):
     parser.add_argument("--budget-bpw", type=float, default=5.0)
     parser.add_argument("--dense-bits", type=int, choices=(4, 8), default=8)
     parser.add_argument("--scorer", choices=("kl", "hessian"), default="kl",
-                        help="layer cost for the knapsack: kl (recipe v3, default) or hessian (v2)")
+                        help="layer cost: kl (default; recipe v4 on the mixed menu, v3 on an affine one) or hessian (v2, affine menu)")
     parser.add_argument("--kl-rows", type=int, default=4)
     parser.add_argument("--kl-skip", type=int, default=1024, help="positions skipped per probe row")
+    parser.add_argument("--formats", default=None,
+                        help="comma-separated menu (default: the recipe's mixed-mode menu)")
+    parser.add_argument("--costs-from", default=None,
+                        help="reuse the KL probe costs of an earlier conversion receipt (same source and probe)")
     args = parser.parse_args(argv)
     from mlx2.conversion.raon1_mini_hq import HQSettings, convert_hq
 
     settings = HQSettings(tokens=args.tokens, budget_bpw=args.budget_bpw, dense_bits=args.dense_bits,
-                          scorer=args.scorer, kl_rows=args.kl_rows, kl_skip=args.kl_skip)
+                          scorer=args.scorer, kl_rows=args.kl_rows, kl_skip=args.kl_skip,
+                          costs_from=args.costs_from,
+                          **({"formats": tuple(args.formats.split(","))} if args.formats else {}))
     receipt = convert_hq(args.source, args.dest, settings, log=lambda m: print(m, flush=True))
     print(json.dumps({k: receipt[k] for k in ("recipe", "schedule", "moe_mean_bpw", "seconds")}, indent=1))
 
