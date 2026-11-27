@@ -89,7 +89,7 @@ def test_device_moe_sort_and_unsort_match_host_grouping(monkeypatch):
     kernels replaced by the stock gathers they are bit-identical to."""
     from mlx2.runtime.models import moe_nax_gather as NAX
 
-    def split(x, gate, up, indices, *, row_map, group_size, bits, mode):
+    def split(x, gate, up, indices, *, row_map, group_size, bits, mode, plan=None):
         rows = mx.take(x, row_map, axis=0)
         g = mx.gather_qmm(rows, *gate, rhs_indices=indices, transpose=True,
                           group_size=group_size, bits=bits, mode=mode)
@@ -97,7 +97,7 @@ def test_device_moe_sort_and_unsort_match_host_grouping(monkeypatch):
                           group_size=group_size, bits=bits, mode=mode)
         return swiglu(g, u)
 
-    def plain(x, w, scales, biases, indices, *, group_size, bits, mode):
+    def plain(x, w, scales, biases, indices, *, group_size, bits, mode, plan=None):
         return mx.gather_qmm(x, w, scales, biases, rhs_indices=indices, transpose=True,
                              group_size=group_size, bits=bits, mode=mode)
 
@@ -125,3 +125,49 @@ def test_device_moe_declines_cleanly(monkeypatch):
     with mx.stream(mx.cpu):
         assert L.moe_device(_block(), mx.zeros((2, 64)), mx.zeros((2, 2), mx.uint32),
                             mx.zeros((2, 2)), mx.zeros((2, 1))) is None
+
+
+def test_compiled_glue_matches_plain():
+    with mx.stream(mx.cpu):
+        picked = mx.random.normal((5, 3, 64)).astype(mx.bfloat16)
+        weights = mx.softmax(mx.random.normal((5, 3)), axis=-1)
+        shared = mx.random.normal((5, 64)).astype(mx.bfloat16)
+        gate = mx.random.normal((5, 1))
+        a = L._combine(picked, weights, shared, gate)
+        b = L._combine_compiled(picked, weights, shared, gate)
+        assert a.dtype == mx.bfloat16 and mx.allclose(a.astype(mx.float32), b.astype(mx.float32), atol=1e-2).item()
+        linear = nn.QuantizedLinear(64, 32, bias=False, group_size=32, bits=4)
+        x = mx.random.normal((7, 64)).astype(mx.float32)
+        L.FUSED_GLUE = False
+        try:
+            plain = L.project(linear, x)
+        finally:
+            L.FUSED_GLUE = True
+        fused = L.project(linear, x)
+        assert mx.allclose(plain, fused, atol=1e-4).item()
+
+
+def test_gate_project_dense_and_one_column():
+    with mx.stream(mx.cpu):
+        router = nn.Linear(64, 12, bias=False)
+        shared_gate = nn.Linear(64, 1, bias=False)
+        x = mx.random.normal((5, 64))
+        assert mx.allclose(L.gate_project(router, x), router(x), atol=1e-4).item()
+        out = L.gate_project(shared_gate, x)
+        assert out.shape == (5, 1) and mx.allclose(out, shared_gate(x), atol=1e-4).item()
+        assert mx.array_equal(L.gate_project(router, x[:2]), L.gate_project(router, x)[:2]).item()
+
+
+def test_cached_padding_matches_invariant_lane():
+    from mlx2.runtime.models import invariant_prefill as inv
+
+    with mx.stream(mx.cpu):
+        linear = nn.QuantizedLinear(64, 32, bias=False, group_size=32, bits=4)
+        x = mx.random.normal((1, 7, 64))
+        L.begin_forward()
+        a = L.project(linear, x)
+        b = L.project(linear, x)  # memo hit
+        ref = inv.quantized_matmul(x, linear["weight"], linear["scales"], linear["biases"],
+                                   group_size=32, bits=4)
+        assert mx.array_equal(a, ref).item() and mx.array_equal(b, ref).item()
+        assert a.shape == (1, 7, 32)

@@ -20,6 +20,8 @@ from ..runtime.technologies.tree_verify import TECHNOLOGY_SOURCE_PATHS, file_sha
 
 
 PROTOCOL = "mlx2.flash-next-tensorfold-tree.v1"
+# Fast-route law ``pipelined_build``: layers per mx.async_eval while building.
+PIPELINE_LAYERS = 8
 
 
 class TreeProjectionLinear(nn.QuantizedLinear):
@@ -115,8 +117,11 @@ class TreeAttention(_Attention):
         return None
 
 
-def _clone(cache):
-    return snapshot_prompt_cache_descriptors([cache], require_committed=False)[0][0]
+def _clone(cache, *, measure=True):
+    # ``measure`` only books snapshot byte telemetry (a full graph walk per
+    # call); the fast-route law skips it, the default law keeps it.
+    return snapshot_prompt_cache_descriptors([cache], require_committed=False,
+                                             measure=measure)[0][0]
 
 
 def _project(module, x, *, cpu_reference=False):
@@ -173,9 +178,25 @@ def _moe(block, x, *, cpu_reference=False, law=None, group_rows=16):
         or getattr(block.switch_mlp, "routed_decode_mode", "off") != "gate_up_down_shared"
         or not M._shared_fold_ok(block, x)):
         raise ValueError("Flash tree requires the served shared-fold MoE law")
-    gates = _project(block.gate, x)
-    gate = _project(block.shared_expert_gate, x)
-    inds, scores = M._stock_routing(block, gates)
+    gates = gate = None
+    if law is not None and "router_gates" in law:
+        from ..runtime.models import flash_tree_mma_law as L
+
+        gates = L.gate_project(block.gate, x)
+        gate = L.gate_project(block.shared_expert_gate, x)
+    if gates is None:
+        gates = _project(block.gate, x)
+    if gate is None:
+        gate = _project(block.shared_expert_gate, x)
+    inds = scores = None
+    if law is not None and "router_kernel" in law:
+        from ..runtime.models import flash_tree_mma_law as L
+
+        routed = L.route(block, gates)
+        if routed is not None:
+            inds, scores = routed
+    if inds is None:
+        inds, scores = M._stock_routing(block, gates)
     if law is not None and "experts_device" in law:
         from ..runtime.models import flash_tree_mma_law as L
 
@@ -337,7 +358,8 @@ class FlashNextTargetTreeExecutor:
                 raise ValueError("the row-invariant tile law has no CPU reference form")
             if group_rows not in GROUP_ROW_CHOICES:
                 raise ValueError(f"group_rows must be one of {GROUP_ROW_CHOICES}")
-        if (not set(mma_parts) <= {"projections", "experts", "experts_device", "sync_probe", "qsa_chains"}
+        if (not set(mma_parts) <= {"projections", "experts", "experts_device", "sync_probe", "qsa_chains",
+                                   "pipelined_build", "router_gates", "router_kernel"}
                 or not mma_parts or {"experts", "experts_device"} <= set(mma_parts)):
             raise ValueError(f"unknown Flash tree law parts {mma_parts!r}")
         self.mma_parts = tuple(mma_parts)
@@ -455,7 +477,12 @@ class FlashNextTargetTreeExecutor:
             raise ValueError("Flash tree requires Metal; CPU reference is explicit only")
         if not self.cpu_reference and getattr(model, "_mlx2_flash_tree_law", None) is None:
             raise ValueError("Flash tree requires its cold-bound projection law")
-        base = [_clone(item) for item in cache]
+        if self._law is not None:
+            from ..runtime.models import flash_tree_mma_law as L
+
+            L.begin_forward()
+        fast_build = self._law is not None and "pipelined_build" in self._law
+        base = [_clone(item, measure=not fast_build) for item in cache]
         x = mx.tile(trunk.embed_tokens(mx.array([inputs])), (1, 1, trunk.args.hc_count))
         records = []
         metrics = {"rows": len(inputs), "padding": 0, "layer_calls": 0,
@@ -498,7 +525,8 @@ class FlashNextTargetTreeExecutor:
                                     for module in (attn.q_proj, attn.k_proj, attn.v_proj,
                                                    attn.indexer.index_qk_proj))
                 if self._law is not None and "qsa_chains" in self._law:
-                    branch, record = self._qsa_chains(attn, mixed, projections, state, parents, paths)
+                    branch, record = self._qsa_chains(attn, mixed, projections, state, parents, paths,
+                                                      measure=not fast_build)
                     records.append(record)
                     metrics["qsa_chain_calls"] = metrics.get("qsa_chain_calls", 0) + len(record[1])
                     x = Q._apply_inject(residual, branch, inject)
@@ -508,6 +536,8 @@ class FlashNextTargetTreeExecutor:
                     x = Q._apply_inject(residual, branch, inject)
                     metrics["moe_packed_calls"] += 1
                     metrics["layer_calls"] += 1
+                    if fast_build and metrics["layer_calls"] % PIPELINE_LAYERS == 0:
+                        mx.async_eval(x)
                     continue
                 nodes, outputs = [], []
                 for row, parent in enumerate(parents):
@@ -533,6 +563,9 @@ class FlashNextTargetTreeExecutor:
             x = Q._apply_inject(residual, branch, inject)
             metrics["moe_packed_calls"] += 1
             metrics["layer_calls"] += 1
+            if fast_build and metrics["layer_calls"] % PIPELINE_LAYERS == 0:
+                # Start the GPU on finished layers while the host builds the rest.
+                mx.async_eval(x)
         mixed = _hc(trunk.hyper_connection_mixer, x, cpu_reference=self.cpu_reference)
         logits = _project_law(model.language_model.lm_head, mixed, self._law,
                               cpu_reference=self.cpu_reference)
@@ -540,7 +573,7 @@ class FlashNextTargetTreeExecutor:
         self.launches += 1
         return logits, x, transaction
 
-    def _qsa_chains(self, attn, mixed, projections, state, parents, paths):
+    def _qsa_chains(self, attn, mixed, projections, state, parents, paths, *, measure=True):
         """QSA once per root-to-leaf chain instead of once per node.
 
         Each chain runs the stock multi-row causal QSA call on its own clone
@@ -559,7 +592,7 @@ class FlashNextTargetTreeExecutor:
         location = [None] * len(parents)
         caches, lengths = [], []
         for index, chain in enumerate(chains):
-            local = _clone(state)
+            local = _clone(state, measure=measure)
             rows = mx.array(list(chain), mx.int32)
             xin = mx.take(mixed, rows, axis=1)
             mask = Q.qsa_attention_mask(xin, local)
@@ -593,7 +626,7 @@ class FlashNextTargetTreeExecutor:
                 "launches": self.launches, "qualified": False, "defaulted": False,
                 "tile_law": self.tile_law, "mma_parts": sorted(self._law or ()),
                 "ordinary_parity": self._law is None
-                or not ({"projections", "experts", "experts_device", "qsa_chains"} & self._law),
+                or not ({"projections", "experts", "experts_device", "qsa_chains", "router_gates"} & self._law),
                 "cpu_reference": self.cpu_reference}
 
     def dispatch_metrics(self, width, transaction, *, cached):

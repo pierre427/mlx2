@@ -132,6 +132,17 @@ def main():
         laws["mma_device"] = mma(16, ("projections", "experts_device"))
         laws["qsa_chains_only"] = mma(16, ("qsa_chains",))
         laws["mma_device_qsa"] = mma(16, ("projections", "experts_device", "qsa_chains"))
+        laws["mma_device_qsa_fused"] = mma(16, ("projections", "experts_device", "qsa_chains"))
+        laws["mma_device_qsa_fused_gates"] = mma(16, ("projections", "experts_device", "qsa_chains",
+                                                       "router_gates"))
+        laws["mma_device_qsa_fused_gates_padcache"] = mma(16, ("projections", "experts_device", "qsa_chains",
+                                                                "router_gates"))
+        laws["mma_all_router_kernel_padcache"] = mma(16, ("projections", "experts_device", "qsa_chains",
+                                                           "router_gates", "router_kernel"))
+        laws["mma_all_router_kernel_padcache_bm32"] = mma(16, ("projections", "experts_device", "qsa_chains",
+                                                                "router_gates", "router_kernel"))
+        fused_glue = {"mma_device_qsa_fused", "mma_device_qsa_fused_gates", "mma_device_qsa_fused_gates_padcache",
+                      "mma_all_router_kernel_padcache", "mma_all_router_kernel_padcache_bm32"}
         if args.attribution:
             laws["projections_only"] = mma(16, ("projections",))
             laws["sync_only"] = mma(16, ("sync_probe",))
@@ -171,6 +182,7 @@ def main():
             b = int(mx.argmax(model(mx.array([[bonus]]), cache=replay)[0, -1]).item())
             return a == b
 
+        declined = {}
         ordinary_ms = []
         for name, text in PROMPTS[:args.prompts]:
             prompt = list(adapter.prompt_tokens({"messages": [{"role": "user", "content": text}],
@@ -204,8 +216,18 @@ def main():
                              "tokens": tokens, "parents": parents, "laws": {}}
                     reference = None
                     for law, provider in laws.items():
+                        L.FUSED_GLUE = law in fused_glue
+                        L.CACHED_PADDING = law.endswith("_padcache") or law.endswith("_bm32")
+                        L.EXPERT_PLAN = "bm32" if law.endswith("_bm32") else None
                         L.status(reset=True)
-                        full = run(provider, tokens, parents, base)
+                        if law in declined:
+                            continue
+                        try:
+                            full = run(provider, tokens, parents, base)
+                        except ValueError as exc:
+                            declined[law] = repr(exc)
+                            print(law, "declined", exc, flush=True)
+                            continue
                         commit = commit_check(provider, tokens, parents, base, primary)
                         sub = run(provider, tokens[:primary], parents[:primary], base)
                         mid = run(provider, tokens[:two_paths], parents[:two_paths], base)
@@ -242,7 +264,10 @@ def main():
                 mx.clear_cache()
         ordinary = statistics.median(ordinary_ms)
         summary = {"ordinary_step_ms_median": ordinary, "laws": {}}
+        summary["declined"] = declined
         for law in laws:
+            if law in declined:
+                continue
             rows = [t["laws"][law] for t in report["tiles"]]
             tile = statistics.median(r["tile_ms_median"] for r in rows)
             emitted = statistics.mean(len(r["emitted"]) for r in rows)

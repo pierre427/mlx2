@@ -47,18 +47,159 @@ GROUP_ROW_CHOICES = (8, 16, 32, 64)
 STATS: Counter = Counter()
 
 
+_COMPILED = {}
+
+
+def _compiled_projection(group_size, bits, has_biases):
+    """One compiled call for pad + two-batch qmm + unpad (fewer graph nodes
+    to build; the same ``invariant_prefill.quantized_matmul`` arithmetic)."""
+    key = ("projection", group_size, bits, has_biases)
+    fn = _COMPILED.get(key)
+    if fn is None:
+        if has_biases:
+            def run(x, w, scales, biases):
+                return _inv.quantized_matmul(x, w, scales, biases, group_size=group_size,
+                                             bits=bits, mode="affine")
+        else:
+            def run(x, w, scales):
+                return _inv.quantized_matmul(x, w, scales, None, group_size=group_size,
+                                             bits=bits, mode="affine")
+        fn = _COMPILED[key] = mx.compile(run)
+    return fn
+
+
+def _combine(picked, weights, shared, gate):
+    """``sum_slot score * expert + sigmoid(gate) * shared`` in float32, slot order."""
+    top_k = picked.shape[1]
+    routed = picked[:, 0].astype(mx.float32) * weights[:, 0:1]
+    for slot in range(1, top_k):
+        routed = routed + picked[:, slot].astype(mx.float32) * weights[:, slot:slot + 1]
+    out = routed + mx.sigmoid(gate.astype(mx.float32)) * shared.astype(mx.float32)
+    return out.astype(picked.dtype)
+
+
+_combine_compiled = mx.compile(_combine)
+FUSED_GLUE = True  # compiled projection wrapper and MoE combine (fast-route law only)
+
+
+_PADDED = {}
+_ZEROS = {}
+CACHED_PADDING = True  # padded inputs shared per forward + cached weight views
+
+
+def begin_forward():
+    """Drop the previous forward's padded-input memo (the executor calls this)."""
+    _PADDED.clear()
+
+
+def _zeros(rows, width, dtype):
+    key = (rows, width, dtype)
+    z = _ZEROS.get(key)
+    if z is None:
+        z = mx.zeros((rows, width), dtype=dtype)
+        mx.eval(z)
+        _ZEROS[key] = z
+    return z
+
+
+def _padded(x):
+    """``x`` as the [2, m, K] zero-padded batch of ``invariant_prefill`` (same
+    values), built once per input array per forward."""
+    hit = _PADDED.get(id(x))
+    if hit is not None and hit[0] is x:
+        return hit[1], hit[2]
+    width = int(x.shape[-1])
+    rows = x.reshape(-1, width)
+    n = int(rows.shape[0])
+    m = max(_inv.MIN_BATCH_ROWS, -(-n // _inv.LINEAR_BATCHES))
+    total = _inv.LINEAR_BATCHES * m
+    if total > n:
+        rows = mx.concatenate([rows, _zeros(total - n, width, rows.dtype)], axis=0)
+    batched = rows.reshape(_inv.LINEAR_BATCHES, m, width)
+    _PADDED[id(x)] = (x, batched, n)
+    return batched, n
+
+
+def _wide(module):
+    """Broadcast [2, ...] views of the module's tables, evaluated once."""
+    weight = module["weight"]
+    cached = getattr(module, "_mlx2_tree_wide", None)
+    if cached is None or cached[0] is not weight:
+        tables = [module["weight"], module["scales"], module.get("biases")]
+        wide = [None if t is None else mx.broadcast_to(t, (_inv.LINEAR_BATCHES, *t.shape)) for t in tables]
+        mx.eval([w for w in wide if w is not None])
+        cached = (weight, tuple(wide))
+        object.__setattr__(module, "_mlx2_tree_wide", cached)
+    return cached[1]
+
+
 def project(module, x):
     """Row-invariant matrix projection for an affine quantized linear, else None."""
     if "scales" not in module or getattr(module, "mode", "affine") != "affine":
         return None
-    out = _inv.quantized_matmul(
-        x, module["weight"], module["scales"], module.get("biases"),
-        group_size=module.group_size, bits=module.bits, mode="affine",
-    )
+    biases = module.get("biases")
+    if CACHED_PADDING:
+        batched, n = _padded(x)
+        w, sc, b = _wide(module)
+        out = mx.quantized_matmul(batched, w, sc, b, transpose=True,
+                                  group_size=module.group_size, bits=module.bits, mode="affine")
+        out = out.reshape(-1, out.shape[-1])[:n].reshape(*x.shape[:-1], out.shape[-1])
+    elif FUSED_GLUE:
+        fn = _compiled_projection(int(module.group_size), int(module.bits), biases is not None)
+        args = (x, module["weight"], module["scales"]) + ((biases,) if biases is not None else ())
+        out = fn(*args)
+    else:
+        out = _inv.quantized_matmul(
+            x, module["weight"], module["scales"], biases,
+            group_size=module.group_size, bits=module.bits, mode="affine",
+        )
     if "bias" in module:
         out = out + module["bias"]
     STATS["projection_calls"] += 1
     return out
+
+
+def gate_project(module, x):
+    """Router / shared-expert gate: one row-invariant call for all rows.
+
+    Quantized affine gates take ``project``; dense ``Linear`` gates take
+    ``invariant_prefill.dense_matmul`` on a two-copy ``W.T`` stack cached on
+    the module (MLX's dense gemv/gemm choice follows the row count, the stack
+    pins one GEMM configuration). None: unsupported, caller keeps its law.
+    """
+    out = project(module, x)
+    if out is not None:
+        return out
+    weight = module.get("weight") if hasattr(module, "get") else None
+    if weight is None or weight.ndim != 2 or "scales" in module:
+        return None
+    cached = getattr(module, "_mlx2_tree_gate_stack", None)
+    if cached is None or cached[0] is not weight:
+        cached = (weight, _inv.stack_dense(weight))
+        object.__setattr__(module, "_mlx2_tree_gate_stack", cached)
+    out = _inv.dense_matmul(x, cached[1], int(weight.shape[0]))
+    if "bias" in module:
+        out = out + module["bias"]
+    STATS["gate_calls"] += 1
+    return out
+
+
+def route(block, gates):
+    """Stock-identical routing in one launch (``qwen4_moe_window.router_topk``,
+    one row per simdgroup, so row-invariant), or None when the model's routing
+    contract does not admit it (the caller keeps the stock routing)."""
+    from . import qwen4_moe_window as W
+
+    contract = getattr(block, "moe_routing_contract", None)
+    logits = gates.reshape(-1, gates.shape[-1])
+    # A tree tile is a verify forward (the consumer name the contract knows).
+    refusal = W.admit_router_topk(logits, int(block.top_k), bool(block.norm_topk_prob),
+                                  contract=contract, consumer="verify")
+    if refusal is not None:
+        STATS["router_kernel_refused:" + refusal[:60]] += 1
+        return None
+    STATS["router_kernel_calls"] += 1
+    return W.router_topk(logits, top_k=int(block.top_k), contract=contract, consumer="verify")
 
 
 def _linear(module, x):
@@ -120,18 +261,27 @@ def moe(block, x, inds, scores, gate_logit, *, group_rows=16):
     y = _gather(h, sw.down_proj, experts).reshape(groups * group_rows, hidden)
     picked = mx.take(y, mx.array(position.reshape(-1)), axis=0).reshape(count, top_k, hidden)
     weights = scores.reshape(count, top_k).astype(mx.float32)
-    routed = picked[:, 0].astype(mx.float32) * weights[:, 0:1]
-    for slot in range(1, top_k):
-        routed = routed + picked[:, slot].astype(mx.float32) * weights[:, slot:slot + 1]
     shared = block.shared_expert
     s = _linear(shared.down_proj, swiglu(_linear(shared.gate_proj, rows), _linear(shared.up_proj, rows)))
-    out = routed + mx.sigmoid(gate_logit.reshape(count, 1).astype(mx.float32)) * s.astype(mx.float32)
+    combine = _combine_compiled if FUSED_GLUE else _combine
+    out = combine(picked, weights, s, gate_logit.reshape(count, 1))
     STATS["moe_calls"] += 1
     STATS["moe_groups"] += groups
     STATS["moe_distinct_experts"] += distinct
     STATS["moe_slots"] += count * top_k
     STATS["moe_pad_rows"] += groups * group_rows - count * top_k
     return out.astype(x.dtype)
+
+
+EXPERT_PLAN = None  # None: moe_nax_gather picks; "bm32": 32-row tiles (tile rows are mostly padding)
+
+
+def _expert_plan(NAX):
+    if EXPERT_PLAN is None:
+        return None
+    if EXPERT_PLAN == "bm32":
+        return NAX.Plan(NAX._SCHED_DB, 32, 64, 0, 0)
+    raise ValueError(f"unknown expert plan {EXPERT_PLAN!r}")
 
 
 def moe_device(block, x, inds, scores, gate_logit):
@@ -163,24 +313,24 @@ def moe_device(block, x, inds, scores, gate_logit):
     row_map = (order // top_k).astype(mx.uint32)
     table = lambda linear: (linear["weight"], linear["scales"], linear.get("biases"))
     fmt = dict(group_size=int(sw.gate_proj.group_size), bits=int(sw.gate_proj.bits), mode="affine")
+    plan = _expert_plan(NAX)
     h = NAX.sorted_gather_qmm_swiglu_split(rows[:, None, :], table(sw.gate_proj), table(sw.up_proj),
-                                           sorted_experts, row_map=row_map, **fmt)
+                                           sorted_experts, row_map=row_map, plan=plan, **fmt)
     if h is None:
         return None
     down = sw.down_proj
     y = NAX.sorted_gather_qmm(h, down["weight"], down["scales"], down.get("biases"), sorted_experts,
-                              group_size=int(down.group_size), bits=int(down.bits), mode="affine")
+                              group_size=int(down.group_size), bits=int(down.bits), mode="affine",
+                              plan=plan)
     if y is None:
         return None
     inverse = mx.argsort(order)
     picked = mx.take(y.reshape(-1, hidden), inverse, axis=0).reshape(count, top_k, hidden)
     weights = scores.reshape(count, top_k).astype(mx.float32)
-    routed = picked[:, 0].astype(mx.float32) * weights[:, 0:1]
-    for slot in range(1, top_k):
-        routed = routed + picked[:, slot].astype(mx.float32) * weights[:, slot:slot + 1]
     shared = block.shared_expert
     s = _linear(shared.down_proj, swiglu(_linear(shared.gate_proj, rows), _linear(shared.up_proj, rows)))
-    out = routed + mx.sigmoid(gate_logit.reshape(count, 1).astype(mx.float32)) * s.astype(mx.float32)
+    combine = _combine_compiled if FUSED_GLUE else _combine
+    out = combine(picked, weights, s, gate_logit.reshape(count, 1))
     STATS["moe_device_calls"] += 1
     STATS["moe_slots"] += count * top_k
     return out.astype(x.dtype)
