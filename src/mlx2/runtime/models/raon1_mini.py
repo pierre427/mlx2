@@ -524,20 +524,22 @@ _ABSORBED_FLASH_OK: dict = {}
 NAX_DECODE_HEADS = frozenset({40})
 
 
-def absorbed_flash_available(heads: int, dtype) -> bool:
+def absorbed_flash_available(heads: int, dtype, packing=None) -> bool:
     """Memoized probe of the head-group-generic absorbed NAX latent flash
     (kimi_linear_mla_flash.absorbed at ``heads`` != 32) against its FP32 ops
     law (``absorbed_reference``) on an M5 GPU, with Kimi's 2e-2 relative
     bound: one decode row and an 8-row verify block over two key splits with
-    an in-place capacity buffer.  Any refusal or mismatch declines."""
-    key = (int(heads), str(dtype))
+    an in-place capacity buffer.  Any refusal or mismatch declines.
+    ``packing="dense"`` probes the head-row packed variant, which must also
+    equal the grouped kernel bitwise on every case."""
+    key = (int(heads), str(dtype)) if packing is None else (int(heads), str(dtype), packing)
     if key not in _ABSORBED_FLASH_OK:
         from . import kimi_linear_mla_flash as fl
 
         ok = False
         if mx.default_device() == mx.gpu and fl._device_is_m5() and fl.head_groups(heads):
             try:
-                ok = absorbed_flash_canary(heads, dtype)["ok"]
+                ok = absorbed_flash_canary(heads, dtype, packing=packing)["ok"]
             except Exception as exc:  # noqa: BLE001 - compile failure / refusal declines cleanly
                 from .served_exp import is_device_fault
 
@@ -548,7 +550,8 @@ def absorbed_flash_available(heads: int, dtype) -> bool:
     return _ABSORBED_FLASH_OK[key]
 
 
-def absorbed_flash_canary(heads: int, dtype, *, seed: int = 20261125, bound: float = 2e-2) -> dict:
+def absorbed_flash_canary(heads: int, dtype, *, seed: int = 20261125, bound: float = 2e-2,
+                          packing=None) -> dict:
     """The absorbed-flash canary at ``heads``: kernel vs ``absorbed_reference``
     (relative L2 per case, FP32 law bound).  GPU only; returns the cases."""
     from . import kimi_linear_mla_flash as fl
@@ -556,18 +559,34 @@ def absorbed_flash_canary(heads: int, dtype, *, seed: int = 20261125, bound: flo
     cases = []
     k1, k2, k3, k4 = mx.random.split(mx.random.key(seed), 4)
     scale = (fl.NOPE + fl.SHARED) ** -0.5
-    for rows, width, cap, split in ((1, 4100, 4100, None), (8, 2300, 2560, 2048), (1, 130, 130, None)):
+    shapes = ((1, 4100, 4100, None), (8, 2300, 2560, 2048), (1, 130, 130, None))
+    if packing is not None:
+        # Verify blocks whose slots straddle tiles and threadgroups: 6 rows
+        # (nd5) across a split boundary, 16 rows, and a row whose causal
+        # limit falls inside a split while later rows reach the next.
+        shapes += ((6, 2050, 2304, 2048), (16, 4097, 4224, 2048), (3, 129, 256, None))
+    for rows, width, cap, split in shapes:
         q = (mx.random.normal((1, heads, rows, fl.LATENT), key=k1) * 0.05).astype(dtype)
         qs = (mx.random.normal((1, heads, rows, fl.SHARED), key=k4) * 0.5).astype(dtype)
         lat = mx.random.normal((1, 1, cap, fl.LATENT), key=k2).astype(dtype)
         sh = mx.random.normal((1, 1, cap, fl.SHARED), key=k3).astype(dtype)
-        got = fl.absorbed(q, qs, lat, sh, "causal", scale=scale, heads=heads, split=split, width=width)
+        got = fl.absorbed(q, qs, lat, sh, "causal", scale=scale, heads=heads, split=split, width=width,
+                          **({} if packing is None else {"packing": packing}))
         ref = fl.absorbed_reference(q, qs, lat, sh, "causal", scale=scale, heads=heads, width=width)
         rel, finite = fl._rel(ref, got)
-        cases.append({"rows": rows, "width": width, "capacity": cap, "split": split,
-                      "rel_l2": rel, "finite": finite, "shape": list(got.shape)})
-    ok = all(c["finite"] and c["rel_l2"] < bound and c["shape"][1] == heads for c in cases)
-    return {"heads": int(heads), "dtype": str(dtype), "bound": bound, "ok": ok, "cases": cases}
+        case = {"rows": rows, "width": width, "capacity": cap, "split": split,
+                "rel_l2": rel, "finite": finite, "shape": list(got.shape)}
+        if packing is not None:
+            grouped = fl.absorbed(q, qs, lat, sh, "causal", scale=scale, heads=heads, split=split,
+                                  width=width)
+            case["bitwise_vs_grouped"] = bool(mx.array_equal(got, grouped).item())
+        cases.append(case)
+    # Every listed case must have run: an empty case list never passes.
+    ok = len(cases) == len(shapes) and all(
+        c["finite"] and c["rel_l2"] < bound and c["shape"][1] == heads
+        and c.get("bitwise_vs_grouped", True) for c in cases)
+    return {"heads": int(heads), "dtype": str(dtype), "bound": bound, "packing": packing, "ok": ok,
+            "cases": cases}
 
 
 class MLA(kimi.MultiLatentAttention):
@@ -577,6 +596,11 @@ class MLA(kimi.MultiLatentAttention):
     # "nax_absorbed": the head-group-generic absorbed NAX latent flash for
     # decode/verify rows (<= auto_rows) at NAX_DECODE_HEADS behind its probe.
     decode_nax = "off"
+
+    @property
+    def decode_packing(self):
+        """The absorbed kernel's packing under ``mla_decode`` (None or "dense")."""
+        return "dense" if self.decode_nax == "nax_absorbed_packed" else None
 
     def _decode_nax_admits(self, q_rows, mask, starts):
         a = self.args
@@ -593,7 +617,9 @@ class MLA(kimi.MultiLatentAttention):
             reason = "mask"
         elif q_rows.dtype not in (mx.bfloat16, mx.float16):
             reason = "dtype"
-        elif not absorbed_flash_available(a.num_attention_heads, q_rows.dtype):
+        elif not absorbed_flash_available(
+                a.num_attention_heads, q_rows.dtype,
+                **({} if self.decode_packing is None else {"packing": self.decode_packing})):
             reason = "probe"
         if reason is not None:
             self.calls["decode_nax_declined"] += 1
@@ -607,7 +633,7 @@ class MLA(kimi.MultiLatentAttention):
         kernel at its own head count under mla_flash "expanded", and the
         head-group-generic absorbed decode kernel under mla_decode
         "nax_absorbed" (both counted when declined)."""
-        if kind == "absorbed" and self.decode_nax == "nax_absorbed":
+        if kind == "absorbed" and self.decode_nax in ("nax_absorbed", "nax_absorbed_packed"):
             return self._decode_nax_admits(q_rows, mask, starts)
         if self.flash == "off":
             return False

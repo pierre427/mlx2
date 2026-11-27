@@ -1385,6 +1385,124 @@ def _grouped_source():
     return source
 
 
+# ---------------------------------------------------------------------------
+# Dense head-row packing (Raon ``mla_decode nax_absorbed_packed``; opt-in).
+#
+# The grouped kernel gives each verify row its own threadgroup of HG 16-head
+# groups, so 40 heads run as 48 (8 zero-query pad heads, ~17 % of the NAX
+# tile work) once per row.  Here the 16 rows of each tile are (head, verify
+# row) slots in row-major order (slot = row * H + head); a threadgroup runs
+# HG consecutive tiles, ``ceil(H * TQ / (16 * HG))`` threadgroups per split.
+# Only the last tile of the block carries padding (masked, never written).
+#
+# Every slot keeps the grouped kernel's arithmetic: the same split and tile
+# starts (the threadgroup loops to its last slot's causal limit, the latest
+# row), the same QK/PV fragment order, and each slot masks keys at its own
+# limit ``OFF + row + 1``.  Keys past a slot's limit only add exp2(-inf) = 0
+# terms (+0 in sums of non-negative p, 0 * finite V in PV), and a slot with
+# no visible key in a split ends at m = -inf, l = 0, o = +0 as an empty
+# split does, so partials equal the grouped kernel's (the M5 probe checks
+# this, ``absorbed_flash_available(..., packing="dense")``).  Two edge cases
+# are not bit-for-bit, and real data does not reach them: an output channel
+# that is exactly -0 becomes +0 after a +0 term, and a denormal could flush
+# under fast math in an extra ``* 1.0`` / ``+ 0`` step.  The probe compares
+# with ``mx.array_equal``, which equates -0 and +0.
+# The source is derived from the grouped one by the substitutions below,
+# each checked to occur exactly once, so it cannot drift from it.
+# ---------------------------------------------------------------------------
+_PACKED_EDITS = (
+    ("    const int qi = int(threadgroup_position_in_grid.x);\n",
+     "    const int tgp = int(threadgroup_position_in_grid.x);\n"),
+    ("    const int klim = CAUSAL ? min(S, OFF + qi + 1) : S;\n",
+     "    // (head, row) slots of this simdgroup's fragment rows fm and fm + 8.\n"
+     "    const int NSLOT = H * TQ;\n"
+     "    const int slot0 = (tgp * HG + hg) * 16 + fm;\n"
+     "    const int slot1 = slot0 + 8;\n"
+     "    const bool valid0 = slot0 < NSLOT;\n"
+     "    const bool valid1 = slot1 < NSLOT;\n"
+     "    const int row0 = (valid0 ? slot0 : NSLOT - 1) / H;\n"
+     "    const int head_0 = (valid0 ? slot0 : NSLOT - 1) % H;\n"
+     "    const int row1 = (valid1 ? slot1 : NSLOT - 1) / H;\n"
+     "    const int head_1 = (valid1 ? slot1 : NSLOT - 1) % H;\n"
+     "    const int klim0 = CAUSAL ? min(S, OFF + row0 + 1) : S;\n"
+     "    const int klim1 = CAUSAL ? min(S, OFF + row1 + 1) : S;\n"
+     "    // The threadgroup's key range ends at its latest row's limit (its last\n"
+     "    // slot): every simdgroup loops the same tiles between its barriers.\n"
+     "    const int last_row = (min(NSLOT, (tgp + 1) * HG * 16) - 1) / H;\n"
+     "    const int klim = CAUSAL ? min(S, OFF + last_row + 1) : S;\n"),
+    ("    const device T* qr0 = q + ((ulong(bb) * H + head0 + fm) * TQ + qi) * D + fn;\n"
+     "    const device T* qr1 = q + ((ulong(bb) * H + head0 + fm + 8) * TQ + qi) * D + fn;\n"
+     "    const device T* qs0 = qs + ((ulong(bb) * H + head0 + fm) * TQ + qi) * DS + fn;\n"
+     "    const device T* qs1 = qs + ((ulong(bb) * H + head0 + fm + 8) * TQ + qi) * DS + fn;\n",
+     "    const device T* qr0 = q + ((ulong(bb) * H + head_0) * TQ + row0) * D + fn;\n"
+     "    const device T* qr1 = q + ((ulong(bb) * H + head_1) * TQ + row1) * D + fn;\n"
+     "    const device T* qs0 = qs + ((ulong(bb) * H + head_0) * TQ + row0) * DS + fn;\n"
+     "    const device T* qs1 = qs + ((ulong(bb) * H + head_1) * TQ + row1) * DS + fn;\n"),
+    ("        // Every key of [kbeg, kend) is visible to this row; only the tile\n"
+     "        // tail is out of range.\n",
+     "        // Keys of [kbeg, kend) past a slot's own row limit (an earlier row\n"
+     "        // than the threadgroup's last) are masked per slot, below.\n"),
+    ("                    const bool ok = j4 * 32 + tn * 16 + fn + j < tile;\n",
+     "                    const int kcol = j4 * 32 + tn * 16 + fn + j;\n"
+     "                    const bool ok = kcol < tile && t0 + kcol < (i == 0 ? klim0 : klim1);\n"),
+    ("        const int head = head0 + fm + i * 8;\n"
+     "        const ulong slot = ((ulong(bb) * TQ + qi) * NSPLIT + sp) * H + head;\n",
+     "        if (!(i == 0 ? valid0 : valid1)) {\n"
+     "            continue;  // padding slot of the block's last tile\n"
+     "        }\n"
+     "        const int head = i == 0 ? head_0 : head_1;\n"
+     "        const ulong slot = ((ulong(bb) * TQ + (i == 0 ? row0 : row1)) * NSPLIT + sp) * H + head;\n"),
+    # A tile with no visible key for a slot (past its row's limit) rescales
+    # by exactly 1, not by fast::exp2(0): the grouped kernel never runs such
+    # a tile for that row, so it must be an exact no-op here.
+    ("            factor[i] = m_run[i] == -INFINITY ? 0.0f : fast::exp2(m_run[i] - mnew[i]);\n",
+     "            factor[i] = m_run[i] == -INFINITY ? 0.0f\n"
+     "                : (m == -INFINITY ? 1.0f : fast::exp2(m_run[i] - mnew[i]));\n"),
+)
+
+
+def _packed_source():
+    source = _grouped_source()
+    for old, new in _PACKED_EDITS:
+        if source.count(old) != 1:
+            raise RuntimeError(f"absorbed kernel source drifted: {old.strip()[:60]}")
+        source = source.replace(old, new)
+    if "qi" in source.replace("qid", ""):
+        raise RuntimeError("the packed absorbed kernel still reads the per-row index")
+    return source
+
+
+def packed_threadgroups(heads, rows):
+    """Head groups per threadgroup and threadgroups per split for ``heads`` x ``rows`` slots."""
+    tiles = -(-int(heads) * int(rows) // GROUP_HEADS)
+    groups = min(MAX_HEAD_GROUPS, tiles)
+    return groups, -(-tiles // groups)
+
+
+@cache
+def _absorbed_packed_kernel():
+    return mx.fast.metal_kernel(name="mlx2_mla_latent_flash_tiled_packed_v1",
+        input_names=["q", "qs", "latent", "shared", "params", "scalep", "starts"],
+        output_names=["m_out", "l_out", "o_out"], header=_HEADER, source=_packed_source(),
+        ensure_row_contiguous=True)
+
+
+def _absorbed_packed(q, qs, latent, shared, params, b, t, count, cap, heads, *, scale, stage,
+                     starts):
+    """``absorbed`` with dense (head, row) packing: no pad heads, partials at ``heads``."""
+    groups, blocks = packed_threadgroups(heads, t)
+    m, l, o = _absorbed_packed_kernel()(
+        inputs=[q, qs, latent.reshape(b, cap, LATENT), shared.reshape(b, cap, SHARED),
+                params, mx.array([scale*_LOG2E], mx.float32), _starts(starts, b)],
+        template=[("T", q.dtype), ("H", heads), ("HG", groups)],
+        grid=(blocks*groups*128, count, b), threadgroup=(groups*128, 1, 1),
+        output_shapes=[(b*t*count*heads,), (b*t*count*heads,), (b*t*count*heads, LATENT)],
+        output_dtypes=[mx.float32]*3)
+    if stage == "partial":
+        return m, l, o
+    return combine_partials(m, l, o, params, b, t, heads, q.dtype)
+
+
 @cache
 def _absorbed_grouped_kernel():
     return mx.fast.metal_kernel(name="mlx2_mla_latent_flash_tiled_hg_v1",
@@ -1432,7 +1550,8 @@ def _starts(starts, b):
 
 
 def absorbed(q, qs, latent, shared, mask, *, scale, heads=HEADS, split=None, offset=None,
-             variant="tiled", stage="all", width=None, starts=None, offset_array=None):
+             variant="tiled", stage="all", width=None, starts=None, offset_array=None,
+             packing=None):
     """Latent-space O[B, H, T, 512] (before the V un-absorption).
 
     ``width`` names the visible prefix when latent/shared are the cache
@@ -1473,6 +1592,13 @@ def absorbed(q, qs, latent, shared, mask, *, scale, heads=HEADS, split=None, off
             mx.array([t, width], mx.int32), offset_array.reshape(1).astype(mx.int32),
             mx.array([int(causal), split, count, cap], mx.int32),
         ])
+    if packing not in (None, "dense"):
+        raise ValueError("absorbed packing must be None or 'dense'")
+    if packing == "dense":
+        if heads == HEADS or variant != "tiled" or head_groups(heads) is None:
+            raise ValueError("dense head-row packing serves the head-group-generic tiled kernel only")
+        return _absorbed_packed(q, qs, latent, shared, params, b, t, count, cap, heads,
+                                scale=scale, stage=stage, starts=starts)
     if heads != HEADS:
         return _absorbed_grouped(q, qs, latent, shared, params, b, t, count, cap, heads,
                                  scale=scale, variant=variant, stage=stage, starts=starts)

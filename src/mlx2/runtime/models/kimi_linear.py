@@ -599,7 +599,8 @@ class MultiLatentAttention(nn.Module):
                 # the decode flash is an explicit opt-in (Raon ``mla_decode
                 # nax_absorbed``); every other MLA keeps the boolean-array law.
                 gate = ("causal" if device_offset is not None
-                        and getattr(self, "decode_nax", "off") == "nax_absorbed" else mask)
+                        and getattr(self, "decode_nax", "off") in ("nax_absorbed", "nax_absorbed_packed")
+                        else mask)
                 flash = "absorbed" if self._flash_admits("absorbed", q_rows, gate, starts) else None
             self.calls["auto_expanded" if expanded else "auto_latent"] += 1
         if policy in {"latent_tiled", "latent_fused", "latent_single"}:
@@ -723,6 +724,10 @@ class MultiLatentAttention(nn.Module):
             # The device fill (``DeviceCausal``) only when there is one, so the
             # kernel's call contract is unchanged on every other path.
             extra = {} if device_offset is None else {"offset_array": device_offset}
+            if getattr(self, "decode_packing", None) is not None:
+                # Raon ``mla_decode nax_absorbed_packed``: dense head-row packing.
+                extra["packing"] = self.decode_packing
+                self.calls["latent_flash_packed"] += 1
             if buffers is None:
                 result = absorbed(qn @ w[:, :n], qs, latent, shared, mask, scale=self.scale, heads=h,
                                   starts=starts, **extra)

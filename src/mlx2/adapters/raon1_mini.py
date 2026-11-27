@@ -282,8 +282,12 @@ def parse_policy(policy=None):
         raise ValueError("unsupported Raon MLA law")
     if result["mla_flash"] not in {"off", "expanded"}:
         raise ValueError("mla_flash must be off or expanded (absorbed decode rows: mla_decode)")
-    if result["mla_decode"] not in {"off", "nax_absorbed"}:
-        raise ValueError("mla_decode must name off or nax_absorbed")
+    # "nax_absorbed_packed" (opt-in, 2026-11-26): the same absorbed kernel
+    # with dense (head, verify row) packing into its 16-row NAX tiles (no
+    # zero-query pad heads; bitwise the grouped kernel's partials, checked by
+    # its own probe). Unmeasured: needs the GPU canary and an A/B first.
+    if result["mla_decode"] not in {"off", "nax_absorbed", "nax_absorbed_packed"}:
+        raise ValueError("mla_decode must name off, nax_absorbed or nax_absorbed_packed")
     if result["mla_decode"] != "off" and result["mla"] != "auto":
         # Only the auto law asks the absorbed gate; an explicit latent law
         # would leave the lever silently unused.

@@ -77,3 +77,57 @@ def test_kimi_32_head_kernel_default_heads_deterministic_and_within_bound():
     assert bool(mx.array_equal(a, b))
     rel, finite = fl._rel(fl.absorbed_reference(q, qs, lat, sh, "causal", scale=scale), a)
     assert finite and rel < 2e-2
+
+
+# -- dense head-row packing (mla_decode nax_absorbed_packed, 2026-11-26) ----------
+
+@pytest.mark.parametrize("dtype", [mx.bfloat16, mx.float16])
+def test_packed_canary_matches_reference_and_grouped_bitwise(dtype):
+    result = R.absorbed_flash_canary(40, dtype, packing="dense")
+    assert result["ok"], result
+    assert all(case["bitwise_vs_grouped"] for case in result["cases"]), result
+
+
+@pytest.mark.parametrize("rows,width,split,starts", [
+    (6, 2050, 2048, None),      # nd5 verify across a split boundary
+    (6, 5000, None, None),      # auto split plan
+    (16, 4097, 2048, None),     # 640 slots: 14 tiles over 5 threadgroups
+    (1, 130, None, None),       # decode row: three partly filled tiles
+    (3, 3000, 2048, (0, 777)),  # padded batch lanes
+])
+def test_packed_partials_are_bitwise_the_grouped_kernels(rows, width, split, starts):
+    k1, k2, k3, k4 = mx.random.split(mx.random.key(rows * 7919 + width), 4)
+    b = 1 if starts is None else len(starts)
+    cap = width + 64
+    q = (mx.random.normal((b, 40, rows, fl.LATENT), key=k1) * 0.05).astype(mx.bfloat16)
+    qs = (mx.random.normal((b, 40, rows, fl.SHARED), key=k4) * 0.5).astype(mx.bfloat16)
+    lat = mx.random.normal((b, 1, cap, fl.LATENT), key=k2).astype(mx.bfloat16)
+    sh = mx.random.normal((b, 1, cap, fl.SHARED), key=k3).astype(mx.bfloat16)
+    starts = None if starts is None else mx.array(starts, mx.int32)
+    scale = (fl.NOPE + fl.SHARED) ** -0.5
+    kwargs = dict(scale=scale, heads=40, split=split, width=width, starts=starts, stage="partial")
+    grouped = fl.absorbed(q, qs, lat, sh, "causal", **kwargs)
+    packed = fl.absorbed(q, qs, lat, sh, "causal", packing="dense", **kwargs)
+    # Grouped partials are at 48 padded heads; compare the 40 real ones.
+    for got, ref, width_ in zip(packed, grouped, (1, 1, fl.LATENT)):
+        ref = ref.reshape(b, rows, -1, 48, width_)[:, :, :, :40]
+        got = got.reshape(b, rows, -1, 40, width_)
+        assert mx.array_equal(got, ref).item()
+
+
+def test_packed_device_offset_reads_the_true_length():
+    """The packed kernel at a device causal offset over a slack read equals
+    the host-offset call at the exact width (DC-5 + mla_decode packed)."""
+    k1, k2, k3, k4 = mx.random.split(mx.random.key(11), 4)
+    rows, fill, slack = 6, 4093, 6
+    cap = fill + rows + slack
+    q = (mx.random.normal((1, 40, rows, fl.LATENT), key=k1) * 0.05).astype(mx.bfloat16)
+    qs = (mx.random.normal((1, 40, rows, fl.SHARED), key=k4) * 0.5).astype(mx.bfloat16)
+    lat = mx.random.normal((1, 1, cap, fl.LATENT), key=k2).astype(mx.bfloat16)
+    sh = mx.random.normal((1, 1, cap, fl.SHARED), key=k3).astype(mx.bfloat16)
+    scale = (fl.NOPE + fl.SHARED) ** -0.5
+    exact = fl.absorbed(q, qs, lat[:, :, :fill + rows], sh[:, :, :fill + rows], "causal",
+                        scale=scale, heads=40, split=2048, packing="dense")
+    device = fl.absorbed(q, qs, lat, sh, "causal", scale=scale, heads=40, packing="dense",
+                         offset_array=mx.array([fill], mx.int32))
+    assert mx.array_equal(exact, device).item()
