@@ -117,7 +117,19 @@ def main():
             logits = model(mx.array([[state["token"]]]), cache=cache)
             state["token"] = int(mx.argmax(logits[0, -1]).item())
 
-        arms = {"ordinary_step": ordinary, "exact_scalar_tile": tile(exact), "row_invariant_tile": tile(best)}
+        def tiles(provider, count):
+            def step():
+                outs = [provider.forward(model, tokens, parents, base, layers) for _ in range(count)]
+                mx.eval([o[0] for o in outs] + [o[1] for o in outs])
+                for o in outs:
+                    o[2].abort()
+            return step
+
+        # Latency vs throughput: independent tiles in one eval overlap on the
+        # GPU only if a tile leaves it idle between dependent kernels.
+        arms = {"ordinary_step": ordinary, "exact_scalar_tile": tile(exact), "row_invariant_tile": tile(best),
+                "row_invariant_2_tiles": tiles(best, 2), "row_invariant_4_tiles": tiles(best, 4),
+                "exact_scalar_2_tiles": tiles(exact, 2)}
         for name, step in arms.items():
             for _ in range(3):
                 step()

@@ -967,6 +967,309 @@ UP_MIX_SOURCE = r"""
     }
 """
 
+# --- Multi-row law 0 (mlx2, opt-in): one weight read for every row --------
+#
+# Law 0 at N rows launches N grid rows, each re-streaming the down, up and
+# inject weights. The multi-row form keeps every row's arithmetic exactly the
+# law-0 sequence (same loads, same qdot order, same epilogue) but loops the
+# rows inside each simdgroup over the same weight bytes:
+#   1. NORM_DOWN_SOURCE with ND = 0 and INJ = 0 only normalizes (writes xn);
+#   2. MROW_DOWN_SOURCE: down rows and the quantized inject for all rows,
+#      reading each row's normalized values from xn (the same T values the
+#      one-row kernel keeps in threadgroup memory);
+#   3. MROW_UP_SOURCE: up + mix, rows looped per hidden column.
+# Bit-identical to law 0 by construction (Metal-checked by the tree probe).
+MROW_DOWN_SOURCE = r"""
+    const uint lane = thread_index_in_simdgroup;
+    const uint sg = simdgroup_index_in_threadgroup;
+    const uint gy = threadgroup_position_in_grid.y;
+    constexpr int K = HC * H;
+    constexpr int NSG = H / 4 / 32;
+    constexpr int IN_W = K * DB / 8;
+    constexpr int INJ_W = K * IB / 8;
+    constexpr int IN_G = K / 64;
+    constexpr int D_VPT = DB == 8 ? 8 : 16;
+    constexpr int I_VPT = IB == 8 ? 8 : 16;
+    float x_thread[16];
+    if (int(gy) < ND) {
+      const int out_row = int(gy) * NSG + int(sg);
+      float result[ROWS];
+      for (int row = 0; row < ROWS; ++row) result[row] = 0;
+      const device uint8_t* ws = (const device uint8_t*)down_w + out_row * IN_W + int(lane) * 8;
+      const device T* sc = down_s + out_row * IN_G + int(lane) / (64 / D_VPT);
+      const device T* bs = down_b + out_row * IN_G + int(lane) / (64 / D_VPT);
+      for (int k = 0; k < K; k += 32 * D_VPT) {
+        const float s = sc[0];
+        const float b = bs[0];
+        for (int row = 0; row < ROWS; ++row) {
+          const device T* xp = xn + size_t(row) * K + k + int(lane) * D_VPT;
+          float sum = hcd_loadq<DB, const device T*, D_VPT>(xp, x_thread);
+          result[row] += hcd_qdotq<DB>(ws, x_thread, s, b, sum, D_VPT);
+        }
+        ws += 256;
+        sc += 32 * D_VPT / 64;
+        bs += 32 * D_VPT / 64;
+      }
+      for (int row = 0; row < ROWS; ++row) result[row] = simd_sum(result[row]);
+      if (lane == 0) {
+        const T hc = T(HC);
+        for (int row = 0; row < ROWS; ++row) {
+          const T d = static_cast<T>(result[row]);
+          const T a = d / hc;
+          const T g = hcd_sigmoid_jit<T>(a);
+          act[size_t(row) * R + out_row] = a * g;
+        }
+      }
+    } else if (INJ == 1 && int(sg) < HC) {
+      const int out_row = int(sg);
+      float result[ROWS];
+      for (int row = 0; row < ROWS; ++row) result[row] = 0;
+      const device uint8_t* ws = (const device uint8_t*)inj_w + out_row * INJ_W + int(lane) * 8;
+      const device T* sc = inj_s + out_row * IN_G + int(lane) / (64 / I_VPT);
+      const device T* bs = inj_b + out_row * IN_G + int(lane) / (64 / I_VPT);
+      for (int k = 0; k < K; k += 32 * I_VPT) {
+        const float s = sc[0];
+        const float b = bs[0];
+        for (int row = 0; row < ROWS; ++row) {
+          const device T* xp = xn + size_t(row) * K + k + int(lane) * I_VPT;
+          float sum = hcd_loadq<IB, const device T*, I_VPT>(xp, x_thread);
+          result[row] += hcd_qdotq<IB>(ws, x_thread, s, b, sum, I_VPT);
+        }
+        ws += 256;
+        sc += 32 * I_VPT / 64;
+        bs += 32 * I_VPT / 64;
+      }
+      for (int row = 0; row < ROWS; ++row) result[row] = simd_sum(result[row]);
+      if (lane == 0) {
+        for (int row = 0; row < ROWS; ++row) {
+          const T raw = static_cast<T>(result[row]);
+          const T q = raw / T(HC);
+          const T g = hcd_sigmoid_unary<T>(q);
+          inj[size_t(row) * HC + out_row] = T(2) * g;
+        }
+      }
+    }
+"""
+
+MROW_UP_SOURCE = r"""
+    const uint lane = thread_index_in_simdgroup;
+    const uint sg = simdgroup_index_in_threadgroup;
+    const int h = int(threadgroup_position_in_grid.y) * NSGB + int(sg);
+    constexpr int K = HC * H;
+    constexpr int IN_W = R * UB / 8;
+    constexpr int IN_G = R / 64;
+    constexpr int U_VPT = UB == 8 ? 4 : 8;
+    constexpr int U_BLK = 32 * U_VPT;
+    float x_thread[8];
+    for (int row = 0; row < ROWS; ++row) {
+      const device T* ar = act + size_t(row) * R;
+      float u[HC];
+      for (int s = 0; s < HC; ++s) {
+        const int n = s * H + h;
+        const device uint8_t* ws = (const device uint8_t*)up_w + n * IN_W + int(lane) * 4;
+        const device T* sc = up_s + n * IN_G + int(lane) / (64 / U_VPT);
+        const device T* bs = up_b + n * IN_G + int(lane) / (64 / U_VPT);
+        const device T* xp = ar + int(lane) * U_VPT;
+        float result = 0;
+        int k = 0;
+        for (; k < R - U_BLK; k += U_BLK) {
+          float sum = hcd_loadq<UB, const device T*, U_VPT>(xp, x_thread);
+          float sv = sc[0];
+          float bv = bs[0];
+          result += hcd_qdotq<UB>(ws, x_thread, sv, bv, sum, U_VPT);
+          ws += 128;
+          sc += U_BLK / 64;
+          bs += U_BLK / 64;
+          xp += U_BLK;
+        }
+        const int remaining = clamp(int(R - k - int(lane) * U_VPT), 0, U_VPT);
+        if (remaining > 0) {
+          float sum = hcd_loadq_safe<UB, const device T*, U_VPT>(xp, x_thread, remaining);
+          float sv = sc[0];
+          float bv = bs[0];
+          result += hcd_qdotq<UB>(ws, x_thread, sv, bv, sum, remaining);
+        }
+        u[s] = simd_sum(result);
+      }
+      if (lane == 0) {
+        const device T* xr = xn + size_t(row) * K;
+        T total = T(0);
+        for (int s = 0; s < HC; ++s) {
+          const T g = hcd_sigmoid_unary<T>(static_cast<T>(u[s]));
+          const T p = g * xr[s * H + h];
+          const T ps = p + T(0);
+          total = (s == 0) ? ps : T(ps + total);
+        }
+        mixed[size_t(row) * H + h] = total * T(0.25f);
+      }
+    }
+"""
+
+MULTIROW_MAX_ROWS = 16
+
+
+def multirow_refusal(plan, rows: int) -> str | None:
+    """Why the multi-row law-0 launches cannot serve this call, or None."""
+    if not 2 <= rows <= MULTIROW_MAX_ROWS:
+        return "rows outside 2..16"
+    if plan["inject_mode"] == "dense":
+        return "dense inject (multi-row form transcribes the quantized inject only)"
+    if DOWN_ROWS != 1:
+        return "DOWN_ROWS changed"
+    return None
+
+
+_MROW: dict = {}
+
+
+def hc_decode_multirow(plan, flat):
+    """Law-0 arithmetic for every row with one weight read: three launches.
+    Returns ``(mixed, inject | None)``; the caller checks ``multirow_refusal``."""
+    rows = int(flat.shape[0])
+    key = (tuple(plan["a_template"]), tuple(plan["b_template"]), plan["a_groups"], rows)
+    fn = _MROW.get(key)
+    if fn is None:
+        dtype = mx.bfloat16
+        threads, groups = plan["a_groups"]
+        nd = groups - int(plan["has_inject"])
+        norm_template = [(k, (0 if k in ("ND", "INJ") else v)) for k, v in plan["a_template"]]
+        norm_launch = dict(
+            template=norm_template, grid=(threads, 1, rows), threadgroup=(threads, 1, 1),
+            output_shapes=[(rows, plan["width"]), (1, plan["lowrank"]), (1, HC_COUNT)],
+            output_dtypes=[dtype, dtype, dtype],
+        )
+        down_kernel = _kernel(
+            "mlx2_qwen4_hc_decode_mrow_down",
+            ["xn", "down_w", "down_s", "down_b", "inj_w", "inj_s", "inj_b"],
+            ["act", "inj"], MROW_DOWN_SOURCE,
+        )
+        down_template = [(k, v) for k, v in plan["a_template"] if k in ("T", "H", "HC", "R", "ND", "INJ", "DB", "IB")]
+        down_launch = dict(
+            template=down_template + [("ROWS", rows)], grid=(threads, groups, 1),
+            threadgroup=(threads, 1, 1),
+            output_shapes=[(rows, plan["lowrank"]), (rows, HC_COUNT)], output_dtypes=[dtype, dtype],
+        )
+        up_kernel = _kernel(
+            "mlx2_qwen4_hc_decode_mrow_up", ["xn", "act", "up_w", "up_s", "up_b"], ["mixed"],
+            MROW_UP_SOURCE,
+        )
+        up_template = [(k, v) for k, v in plan["b_template"] if k != "LAW"]
+        up_launch = dict(
+            template=up_template + [("ROWS", rows)],
+            grid=(32 * UP_SIMDGROUPS, plan["hidden"] // UP_SIMDGROUPS, 1),
+            threadgroup=(32 * UP_SIMDGROUPS, 1, 1),
+            output_shapes=[(rows, plan["hidden"])], output_dtypes=[dtype],
+        )
+        a_kernel = plan["a_kernel"]
+        del nd
+
+        def triple(flat, nw, axis, eps, dw, ds, db, iw, is_, ib, uw, us, ub):
+            xn = a_kernel(inputs=[flat, nw, axis, eps, dw, ds, db, iw, is_, ib], **norm_launch)[0]
+            act, inj = down_kernel(inputs=[xn, dw, ds, db, iw, is_, ib], **down_launch)
+            mixed = up_kernel(inputs=[xn, act, uw, us, ub], **up_launch)[0]
+            return mixed, inj
+
+        fn = _MROW[key] = mx.compile(triple)
+    mixed, inj = fn(flat, *plan["a_inputs"], *plan["b_weights"])
+    _STATS["multirow_calls"] = _STATS.get("multirow_calls", 0) + 1
+    return mixed, (inj if plan["has_inject"] else None)
+
+
+# --- Matrix-unit HC for tree tiles (mlx2, opt-in, fast-route contract) -----
+#
+# Five launches for any 2..64 rows: the law-0 norm kernel with no down groups
+# (normalizes every row into a padded buffer and computes the per-row inject),
+# the down and up projections as two-batch NAX quantized matmuls on that
+# padded buffer (one weight read, never split K, row-count invariant), a
+# compiled silu(d / hc), and this mix kernel (the up_mix epilogue per row).
+# Not law-0 exact (matrix projections); every row is independent of the
+# others, including the uninitialized pad rows the matmuls carry.
+MATRIX_MIX_SOURCE = r"""
+    const uint h = thread_position_in_grid.x;
+    const uint row = thread_position_in_grid.y;
+    constexpr int K = HC * H;
+    if (h >= (uint)H) return;
+    const device T* ur = up + size_t(row) * K;
+    const device T* xr = xn + size_t(row) * K;
+    T total = T(0);
+    for (int s = 0; s < HC; ++s) {
+      const T g = hcd_sigmoid_unary<T>(ur[s * H + h]);
+      const T p = g * xr[s * H + h];
+      const T ps = p + T(0);
+      total = (s == 0) ? ps : T(ps + total);
+    }
+    mixed[size_t(row) * H + h] = total * T(0.25f);
+"""
+
+MATRIX_BATCHES = 2
+MATRIX_MIN_BATCH_ROWS = 33
+
+
+def matrix_refusal(plan, rows: int) -> str | None:
+    if not 2 <= rows <= MATRIX_BATCHES * MATRIX_MIN_BATCH_ROWS:
+        return "rows outside 2..66"
+    return None
+
+
+def _wide(module):
+    cached = getattr(module, "_mlx2_hc_matrix_wide", None)
+    weight = module["weight"]
+    if cached is None or cached[0] is not weight:
+        tables = (module["weight"], module["scales"], module.get("biases"))
+        wide = tuple(None if t is None else mx.broadcast_to(t, (MATRIX_BATCHES, *t.shape)) for t in tables)
+        mx.eval([w for w in wide if w is not None])
+        cached = (weight, wide)
+        object.__setattr__(module, "_mlx2_hc_matrix_wide", cached)
+    return cached[1]
+
+
+_MATRIX: dict = {}
+
+
+def hc_matrix(module, plan, flat):
+    """``(mixed [rows, H], inject [rows, HC] | None)`` in five launches."""
+    rows = int(flat.shape[0])
+    m = MATRIX_MIN_BATCH_ROWS
+    padded = MATRIX_BATCHES * m
+    down, up = module["input_mix_weight_down"], module["input_mix_weight_up"]
+    key = (tuple(plan["a_template"]), tuple(plan["b_template"]), plan["a_groups"], rows,
+           down.group_size, down.bits, up.group_size, up.bits)
+    fn = _MATRIX.get(key)
+    if fn is None:
+        dtype = mx.bfloat16
+        threads, _groups = plan["a_groups"]
+        hidden, width, lowrank, hc = plan["hidden"], plan["width"], plan["lowrank"], HC_COUNT
+        norm_template = [(k, (0 if k == "ND" else v)) for k, v in plan["a_template"]]
+        norm_launch = dict(
+            template=norm_template, grid=(threads, 1, rows), threadgroup=(threads, 1, 1),
+            output_shapes=[(padded, width), (1, lowrank), (rows, hc)],
+            output_dtypes=[dtype, dtype, dtype],
+        )
+        a_kernel = plan["a_kernel"]
+        mix_kernel = _kernel("mlx2_qwen4_hc_matrix_mix", ["up", "xn"], ["mixed"], MATRIX_MIX_SOURCE)
+        mix_launch = dict(
+            template=[("T", dtype), ("H", hidden), ("HC", hc)],
+            grid=(hidden, rows, 1), threadgroup=(min(256, hidden), 1, 1),
+            output_shapes=[(rows, hidden)], output_dtypes=[dtype],
+        )
+        dg, db_, ug, ub_ = int(down.group_size), int(down.bits), int(up.group_size), int(up.bits)
+
+        def run(flat, nw, axis, eps, dw, ds, dbias, iw, is_, ib, wdw, wds, wdb, wuw, wus, wub):
+            xn, _act, inj = a_kernel(inputs=[flat, nw, axis, eps, dw, ds, dbias, iw, is_, ib], **norm_launch)
+            batched = xn.reshape(MATRIX_BATCHES, m, width)
+            d = mx.quantized_matmul(batched, wdw, wds, wdb, transpose=True, group_size=dg, bits=db_)
+            act = nn.silu(d / hc)
+            u = mx.quantized_matmul(act, wuw, wus, wub, transpose=True, group_size=ug, bits=ub_)
+            mixed = mix_kernel(inputs=[u.reshape(padded, width), xn], **mix_launch)[0]
+            return mixed, inj
+
+        fn = _MATRIX[key] = mx.compile(run)
+    wd, wu = _wide(down), _wide(up)
+    mixed, inj = fn(flat, *plan["a_inputs"], *wd, *wu)
+    _STATS["matrix_calls"] += 1
+    return mixed, (inj if plan["has_inject"] else None)
+
+
 # Served-graph gates (omlx #4122 follow-up; served_exp): each helper above
 # compiles with the supported spelling that reproduces its eager counterpart
 # on this build (bf16, the only admitted dtype).

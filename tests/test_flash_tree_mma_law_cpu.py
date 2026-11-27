@@ -171,3 +171,63 @@ def test_cached_padding_matches_invariant_lane():
                                    group_size=32, bits=4)
         assert mx.array_equal(a, ref).item() and mx.array_equal(b, ref).item()
         assert a.shape == (1, 7, 32)
+
+
+def test_gdn_chain_walk_source_guard():
+    from mlx2.runtime.models import qwen4_fused_gdn as F, qwen4_tree_gdn as G
+
+    assert F._SOURCE.count(G._HEAD_SERIAL) == 1
+    assert "chains[chain * MAXD + depth]" in G._CHAIN_PREFIX
+
+
+class _HC(dict):
+    """A tiny GatedResidual stand-in: dict membership like nn.Module."""
+
+    def __init__(self, hc=4, hidden=32, lowrank=32, inject=True):
+        super().__init__()
+        self.hc_count, self.hidden_size = hc, hidden
+        width = hc * hidden
+        self.hc_norm = lambda x: mx.fast.rms_norm(x.reshape(*x.shape[:-1], hc, hidden), None, 1e-6).reshape(x.shape)
+        self.input_mix_weight_down = nn.QuantizedLinear(width, lowrank, bias=False, group_size=32, bits=4)
+        self.input_mix_weight_up = nn.QuantizedLinear(lowrank, width, bias=False, group_size=32, bits=4)
+        if inject:
+            self.block_inject_weight = nn.Linear(width, hc, bias=False)
+            self["block_inject_weight"] = self.block_inject_weight
+
+
+def test_hc_rows_matches_composed_math_and_is_row_invariant():
+    with mx.stream(mx.cpu):
+        module = _HC()
+        x = mx.random.normal((6, 128)).astype(mx.float32)
+        L.begin_forward()
+        mixed, inject = L.hc_rows(module, x)
+        normed = module.hc_norm(x)
+        g = module.input_mix_weight_down(normed)
+        up = module.input_mix_weight_up(nn.silu(g / 4))
+        ref = mx.mean(mx.sigmoid(up).reshape(6, 4, 32) * normed.reshape(6, 4, 32), axis=-2)
+        ref_inject = 2 * mx.sigmoid(module.block_inject_weight(normed) / 4)
+        assert mx.allclose(mixed, ref, atol=1e-4).item()
+        assert mx.allclose(inject, ref_inject, atol=1e-4).item()
+        L.begin_forward()
+        sub_mixed, sub_inject = L.hc_rows(module, x[:2])
+        assert mx.array_equal(sub_mixed, mixed[:2]).item() and mx.array_equal(sub_inject, inject[:2]).item()
+        assert L.hc_rows(_HC(inject=False), x)[1] is None
+
+
+def test_hc_multirow_refusals_and_source_shape():
+    from mlx2.runtime.models import qwen4_hc_decode as HC
+
+    plan = {"inject_mode": "quantized"}
+    assert HC.multirow_refusal(plan, 16) is None
+    assert HC.multirow_refusal(plan, 1) is not None and HC.multirow_refusal(plan, 17) is not None
+    assert HC.multirow_refusal({"inject_mode": "dense"}, 8) is not None
+    for source in (HC.MROW_DOWN_SOURCE, HC.MROW_UP_SOURCE):
+        assert "ROWS" in source and "threadgroup_position_in_grid.z" not in source
+
+
+def test_hc_matrix_refusal_and_source():
+    from mlx2.runtime.models import qwen4_hc_decode as HC
+
+    assert HC.matrix_refusal({}, 16) is None and HC.matrix_refusal({}, 66) is None
+    assert HC.matrix_refusal({}, 1) is not None and HC.matrix_refusal({}, 67) is not None
+    assert "hcd_sigmoid_unary" in HC.MATRIX_MIX_SOURCE

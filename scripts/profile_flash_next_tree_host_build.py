@@ -88,6 +88,21 @@ def main():
                 "mma_all_router_kernel_padcache": T.FlashNextTargetTreeExecutor(
                     model, tile_law="row_invariant_mma",
                     mma_parts=("projections", "experts_device", "qsa_chains", "router_gates", "router_kernel")),
+                "exact_scalar_gdn_chains": T.FlashNextTargetTreeExecutor(model, gdn_chains=True),
+                "mma_all_gdn_chains": T.FlashNextTargetTreeExecutor(
+                    model, tile_law="row_invariant_mma", gdn_chains=True,
+                    mma_parts=("projections", "experts_device", "qsa_chains", "router_gates", "router_kernel")),
+                "mma_all_hc_matrix": T.FlashNextTargetTreeExecutor(
+                    model, tile_law="row_invariant_mma",
+                    mma_parts=("projections", "experts_device", "qsa_chains", "router_gates", "router_kernel",
+                               "hc_matrix")),
+                "mma_all_hc_multirow": T.FlashNextTargetTreeExecutor(
+                    model, tile_law="row_invariant_mma", hc_multirow=True,
+                    mma_parts=("projections", "experts_device", "qsa_chains", "router_gates", "router_kernel")),
+                "mma_all_hc": T.FlashNextTargetTreeExecutor(
+                    model, tile_law="row_invariant_mma",
+                    mma_parts=("projections", "experts_device", "qsa_chains", "router_gates", "router_kernel",
+                               "hc_rows")),
                 "mma_all_router_kernel_padcache_bm32": T.FlashNextTargetTreeExecutor(
                     model, tile_law="row_invariant_mma",
                     mma_parts=("projections", "experts_device", "qsa_chains", "router_gates", "router_kernel"))}
@@ -95,7 +110,9 @@ def main():
                  "mma_device_qsa_gates_fused": (True, False),
                  "mma_device_qsa_gates_fused_padcache": (True, True),
                  "mma_all_router_kernel_padcache": (True, True),
-                 "mma_all_router_kernel_padcache_bm32": (True, True)}
+                 "mma_all_router_kernel_padcache_bm32": (True, True),
+                 "mma_all_gdn_chains": (True, True), "mma_all_hc": (True, True),
+                 "mma_all_hc_multirow": (True, True), "mma_all_hc_matrix": (True, True)}
         from mlx2.runtime.models import flash_tree_mma_law as L
         draft = NativeMTPDraftModel(model, num_draft=5, revision=adapter.identity["fingerprint"])
         import re
@@ -309,6 +326,62 @@ def main():
                 result[stage] = round(baseline - ablated, 1)
             return result
 
+        def isolate(provider, reps=5):
+            """Inclusive GPU cost per stage with real inputs and no dead code:
+            record each stage call's (evaluated) inputs during one tile, then
+            run all of one stage's calls alone in a single eval. Nested
+            stages are inside their parent (o_proj in qsa_chains, the gate
+            and expert projections in moe)."""
+            from mlx2.runtime.models import qwen4_exp as Q, qwen4_tree_gdn as G
+            targets = {"ple": (T, "_ple"), "hc": (T, "_hc"), "projections": (T, "_project_law"),
+                       "moe": (T, "_moe"), "inject": (Q, "_apply_inject"), "gdn_tree": (G, "tree"),
+                       "qsa_chains": (T.FlashNextTargetTreeExecutor, "_qsa_chains")}
+            def flatten(value):
+                if isinstance(value, mx.array):
+                    return [value]
+                if isinstance(value, (tuple, list)):
+                    return [a for v in value for a in flatten(v)]
+                if isinstance(value, dict):
+                    return [a for v in value.values() for a in flatten(v)]
+                return []
+            calls = {stage: [] for stage in targets}
+            originals = {stage: getattr(m, attr) for stage, (m, attr) in targets.items()}
+            depth = {"d": 0}
+            def recorder(stage):
+                def wrapped(*a, **k):
+                    if depth["d"] == 0:
+                        calls[stage].append((a, k))
+                    depth["d"] += 1
+                    try:
+                        return originals[stage](*a, **k)
+                    finally:
+                        depth["d"] -= 1
+                return wrapped
+            for stage, (m, attr) in targets.items():
+                setattr(m, attr, recorder(stage))
+            try:
+                out = provider.forward(model, tokens, parents, base, layers)
+                mx.eval([x for c in calls.values() for a, k in c for x in flatten(list(a)) + flatten(k)]
+                        + [out[0], out[1]])
+                out[2].abort()
+            finally:
+                for stage, (m, attr) in targets.items():
+                    setattr(m, attr, originals[stage])
+            result = {"calls": {k: len(v) for k, v in calls.items()}}
+            for stage, recorded in calls.items():
+                if not recorded:
+                    continue
+                fn = originals[stage]
+                samples = []
+                for _ in range(reps + 1):
+                    mx.synchronize(); t0 = time.perf_counter()
+                    outs = [fn(*a, **k) for a, k in recorded]
+                    mx.eval(flatten(outs)); mx.synchronize()
+                    samples.append((time.perf_counter() - t0) * 1000)
+                    del outs
+                result[stage] = round(statistics.median(samples[1:]), 1)
+            return result
+
         for name, provider in laws.items():
             L.FUSED_GLUE, L.CACHED_PADDING = flags.get(name, (False, False))
             L.EXPERT_PLAN = "bm32" if name.endswith("_bm32") else None
@@ -353,10 +426,12 @@ def main():
             stage_ops = stage_kinds = None
             if name != "exact_scalar":
                 stage_ops, stage_kinds = attribute(provider)
-            fenced_stage_ms, fenced_total_ms = fenced(provider)
-            ablation_ms = ablate(provider)
-            print(name, "ablation", ablation_ms, flush=True)
-            report["laws"][name] = {"ablation_ms": ablation_ms, "fenced_stage_ms": fenced_stage_ms, "fenced_total_ms": fenced_total_ms,
+            fenced_stage_ms = fenced_total_ms = None  # fencing inflates 3-4x; superseded by isolate()
+            ablation_ms = None  # replay ablation confounded by dead code; superseded by isolate()
+            isolated_ms = isolate(provider)
+            print(name, "isolated", isolated_ms, flush=True)
+
+            report["laws"][name] = {"isolated_stage_ms": isolated_ms, "ablation_ms": ablation_ms, "fenced_stage_ms": fenced_stage_ms, "fenced_total_ms": fenced_total_ms,
                                     "stage_graph_ops": stage_ops, "stage_graph_op_kinds": stage_kinds,
                                     "graph_ops_total": sum(ops.values()), "graph_ops": dict(ops.most_common()),
                                     "build_ms_median": statistics.median(build),

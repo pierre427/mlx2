@@ -141,8 +141,24 @@ def main():
                                                            "router_gates", "router_kernel"))
         laws["mma_all_router_kernel_padcache_bm32"] = mma(16, ("projections", "experts_device", "qsa_chains",
                                                                 "router_gates", "router_kernel"))
+        laws["exact_scalar_gdn_chains"] = T.FlashNextTargetTreeExecutor(model, gdn_chains=True)
+        laws["mma_all_gdn_chains"] = T.FlashNextTargetTreeExecutor(
+            model, tile_law="row_invariant_mma", gdn_chains=True,
+            mma_parts=("projections", "experts_device", "qsa_chains", "router_gates", "router_kernel"))
+        laws["mma_all_hc"] = T.FlashNextTargetTreeExecutor(
+            model, tile_law="row_invariant_mma",
+            mma_parts=("projections", "experts_device", "qsa_chains", "router_gates", "router_kernel", "hc_rows"))
+        laws["mma_all_hc_matrix"] = T.FlashNextTargetTreeExecutor(
+            model, tile_law="row_invariant_mma",
+            mma_parts=("projections", "experts_device", "qsa_chains", "router_gates", "router_kernel", "hc_matrix"))
+        laws["exact_scalar_hc_multirow"] = T.FlashNextTargetTreeExecutor(model, hc_multirow=True)
+        laws["mma_all_hc_multirow"] = T.FlashNextTargetTreeExecutor(
+            model, tile_law="row_invariant_mma", hc_multirow=True,
+            mma_parts=("projections", "experts_device", "qsa_chains", "router_gates", "router_kernel"))
         fused_glue = {"mma_device_qsa_fused", "mma_device_qsa_fused_gates", "mma_device_qsa_fused_gates_padcache",
-                      "mma_all_router_kernel_padcache", "mma_all_router_kernel_padcache_bm32"}
+                      "mma_all_router_kernel_padcache", "mma_all_router_kernel_padcache_bm32",
+                      "mma_all_gdn_chains", "mma_all_hc", "mma_all_hc_multirow",
+                      "mma_all_hc_matrix"}
         if args.attribution:
             laws["projections_only"] = mma(16, ("projections",))
             laws["sync_only"] = mma(16, ("sync_probe",))
@@ -217,7 +233,9 @@ def main():
                     reference = None
                     for law, provider in laws.items():
                         L.FUSED_GLUE = law in fused_glue
-                        L.CACHED_PADDING = law.endswith("_padcache") or law.endswith("_bm32")
+                        L.CACHED_PADDING = (law.endswith("_padcache") or law.endswith("_bm32")
+                                            or law in ("mma_all_gdn_chains", "mma_all_hc", "mma_all_hc_multirow",
+                                                       "mma_all_hc_matrix"))
                         L.EXPERT_PLAN = "bm32" if law.endswith("_bm32") else None
                         L.status(reset=True)
                         if law in declined:

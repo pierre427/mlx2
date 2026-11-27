@@ -141,6 +141,9 @@ FEATURES = (
     "mlx_pr4957_cmdbuf_output_bytes",
     # Flash-Next AST row-invariant matrix-unit tile law prototype (fast-route contract, 2026-11-26).
     "ast_tile_law_row_invariant_mma",
+    "ast_tree_gdn_chains",
+    "ast_tree_hc_rows", "ast_tree_hc_multirow", "ast_tree_hc_matrix", "ast_tree_experts_lane",
+    "ast_tree_tile_shape_sweep", "ast_tree_end_to_end_projection",
     "inkling2_moe_fused", "inkling2_moe_weighted_sum", "inkling2_moe_nax_gather",
     "inkling2_moe_act_quant", "inkling2_kv_q8",
     "inkling2_fuse_controllers", "inkling2_fuse_residual", "inkling2_fuse_sconv",

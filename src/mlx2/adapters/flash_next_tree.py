@@ -144,15 +144,32 @@ def _norm(module, x):
     return module(x.reshape(-1, 1, x.shape[-1])).reshape(x.shape)
 
 
-def _hc(module, x, *, cpu_reference=False):
+def _hc(module, x, *, cpu_reference=False, law=None, multirow=False):
     if cpu_reference:
         return module(x)
+    if law is not None and "hc_rows" in law:
+        from ..runtime.models import flash_tree_mma_law as L
+
+        result = L.hc_rows(module, x)
+        if result is None:
+            raise ValueError("row-invariant HC declined; no mixed-law fallback")
+        mixed, inject = result
+        mixed = mixed.reshape(*x.shape[:-1], module.hidden_size)
+        return mixed if inject is None else (mixed, x, inject.reshape(*x.shape[:-1], module.hc_count))
     from ..runtime.models import qwen4_hc_decode as HC
 
     if HC._cached_static_admission(module) is not None or HC.served_exp_refusal() is not None:
         raise ValueError("Flash tree HC lacks the ordinary one-row kernel law")
     plan = HC._build_plan(module, law=0)
-    mixed, inject = HC.hc_decode_launch(module, x.reshape(-1, x.shape[-1]), plan=plan)
+    flat = x.reshape(-1, x.shape[-1])
+    if law is not None and "hc_matrix" in law and HC.matrix_refusal(plan, flat.shape[0]) is None:
+        # Matrix-unit HC (fast-route contract): five launches, one weight read.
+        mixed, inject = HC.hc_matrix(module, plan, flat)
+    elif multirow and HC.multirow_refusal(plan, flat.shape[0]) is None:
+        # Law-0 arithmetic per row with one weight read (bit-identical).
+        mixed, inject = HC.hc_decode_multirow(plan, flat)
+    else:
+        mixed, inject = HC.hc_decode_launch(module, flat, plan=plan)
     mixed = mixed.reshape(*x.shape[:-1], module.hidden_size)
     return mixed if inject is None else (mixed, x, inject.reshape(*x.shape[:-1], module.hc_count))
 
@@ -197,6 +214,13 @@ def _moe(block, x, *, cpu_reference=False, law=None, group_rows=16):
             inds, scores = routed
     if inds is None:
         inds, scores = M._stock_routing(block, gates)
+    if law is not None and "experts_lane" in law:
+        from ..runtime.models import flash_tree_mma_law as L
+
+        out = L.moe_lane(block, x, inds, scores, gate)
+        if out is None:
+            raise ValueError("lane expert-grouped kernels declined; no mixed-law fallback")
+        return out.reshape(x.shape)
     if law is not None and "experts_device" in law:
         from ..runtime.models import flash_tree_mma_law as L
 
@@ -341,7 +365,7 @@ class FlashNextTargetTreeExecutor:
     maximum_cohort_width = 1
 
     def __init__(self, model, *, cpu_reference=False, tile_law="exact_scalar", group_rows=16,
-                 mma_parts=("projections", "experts")):
+                 mma_parts=("projections", "experts"), gdn_chains=False, hc_multirow=False):
         """``tile_law`` "row_invariant_mma" is the opt-in prototype of the
         fast-route contract (``runtime/models/flash_tree_mma_law.py``): tile
         rows are not ordinary-exact but do not depend on their co-rows."""
@@ -359,10 +383,16 @@ class FlashNextTargetTreeExecutor:
             if group_rows not in GROUP_ROW_CHOICES:
                 raise ValueError(f"group_rows must be one of {GROUP_ROW_CHOICES}")
         if (not set(mma_parts) <= {"projections", "experts", "experts_device", "sync_probe", "qsa_chains",
-                                   "pipelined_build", "router_gates", "router_kernel"}
+                                   "pipelined_build", "router_gates", "router_kernel", "hc_rows",
+                                   "hc_matrix", "experts_lane"}
                 or not mma_parts or {"experts", "experts_device"} <= set(mma_parts)):
             raise ValueError(f"unknown Flash tree law parts {mma_parts!r}")
         self.mma_parts = tuple(mma_parts)
+        # Chain-parallel GDN tree walk: bit-identical outputs, so it is legal
+        # under either tile law (opt-in, unqualified).
+        self.gdn_chains = bool(gdn_chains)
+        # Multi-row law-0 HC (one weight read for all rows, bit-identical).
+        self.hc_multirow = bool(hc_multirow)
         self._law = None if tile_law == "exact_scalar" else frozenset(mma_parts)
         root = Path(__file__).resolve().parents[3]
         paths = tuple(dict.fromkeys((
@@ -387,7 +417,9 @@ class FlashNextTargetTreeExecutor:
         self.source_identity, self.source_revision = _source_binding(root, paths)
         self.source_revision_token = hashlib.sha256(json.dumps(
             [PROTOCOL, self.source_revision, self.source_identity]
-            + ([] if self._law is None else [self.tile_law, self.group_rows, sorted(self._law)]),
+            + ([] if self._law is None else [self.tile_law, self.group_rows, sorted(self._law)])
+            + (["gdn_chains"] if self.gdn_chains else [])
+            + (["hc_multirow"] if self.hc_multirow else []),
             separators=(",", ":")
         ).encode()).hexdigest()
         self.launches = 0
@@ -495,7 +527,8 @@ class FlashNextTargetTreeExecutor:
                 addition, ple_conv, ple_tokens = _ple(layer, x, inputs, state, paths,
                                                      cpu_reference=self.cpu_reference, law=self._law)
                 x = x + addition
-            mixed, residual, inject = _hc(layer.attn_hyper_connection, x, cpu_reference=self.cpu_reference)
+            mixed, residual, inject = _hc(layer.attn_hyper_connection, x, cpu_reference=self.cpu_reference, law=self._law,
+                                     multirow=self.hc_multirow)
             if layer.is_linear:
                 gdn = layer.linear_attn
                 qkv, z, b, a = tuple(_project_law(getattr(gdn, name), mixed, self._law,
@@ -515,7 +548,8 @@ class FlashNextTargetTreeExecutor:
                     recurrent = mx.concatenate([item[1] for item in node_states], axis=0)
                 else:
                     from ..runtime.models.qwen4_tree_gdn import tree
-                    out, conv, recurrent = tree(gdn, qkv, z, b, a, state, parents)
+                    out, conv, recurrent = tree(gdn, qkv, z, b, a, state, parents,
+                                                chains=self.gdn_chains)
                 branch = _project_law(gdn.out_proj, out, self._law, cpu_reference=self.cpu_reference)
                 records.append(("gdn", conv, recurrent, ple_conv, ple_tokens))
                 metrics["gdn_tree_calls"] += 1
@@ -530,7 +564,8 @@ class FlashNextTargetTreeExecutor:
                     records.append(record)
                     metrics["qsa_chain_calls"] = metrics.get("qsa_chain_calls", 0) + len(record[1])
                     x = Q._apply_inject(residual, branch, inject)
-                    mixed, residual, inject = _hc(layer.mlp_hyper_connection, x, cpu_reference=self.cpu_reference)
+                    mixed, residual, inject = _hc(layer.mlp_hyper_connection, x, cpu_reference=self.cpu_reference, law=self._law,
+                                     multirow=self.hc_multirow)
                     branch = _moe(layer.mlp, mixed, cpu_reference=self.cpu_reference, law=self._law,
                                   group_rows=self.group_rows)
                     x = Q._apply_inject(residual, branch, inject)
@@ -557,7 +592,8 @@ class FlashNextTargetTreeExecutor:
                 records.append(("qsa", nodes))
                 metrics["qsa_node_calls"] += len(inputs)
             x = Q._apply_inject(residual, branch, inject)
-            mixed, residual, inject = _hc(layer.mlp_hyper_connection, x, cpu_reference=self.cpu_reference)
+            mixed, residual, inject = _hc(layer.mlp_hyper_connection, x, cpu_reference=self.cpu_reference, law=self._law,
+                                     multirow=self.hc_multirow)
             branch = _moe(layer.mlp, mixed, cpu_reference=self.cpu_reference, law=self._law,
                           group_rows=self.group_rows)
             x = Q._apply_inject(residual, branch, inject)
@@ -566,7 +602,8 @@ class FlashNextTargetTreeExecutor:
             if fast_build and metrics["layer_calls"] % PIPELINE_LAYERS == 0:
                 # Start the GPU on finished layers while the host builds the rest.
                 mx.async_eval(x)
-        mixed = _hc(trunk.hyper_connection_mixer, x, cpu_reference=self.cpu_reference)
+        mixed = _hc(trunk.hyper_connection_mixer, x, cpu_reference=self.cpu_reference, law=self._law,
+                                     multirow=self.hc_multirow)
         logits = _project_law(model.language_model.lm_head, mixed, self._law,
                               cpu_reference=self.cpu_reference)
         transaction = FlashNextTreeTransaction(base, records, paths, self.source_revision_token, metrics)
@@ -625,8 +662,11 @@ class FlashNextTargetTreeExecutor:
                 "source_revision": self.source_revision,
                 "launches": self.launches, "qualified": False, "defaulted": False,
                 "tile_law": self.tile_law, "mma_parts": sorted(self._law or ()),
+                "gdn_chains": self.gdn_chains, "hc_multirow": self.hc_multirow,
                 "ordinary_parity": self._law is None
-                or not ({"projections", "experts", "experts_device", "qsa_chains", "router_gates"} & self._law),
+                or not ({"projections", "experts", "experts_device", "qsa_chains", "router_gates", "hc_rows",
+                         "hc_matrix", "experts_lane"}
+                        & self._law),
                 "cpu_reference": self.cpu_reference}
 
     def dispatch_metrics(self, width, transaction, *, cached):

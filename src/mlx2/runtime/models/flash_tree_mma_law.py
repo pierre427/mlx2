@@ -336,6 +336,91 @@ def moe_device(block, x, inds, scores, gate_logit):
     return out.astype(x.dtype)
 
 
+def moe_lane(block, x, inds, scores, gate_logit):
+    """``moe`` on the tensor-unit expert-grouped kernels of
+    ``qwen36_moe_grouped.lane_grouped_rows`` (GPU-planned expert groups, one
+    16-row tile per group instead of a 64-row NAX tile, per-(row, slot)
+    outputs). A row's outputs do not depend on its group's other members.
+    None when the grouped kernels refuse (layout, rows, host)."""
+    from . import qwen36_moe_grouped as G
+
+    sw = block.switch_mlp
+    hidden = x.shape[-1]
+    rows = x.reshape(-1, hidden)
+    count = int(rows.shape[0])
+    top_k = int(inds.shape[-1])
+    gate, up, down = sw.gate_proj, sw.up_proj, sw.down_proj
+    refusal = G.admission_refusal(rows, inds, gate, up, down) or G.lane_refusal(gate, up, down)
+    if refusal is not None:
+        STATS["moe_lane_refused:" + refusal[:60]] += 1
+        return None
+    picked = G.lane_grouped_rows(rows, inds.reshape(count, top_k), gate, up, down).reshape(count, top_k, hidden)
+    weights = scores.reshape(count, top_k).astype(mx.float32)
+    shared = block.shared_expert
+    s = _linear(shared.down_proj, swiglu(_linear(shared.gate_proj, rows), _linear(shared.up_proj, rows)))
+    combine = _combine_compiled if FUSED_GLUE else _combine
+    out = combine(picked, weights, s, gate_logit.reshape(count, 1))
+    STATS["moe_lane_calls"] += 1
+    return out.astype(x.dtype)
+
+
+def _hc_mix_body(raw_mix, normed, hc_count):
+    """``mean(sigmoid(raw_mix) * streams)`` over the HC streams, as explicit
+    adds in stream order (no reduction whose tiling follows the row count)."""
+    rows = raw_mix.shape[0]
+    hidden = raw_mix.shape[-1] // hc_count
+    weights = mx.sigmoid(raw_mix).reshape(rows, hc_count, hidden)
+    streams = normed.reshape(rows, hc_count, hidden)
+    total = weights[:, 0] * streams[:, 0]
+    for index in range(1, hc_count):
+        total = total + weights[:, index] * streams[:, index]
+    return total * (1.0 / hc_count)
+
+
+_hc_mix_compiled = mx.compile(_hc_mix_body, shapeless=False)
+
+
+def hc_rows(module, x):
+    """Row-invariant 16-row HC (``GatedResidual``) for a tree tile.
+
+    The one-row HC decode law re-reads the down / up / inject weights for
+    every row (16x the weight traffic at 16 rows). Here the grouped RMS norm
+    keeps its one-row law per row and the elementwise steps run per row, but
+    the three projections run once for all rows through ``project`` /
+    ``gate_project`` (one weight read each). Not ordinary-exact (matrix
+    projections); row-invariant. Returns ``(mixed, inject | None)`` with
+    ``mixed`` [rows, hidden] and ``inject`` [rows, hc] (finished
+    ``2 * sigmoid(raw / hc)``), or None when a projection is unsupported.
+    """
+    hc = int(module.hc_count)
+    width = int(x.shape[-1])
+    flat = x.reshape(-1, width)
+    normed = module.hc_norm(flat.reshape(-1, 1, width)).reshape(flat.shape)
+    gate_input = gate_project(module.input_mix_weight_down, normed)
+    if gate_input is None:
+        return None
+    weights = nn_silu(gate_input / hc)
+    raw_mix = gate_project(module.input_mix_weight_up, weights)
+    if raw_mix is None:
+        return None
+    mix = _hc_mix_compiled if FUSED_GLUE else _hc_mix_body
+    mixed = mix(raw_mix, normed, hc)
+    inject = None
+    if "block_inject_weight" in module:
+        raw_gate = gate_project(module.block_inject_weight, normed)
+        if raw_gate is None:
+            return None
+        inject = 2 * mx.sigmoid(raw_gate / hc)
+    STATS["hc_rows_calls"] += 1
+    return mixed, inject
+
+
+def nn_silu(x):
+    import mlx.nn as nn
+
+    return nn.silu(x)
+
+
 def status(*, reset=False):
     out = {"law": LAW, "counts": dict(STATS)}
     if reset:
