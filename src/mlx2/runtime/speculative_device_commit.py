@@ -85,6 +85,13 @@ def lane_reason(owner, lane):
     from .hybrid_verify_rows import _recurrent
 
     form = in_form(lane)
+    if any(type(cache) is ArraysCache for cache in lane.cache) and getattr(
+            getattr(owner, "model", None), "device_commit_recurrent_rollback", False) is not True:
+        # Only a target whose recurrent layers stage a device rollback (Kimi
+        # Linear's KDA, Raon's RDA) can commit them by a device count; any
+        # other (e.g. Qwen3.8's gated delta) keeps the host commit instead of
+        # failing at ``device_rollback``.
+        return "recurrent_rollback"
     for cache in lane.cache:
         kind = type(cache)
         if kind is ArraysCache:

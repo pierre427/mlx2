@@ -289,7 +289,12 @@ def parse_policy(policy=None):
     # "nax_absorbed_packed" (opt-in, 2026-11-26): the same absorbed kernel
     # with dense (head, verify row) packing into its 16-row NAX tiles (no
     # zero-query pad heads; bitwise the grouped kernel's partials, checked by
-    # its own probe). Unmeasured: needs the GPU canary and an A/B first.
+    # its own probe). GPU 2026-11-26 @87533fd3f (DC-5 verify, 6 rows): canary
+    # bitwise vs grouped, GSM8K100 token-exact, engaged on every decode-NAX
+    # call, but no measurable gain at 1K/13K (GPU 22.10/24.24 vs 22.09/24.36
+    # ms per round; the MLA kernel is a small share of the round there).
+    # Left opt-in; a long-context (64K+) verify A/B could still show the ~1/6
+    # tile saving.
     if result["mla_decode"] not in {"off", "nax_absorbed", "nax_absorbed_packed"}:
         raise ValueError("mla_decode must name off, nax_absorbed or nax_absorbed_packed")
     if result["mla_decode"] != "off" and result["mla"] != "auto":

@@ -390,8 +390,12 @@ def test_unservable_lanes_keep_the_host_commit():
     lane.cache = target.make_cache()
     lane.draft_cache = draft.make_cache()
     lane.tail = mx.zeros((1, 2, 8))
-    owner = type("Owner", (), {"draft": draft, "num_draft": NUM_DRAFT})()
+    owner = type("Owner", (), {"draft": draft, "num_draft": NUM_DRAFT, "model": target})()
     assert commit.lane_reason(owner, lane) is None
+    # A target whose recurrent layers stage no device rollback keeps the host
+    # commit (it would otherwise fail at device_rollback).
+    other = type("Owner", (), {"draft": draft, "num_draft": NUM_DRAFT, "model": object()})()
+    assert commit.lane_reason(other, lane) == "recurrent_rollback"
     # A pending tail wider than a ring append (num_draft + 1 rows) keeps the
     # host commit; prefill leaves an empty tail and rounds at most nd + 1 rows.
     lane.tail = mx.zeros((1, NUM_DRAFT + 2, 8))

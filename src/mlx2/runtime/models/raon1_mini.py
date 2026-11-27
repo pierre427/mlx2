@@ -832,6 +832,9 @@ class Model(nn.Module):
     # RDA layers record exact conv/recurrent rollback (Kimi's law); MLA
     # layers are plain KV caches that trim.
     supports_speculative_rollback = True
+    # RDA layers are Kimi's KDA: each stages a device-count rollback
+    # (``device_fn``), so device-commit rounds (DC-4) may roll them back.
+    device_commit_recurrent_rollback = True
     # Every KV layer is the NoPE MLA latent: no layer reads a position from
     # ``cache.offset``, so a pipelined device round (DC-5) may verify while
     # the KV bound still carries slack.

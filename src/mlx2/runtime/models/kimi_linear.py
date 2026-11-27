@@ -906,6 +906,11 @@ class LanguageModel(ling.LanguageModel):
 
 
 class Model(ling.Model):
+    # Every recurrent (KDA) layer stages a device-count rollback with its
+    # records (``_record_rollback`` -> ``device_fn``): the target may run a
+    # device-commit round (spec-round DC-4, ``ArraysCache.device_rollback``).
+    device_commit_recurrent_rollback = True
+
     def __init__(self, args):
         nn.Module.__init__(self)
         self.args = args
