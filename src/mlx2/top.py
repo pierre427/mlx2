@@ -6,6 +6,7 @@ import argparse
 import os
 import select
 import shutil
+import subprocess
 import sys
 import termios
 import time
@@ -77,6 +78,128 @@ def _duration(value: float | None) -> str:
     if hours:
         return f"{hours}h{minutes:02d}m"
     return f"{minutes}m{seconds:02d}s" if minutes else f"{seconds}s"
+
+
+_WEIGHT_SUFFIXES = (".safetensors", ".npz", ".gguf", ".bin")
+_weight_bytes_cache: dict[tuple[str, int | None], int | None] = {}
+
+
+def _process_cwd(pid: int | None) -> Path | None:
+    if pid is None:
+        return None
+    try:
+        output = subprocess.run(
+            ["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"],
+            capture_output=True, text=True, timeout=2, check=False,
+        ).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    for line in output.splitlines():
+        if line.startswith("n/"):
+            return Path(line[1:])
+    return None
+
+
+def _process_elapsed_seconds(pid: int | None) -> float | None:
+    """Seconds since ``pid`` started (``ps -o etime``: [[dd-]hh:]mm:ss)."""
+    if pid is None:
+        return None
+    try:
+        text = subprocess.run(
+            ["ps", "-o", "etime=", "-p", str(pid)],
+            capture_output=True, text=True, timeout=2, check=False,
+        ).stdout.strip()
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if not text:
+        return None
+    days, _, clock = text.rpartition("-")
+    try:
+        parts = [int(part) for part in clock.split(":")]
+        seconds = 0
+        for part in parts:
+            seconds = seconds * 60 + part
+        return float(seconds + (int(days) * 86_400 if days else 0))
+    except ValueError:
+        return None
+
+
+def _model_weight_bytes(model_path: str | None, pid: int | None) -> int | None:
+    """On-disk size of a model's weight files, the denominator of the
+    loading bar.  Accepts a directory (absolute, or relative to the server's
+    working directory) or a Hugging Face id already in the local hub cache;
+    ``None`` when it cannot be found.  Cached per (path, pid)."""
+    if not model_path:
+        return None
+    key = (model_path, pid)
+    if key in _weight_bytes_cache:
+        return _weight_bytes_cache[key]
+    candidates: list[Path] = []
+    path = Path(model_path).expanduser()
+    if path.is_absolute():
+        candidates.append(path)
+    else:
+        cwd = _process_cwd(pid)
+        if cwd is not None:
+            candidates.append(cwd / path)
+        if model_path.count("/") == 1:
+            hub = Path(os.environ.get("HF_HUB_CACHE") or Path(
+                os.environ.get("HF_HOME", "~/.cache/huggingface")).expanduser() / "hub")
+            snapshots = hub / ("models--" + model_path.replace("/", "--")) / "snapshots"
+            if snapshots.is_dir():
+                candidates.extend(sorted(snapshots.iterdir(), key=lambda item: item.stat().st_mtime, reverse=True))
+    total: int | None = None
+    for candidate in candidates:
+        if not candidate.is_dir():
+            continue
+        try:
+            files = [item for item in candidate.iterdir() if item.is_file()]
+        except OSError:
+            continue
+        # Safetensors are what loads resident; side files such as streamed
+        # PLE row banks (``ple_rows.bin``) would inflate the denominator.
+        weights = [item for item in files if item.name.endswith(".safetensors")] or [
+            item for item in files if item.name.endswith(_WEIGHT_SUFFIXES)
+        ]
+        try:
+            size = sum(item.stat().st_size for item in weights)
+        except OSError:
+            continue
+        if size:
+            total = size
+            break
+    _weight_bytes_cache[key] = total
+    return total
+
+
+def _loading_notice(server: ServerReading) -> str:
+    """Estimated load progress: resident footprint against weight files.
+
+    The server publishes no load counter, so the percentage is an estimate
+    (marked ``≈``) and is held at 99% until the engine reports ready.  When
+    the weight size is unknown the bar is an activity sweep instead."""
+    endpoint = server.endpoint
+    total = _model_weight_bytes(endpoint.model_path, endpoint.pid)
+    # A loading engine exports no memory gauges or uptime yet, so read the
+    # process directly when its pid is known.
+    loaded = server.footprint_bytes
+    if loaded is None and endpoint.pid is not None:
+        from .runtime.os_memory import physical_footprint_bytes
+
+        loaded = physical_footprint_bytes(endpoint.pid)
+    uptime = server.uptime_seconds
+    if uptime is None:
+        uptime = _process_elapsed_seconds(endpoint.pid)
+    if total and loaded is not None:
+        percent = min(99.0, 100.0 * loaded / total)
+        bar = _bar(percent, 16)
+        progress = f"≈{percent:.0f}% {format_bytes(loaded)} / {format_bytes(total)}"
+    else:
+        width, position = 16, int(time.monotonic() * 4) % 16
+        bar = "[" + "".join("█" if (index - position) % width < 4 else "░" for index in range(width)) + "]"
+        progress = None
+    elapsed = _duration(uptime) if uptime is not None else None
+    return _join_present(["loading", bar, progress, elapsed], " ")
 
 
 def _count(value: float | None) -> str:
@@ -452,6 +575,7 @@ def render_server(server: ServerReading, *, width: int = 100) -> list[str]:
         "Memory    "
         + _join_present(
             [
+                _loading_notice(server) if readiness == "loading" else None,
                 f"metal {format_bytes(server.metal_active_bytes)} (peak {format_bytes(server.metal_peak_bytes)})",
                 f"footprint {format_bytes(server.footprint_bytes)}",
                 f"headroom {format_bytes(server.headroom_bytes)}",

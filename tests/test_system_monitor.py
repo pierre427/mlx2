@@ -569,6 +569,66 @@ def test_loading_engine_names_its_model_in_top():
     assert "LLM  Demo-4bit" in output
     route = next(line for line in output.splitlines() if line.startswith("Route"))
     assert "loading" in route and "unavailable" not in route
+    # Unknown weight size: the Memory line carries an activity sweep.
+    memory = next(line for line in output.splitlines() if line.startswith("Memory"))
+    assert memory.startswith("Memory    loading [") and "≈" not in memory
+
+
+def test_loading_memory_line_shows_progress_against_weight_files(tmp_path):
+    from dataclasses import replace
+
+    from mlx2.top import render_server
+
+    (tmp_path / "model-00001.safetensors").write_bytes(b"\0" * 4096)
+    (tmp_path / "config.json").write_text("{}")
+    reading = ServerReading(
+        ServerEndpoint(url="http://127.0.0.1:8297", model_path=str(tmp_path)),
+        True,
+        ready=False,
+        state="loading",
+        footprint_bytes=1024.0,
+        uptime_seconds=65.0,
+    )
+    memory = next(line for line in render_server(reading) if line.startswith("Memory"))
+    assert "loading [████░░░░░░░░░░░░] ≈25% 1.0 KiB / 4.0 KiB 1m05s" in memory
+    # Never claims done before the engine says ready.
+    over = replace(reading, footprint_bytes=8192.0)
+    memory = next(line for line in render_server(over) if line.startswith("Memory"))
+    assert "≈99%" in memory
+    ready = replace(reading, ready=True, state="serving")
+    memory = next(line for line in render_server(ready) if line.startswith("Memory"))
+    assert "loading" not in memory
+
+
+def test_loading_progress_reads_the_process_when_no_gauges_are_exported(tmp_path, monkeypatch):
+    """A loading engine exports no memory gauges or uptime: top reads the
+    process footprint by pid, and streamed side files (ple_rows.bin) stay
+    out of the denominator when safetensors exist."""
+    import mlx2.runtime.os_memory as os_memory
+    import mlx2.top as top
+
+    (tmp_path / "model-00001.safetensors").write_bytes(b"\0" * 4096)
+    (tmp_path / "ple_rows.bin").write_bytes(b"\0" * 8192)
+    monkeypatch.setattr(os_memory, "physical_footprint_bytes", lambda pid: 2048)
+    monkeypatch.setattr(top, "_process_elapsed_seconds", lambda pid: 42.0)
+    reading = ServerReading(
+        ServerEndpoint(url="http://127.0.0.1:8298", pid=4242, model_path=str(tmp_path)),
+        True,
+        ready=False,
+        state="loading",
+    )
+    memory = next(line for line in top.render_server(reading) if line.startswith("Memory"))
+    assert "loading [████████░░░░░░░░] ≈50% 2.0 KiB / 4.0 KiB 42s" in memory
+
+
+def test_process_elapsed_seconds_parses_ps_etime(monkeypatch):
+    import subprocess as sp
+
+    import mlx2.top as top
+
+    for text, expected in (("  05:07\n", 307.0), ("01:02:03", 3723.0), ("2-00:00:10", 172810.0)):
+        monkeypatch.setattr(sp, "run", lambda *a, _t=text, **k: sp.CompletedProcess(a, 0, _t, ""))
+        assert top._process_elapsed_seconds(1) == expected
 
 
 def test_top_live_sessions_use_request_metrics_even_with_remote_clocks():
