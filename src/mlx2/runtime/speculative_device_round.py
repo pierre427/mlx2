@@ -32,11 +32,16 @@ calls into this module.  Switches (``device_round`` policy object):
     law q instead of taking the argmax, and the round accepts each with
     ``min(1, p/q)`` and resamples a rejection from ``normalized(p - q)+``
     (standard speculative sampling; the bonus from p).  Exact output law.
-``exact_verification: "block"`` (engine policy, not a switch here)
-    The ratio rule decides with exact block verification on the device
-    (``speculative_block_device.block_decide``, the host verifier's
+``exact_verification`` (engine policy, not a switch here)
+    ``"block"``: the ratio rule decides with exact block verification on the
+    device (``speculative_block_device.block_decide``, the host verifier's
     algorithm; Sun et al. 2024).  Greedy and point-mass rows keep their
     rules, as on the host, where those rows never reach the block verifier.
+    Unset (auto, DEFAULT ON, Pierre 2026-11-27): the ratio rule uses block
+    when the engine's chain admits it and ``device_commit`` is off (block
+    under a device commit is not validated; those rounds keep the token
+    ratio rule and the device commit).  ``"token"`` opts out.
+    ``DeviceRound.ratio_rule``.
 ``nucleus`` (needs ``decide``)
     Requests with top-p / top-k / min-p keep the device decision: the
     filtered law is the same transform ordinary sampling uses
@@ -296,6 +301,7 @@ class DeviceRound:
 
     def __init__(self, owner, policy, copy_policy):
         self.policy = policy
+        self._ratio_rule = None
         self.copy = None
         if copy_policy is not None:
             from .prompt_copy_round import PromptCopyRuntime
@@ -326,6 +332,25 @@ class DeviceRound:
                 stats[tree.DECIDE_SKIPS] = {}
         if self.copy is not None:
             self.copy.install_counters(stats)
+
+    def ratio_rule(self, owner):
+        """``"block"`` or ``"token"``: the exact rule for sampled ratio rows.
+
+        Explicit ``exact_verification`` wins.  Unset is auto: block for a
+        sampled-drafts round on a linear exact chain without a device commit
+        (DEFAULT ON, Pierre 2026-11-27: Inkling-2-Mini@440956c8 DSpark
+        device A/B, MAL 3.47 -> 3.58, decode 41.8 -> 47.4 tok/s, GSM8K
+        .96/.97; provenance/block-verification.json)."""
+        if getattr(self, "_ratio_rule", None) is None:
+            if getattr(owner, "exact_verification_explicit", True):
+                rule = getattr(owner, "exact_verification", "token")
+            else:
+                policy = self.policy
+                rule = ("block" if policy is not None and policy.sampled_drafts
+                        and not policy.device_commit
+                        and getattr(owner, "block_chain_eligible", False) else "token")
+            self._ratio_rule = rule
+        return self._ratio_rule
 
     @property
     def tree(self):
@@ -982,7 +1007,7 @@ class DeviceRound:
             reason = "width"
         elif copies[0] is not None:
             reason = "prompt_copy"
-        elif (getattr(owner, "exact_verification", "token") == "block"
+        elif (self.ratio_rule(owner) == "block"
               and self.policy is not None and self.policy.sampled_drafts
               and _temperature(cohort[0]) > 0):
             # Device block rounds (``block_decide``) are not yet validated
@@ -1242,7 +1267,7 @@ class DeviceRound:
             finite = mx.all(mx.isfinite(norms)).astype(int32)
             last = mx.take(selected, accepted.reshape(1))
         else:
-            block = row.ratio and getattr(owner, "exact_verification", "token") == "block"
+            block = row.ratio and self.ratio_rule(owner) == "block"
             plan.kind = ("block" if block else "ratio") if row.ratio else "point_mass"
             transform = self._transform(lane)
             if _filters(lane):

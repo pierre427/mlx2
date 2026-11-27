@@ -240,7 +240,8 @@ def test_dense_block_sampled_drafts_run_on_the_device(name):
                 device_round={**BOTH, "sampled_drafts": True})
     stats = on[1]
     assert len(on[0][0]) == 20
-    assert stats["external_device_round_decide_ratio_lanes"] > 0
+    # exact_verification unset: the block rule (DEFAULT ON, Pierre 2026-11-27).
+    assert stats["external_device_round_decide_block_lanes"] > 0
     assert stats["accepted_proposals"] > 0
     point = decode(build, sampling=sampling, device_round=BOTH)[1]
     assert point["external_device_round_decide_point_mass_lanes"] > 0

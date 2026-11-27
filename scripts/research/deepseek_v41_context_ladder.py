@@ -141,7 +141,7 @@ def assess(cold, warm, expected, prompt_tokens):
         gates[arm+"_APCv2"] = receipt.get("cache") == "apcv2"
         gates[arm+"_route"] = receipt.get("route") == "external_draft" and bool(receipt.get("route_receipt"))
         gates[arm+"_width_one"] = set(result["token_trace"]["execution_widths"]) <= {1}
-        gates[arm+"_exact_verification"] = (receipt.get("speculation") or {}).get("verification") == "exact"
+        gates[arm+"_exact_verification"] = (receipt.get("speculation") or {}).get("verification") in ("exact", "exact_block")
     gates["token_parity"] = cold["token_ids"] == warm["token_ids"]
     gates["message_parity"] = (cold["text"], cold["reasoning"]) == (warm["text"], warm["reasoning"])
     divergent = None

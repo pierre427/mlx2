@@ -2458,7 +2458,7 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
             if type(enabled) is not bool:
                 raise ValueError("ast_physical_target must be boolean")
             kwargs.setdefault("ast_physical_target", enabled)
-        if self.external_policy.get("exact_verification", "token") != "token":
+        if "exact_verification" in self.external_policy:  # unset = engine auto rule
             kwargs.setdefault(
                 "exact_verification", self.external_policy["exact_verification"]
             )

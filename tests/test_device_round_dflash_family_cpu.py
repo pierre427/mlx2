@@ -312,7 +312,8 @@ def test_sampled_drafts_serve_sampled_lanes(name):
     again, _ = _decode(name, sampling=sampling, device_round=SAMPLED)
     assert first == again and len(first[0]) == 24
     assert stats["external_device_round_rounds"] > 0
-    assert stats["external_device_round_decide_ratio_lanes"] > 0
+    # exact_verification unset: the block rule (DEFAULT ON, Pierre 2026-11-27).
+    assert stats["external_device_round_decide_block_lanes"] > 0
     assert stats["external_device_round_declines"] == 0, stats[DECLINE_REASONS]
 
 

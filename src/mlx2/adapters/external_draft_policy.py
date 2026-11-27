@@ -545,9 +545,10 @@ class ExternalDraftAdapterMixin:
             # prompt_copy_round.py): generic chain-round options.
             "device_round",
             "prompt_copy_round",
-            # Default "token", unqualified "block" (Sun et al. 2024 exact
-            # block verification; host verifier and the device_round ratio
-            # rule): one linear chain under the exact law.
+            # Unset = auto (block for sampled device_round ratio rows, DEFAULT
+            # ON Pierre 2026-11-27; token on the host), "token" opts out,
+            # "block" forces it on the host too (Sun et al. 2024 exact block
+            # verification, unqualified): one linear chain, exact law.
             "exact_verification",
         } | set(getattr(self, "EXTERNAL_POLICY_EXTENSIONS", ()))
         if set(self.external_policy) - allowed or (
@@ -1092,7 +1093,9 @@ class ExternalDraftAdapterMixin:
         for key in ("device_round", "prompt_copy_round"):
             if self.external_policy.get(key) not in (None, False):
                 kwargs.setdefault(key, self.external_policy[key])
-        if self.external_policy.get("exact_verification", "token") != "token":
+        if "exact_verification" in self.external_policy:
+            # Unset is the engine's auto rule (block for sampled device-round
+            # ratio rows, token elsewhere); an explicit "token" opts out.
             kwargs.setdefault("exact_verification", self.external_policy["exact_verification"])
         if self.external_policy.get("progressive_verification_tile") is not None:
             requested_tile = self.external_policy["progressive_verification_tile"]

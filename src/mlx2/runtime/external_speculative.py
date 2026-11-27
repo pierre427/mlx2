@@ -1412,7 +1412,7 @@ class ExternalDraftBatchGenerator:
                  minimum_draft_proposals=None,
                  external_prefill_coalesce_ms=0,
                  external_prefill_coalesce_min_tokens=1,
-                 exact_verification="token",
+                 exact_verification=None,
                  progressive_verification_tile=None,
                  progressive_verification_tile_policy=None,
                  progressive_terminal_input_widths=None,
@@ -1861,20 +1861,31 @@ class ExternalDraftBatchGenerator:
                 separation_reset=self.adaptive_policy.separation_reset,
                 reject_cooldown=self.adaptive_policy.reject_cooldown,
             )
-        # Exact chain verification rule.  "token" (default) is the token-wise
-        # residual rule; "block" is block verification (Sun et al. 2024): the
-        # same target law, a never-shorter expected accepted prefix for
-        # stochastic drafts, and its own RNG schedule.  Block decisions are
-        # defined for one linear chain under the exact law only.
+        # Exact chain verification rule.  "token" is the token-wise residual
+        # rule; "block" is block verification (Sun et al. 2024): the same
+        # target law, a never-shorter expected accepted prefix for stochastic
+        # drafts, and its own RNG schedule.  Block decisions are defined for
+        # one linear chain under the exact law only.  Unset (None) is "auto":
+        # the host verifier keeps "token", and the device round's ratio rule
+        # (sampled_drafts) uses block where the chain admits it (DEFAULT ON,
+        # Pierre 2026-11-27, after the Inkling-2-Mini DSpark device A/B:
+        # MAL +3.3%, decode +13%, accuracy unchanged; see
+        # provenance/block-verification.json and
+        # speculative_device_round.DeviceRound.ratio_rule).  An explicit
+        # "token" opts out everywhere.
+        self.exact_verification_explicit = exact_verification is not None
+        if exact_verification is None:
+            exact_verification = "token"
         if exact_verification not in ("token", "block"):
             raise ValueError("exact_verification must be 'token' or 'block'")
-        if exact_verification == "block" and (
+        self.block_chain_eligible = not (
             self.fly_verification.enabled
             or self.draft_topology != "chain"
             or dynamic_singleton_tree
             or self.continuation_policy is not None
             or self.adaptive_policy is not None
-        ):
+        )
+        if exact_verification == "block" and not self.block_chain_eligible:
             raise ValueError(
                 "block verification requires exact linear chain verification: "
                 "it refuses FLy, tree topologies, the continuation pool and "
@@ -4197,14 +4208,19 @@ class ExternalDraftBatchGenerator:
                 "state_promotion": "request_private_then_atomic_lane_publish",
                 "performance_claim": False,
             }
-        if getattr(self, "exact_verification", "token") == "block":
+        if (getattr(self, "exact_verification", "token") == "block"
+                or getattr(lane, "block_verified_rounds", 0)):
             # Greedy rows verify by token compare under either rule (block
-            # and token-wise decisions coincide for one-hot targets).
+            # and token-wise decisions coincide for one-hot targets).  An
+            # unset policy reaches here only through the device round's
+            # auto block rule (``selection: "auto_device_round"``).
             result["verification"] = (
                 "exact_block" if getattr(lane, "block_verified_rounds", 0) else "exact"
             )
             result["exact_verification"] = {
                 "selected": "block",
+                "selection": ("explicit" if getattr(self, "exact_verification", "token") == "block"
+                              else "auto_device_round"),
                 "algorithm": "block-verification-sun-2024-alg2-v1",
                 "block_verified_rounds": getattr(lane, "block_verified_rounds", 0),
                 "qualified": False,

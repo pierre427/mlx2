@@ -2130,7 +2130,15 @@ def unqualifiable_candidate(settings):
             "adaptive_verification "
             "(harness cannot observe external adaptive verification engagement yet)"
         )
-    if execution_policy.get("exact_verification", "token") == "block":
+    device_round = execution_policy.get("device_round")
+    auto_block = (
+        "exact_verification" not in execution_policy
+        and isinstance(device_round, dict) and device_round.get("sampled_drafts")
+        and not device_round.get("device_commit")
+    )
+    if execution_policy.get("exact_verification", "token") == "block" or auto_block:
+        # Unset exact_verification with sampled device-round drafts is the
+        # auto block rule (DEFAULT ON 2026-11-27): unqualified too.
         return (
             "exact_verification block "
             "(no qualification gate observes block acceptance yet)"

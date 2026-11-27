@@ -189,7 +189,9 @@ def test_sampled_rounds_engage_and_finish(agreeing, options):
     sampling = {"sampling_temp": 1.0}
     got, _props, stats = _decode(target, draft, _prompt(5), 4, 24, sampling, device_round=options)
     assert len(got) == 24
-    key = ("external_device_round_decide_ratio_lanes" if options.get("sampled_drafts")
+    # Sampled drafts with exact_verification unset take the block rule
+    # (DEFAULT ON, Pierre 2026-11-27).
+    key = ("external_device_round_decide_block_lanes" if options.get("sampled_drafts")
            else "external_device_round_decide_point_mass_lanes")
     assert stats[key] > 0
     assert stats["external_device_round_declines"] == 0
@@ -560,7 +562,9 @@ def test_in_engine_sampled_law_matches_the_target(pinned_law, options):
     requests with different seeds, follows it; depth 4, so ratio rounds
     run past the first position."""
     target, draft = pinned_law
-    batch = _engine(target, draft, 4, **({"device_round": options} if options else {}))
+    # The token-wise ratio law (block has its own law test below).
+    batch = _engine(target, draft, 4, **({"device_round": options, "exact_verification": "token"}
+                                         if options else {}))
     counts, tokens = np.zeros(3), 0
     try:
         for request in range(60):
@@ -713,6 +717,40 @@ def test_block_verification_rounds_decide_on_the_device_with_the_target_law(pinn
     assert stats.get("external_device_round_decide_ratio_lanes", 0) == 0
     assert stats["external_device_round_declines"] == 0
     assert sum(receipts) == stats["external_device_round_decide_block_lanes"]
+
+
+def _sampled_rule_stats(target, draft, **options):
+    batch = _engine(target, draft, 4, **options)
+    try:
+        for request in range(8):
+            uid = batch.insert([_prompt(request, 12)], max_tokens=[6],
+                               sampling_configs=[{"sampling_temp": 1.0}])[0]
+            list(_run(batch, uid))
+        return dict(batch.scheduler_stats), batch.device_round.ratio_rule(batch)
+    finally:
+        batch.close()
+
+
+def test_unset_exact_verification_is_block_for_sampled_device_rounds(pinned_law):
+    """DEFAULT ON (Pierre 2026-11-27): with no ``exact_verification`` the
+    device round's ratio rows take the block rule; an explicit "token" opts
+    out; a device commit keeps the token rule (block under it unvalidated)."""
+    target, draft = pinned_law
+    stats, rule = _sampled_rule_stats(target, draft, device_round=BLOCK)
+    assert rule == "block"
+    assert stats["external_device_round_decide_block_lanes"] > 0
+    assert stats.get("external_device_round_decide_ratio_lanes", 0) == 0
+    assert stats["external_device_round_declines"] == 0
+    stats, rule = _sampled_rule_stats(target, draft, device_round=BLOCK, exact_verification="token")
+    assert rule == "token"
+    assert stats["external_device_round_decide_ratio_lanes"] > 0
+    assert stats.get("external_device_round_decide_block_lanes", 0) == 0
+    batch = _engine(target, draft, 4, device_round={**BLOCK, "device_commit": True})
+    try:
+        assert batch.device_round.ratio_rule(batch) == "token"
+        assert batch.exact_verification == "token"  # the host verifier is unchanged
+    finally:
+        batch.close()
 
 
 def test_block_verification_keeps_greedy_and_point_mass_rules(agreeing):
