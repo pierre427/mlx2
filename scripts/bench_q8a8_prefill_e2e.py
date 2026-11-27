@@ -11,6 +11,15 @@ arm vs the "off" arm on per-category texts (single chunk, rows >= threshold so
 the int8 path runs): mean KL(off||arm), top-1 agreement, delta NLL.
 
 A mechanism check refuses an arm whose int8 counters did not move.
+
+MLX's own int8 activation path (ml-explore/mlx #4802, ``MLX_ENABLE_INT8_QMM``,
+default on in MLX after 0.32.5) is an arm key: a mapping may carry
+``"mlx_int8_qmm": 0|1`` beside (or instead of) the policy fields.  When any
+arm names it, every arm (the "off" reference included) sets it explicitly
+through ``mx.config.update`` before it runs and resets it to 0 after, so the
+reference is MLX's input-precision path.  MLX keeps no counter for that
+route; ``mlx_int8_qmm_probe`` in the receipt shows whether the installed MLX
+changes a prefill-sized ``quantized_matmul`` when the flag is on.
 """
 
 import argparse
@@ -90,6 +99,25 @@ def build_texts(adapter, repo: Path, n_tokens: int):
     return out, tool_source
 
 
+def split_mlx_int8_qmm_arms(arms, *, pin_default=False):
+    """Strip ``mlx_int8_qmm`` from the arm specs; return (policies, per-arm flag).
+
+    When any arm names the key, or ``pin_default`` (the installed MLX has
+    #4802, whose flag defaults to on), every arm gets an explicit value,
+    0 unless it asked for 1, so no reference silently runs MLX's int8 path.
+    """
+    arms = dict(arms)
+    flags = {}
+    for arm_name, policy in list(arms.items()):
+        if isinstance(policy, dict) and "mlx_int8_qmm" in policy:
+            policy = dict(policy)
+            flags[arm_name] = int(policy.pop("mlx_int8_qmm"))
+            arms[arm_name] = policy if policy else "off"
+    if flags or pin_default:
+        flags = {name: flags.get(name, 0) for name in arms}
+    return arms, flags
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", required=True)
@@ -138,6 +166,38 @@ def main():
     arms = json.loads(a.arms)
     if "off" not in arms:
         ap.error("arms must include 'off' (the reference)")
+    from mlx2.runtime import mlx_upstream
+
+    arms, mlx_qmm = split_mlx_int8_qmm_arms(
+        arms, pin_default=bool(mlx_upstream.int8_qmm_available()))
+    if mlx_qmm.get("off"):
+        ap.error("the 'off' reference must run with mlx_int8_qmm=0")
+    toggles_mlx_qmm = bool(mlx_qmm)
+
+    def set_mlx_qmm(value):
+        if toggles_mlx_qmm:
+            mx.config.update("MLX_ENABLE_INT8_QMM", int(value))
+
+    def mlx_int8_qmm_probe():
+        """Does the flag change a prefill-sized affine quantized_matmul here?"""
+        if not toggles_mlx_qmm:
+            return None
+        key = mx.random.key(0)
+        x = mx.random.normal((256, 4096), key=key).astype(mx.bfloat16)
+        w = mx.random.normal((4096, 4096), key=mx.random.key(1)).astype(mx.bfloat16)
+        wq, sc, bi = mx.quantize(w, group_size=64, bits=4)
+        outs = {}
+        for flag in (0, 1):
+            mx.config.update("MLX_ENABLE_INT8_QMM", flag)
+            y = mx.quantized_matmul(x, wq, sc, bi, transpose=True, group_size=64, bits=4)
+            mx.eval(y)
+            outs[flag] = y
+        mx.config.update("MLX_ENABLE_INT8_QMM", 0)
+        diff = mx.abs(outs[0].astype(mx.float32) - outs[1].astype(mx.float32))
+        return {"shape": [256, 4096, 4096], "bits": 4, "group_size": 64,
+                "bitwise_equal": bool(mx.array_equal(outs[0], outs[1]).item()),
+                "max_abs_diff": diff.max().item(), "mean_abs_diff": diff.mean().item(),
+                "engaged": not bool(mx.array_equal(outs[0], outs[1]).item())}
     # The adapter pins import-time env flags; model modules import after it.
     adapter = resolve_adapter(a.model, mtp=False)(a.model)
     from mlx2.runtime import int8_prefill
@@ -188,6 +248,7 @@ def main():
         return hits
 
     def install(name):
+        set_mlx_qmm(mlx_qmm.get(name, 0))
         policy = arms[name]
         if policy == "off":
             return None
@@ -195,6 +256,10 @@ def main():
         if a.adapter_select:
             return int8_prefill.apply_for_adapter(adapter, policy)
         return int8_prefill.apply(model, policy)
+
+    def uninstall(handle):
+        int8_prefill.remove(handle)
+        set_mlx_qmm(0)
 
     def status(handle):
         return {} if handle is None else handle.status()
@@ -265,7 +330,7 @@ def main():
                 h = install(name)
                 lp = logprobs(ids[: a.quality_tokens])
                 execution[name][cat] = quality_status(h)
-                int8_prefill.remove(h)
+                uninstall(h)
                 p = mx.exp(ref.astype(mx.float32))
                 kl = (p * (ref.astype(mx.float32) - lp.astype(mx.float32))).sum(-1)
                 top1 = (mx.argmax(ref, -1) == mx.argmax(lp, -1)).astype(mx.float32)
@@ -300,7 +365,7 @@ def main():
                         model, lambda: make_prompt_cache(model), prompt, cont,
                         prefill_chunk=a.step)
                     execution[name][cat] = quality_status(h)
-                    int8_prefill.remove(h)
+                    uninstall(h)
                     quality[name][cat] = {"prompt_tokens": len(prompt),
                                           **chat_quality.compare(ref, lp)}
                     print(name, cat, quality[name][cat], flush=True)
@@ -310,7 +375,12 @@ def main():
         return quality, chat_quality.quality_evidence_manifest(quality), execution
 
     s0 = swapouts()
-    print("LOADED; swapouts", s0, flush=True)
+    set_mlx_qmm(0)
+    qmm_probe = mlx_int8_qmm_probe()
+    print("LOADED; swapouts", s0, "mlx_int8_qmm_probe", qmm_probe, flush=True)
+    if toggles_mlx_qmm and any(mlx_qmm.values()) and not (qmm_probe or {}).get("engaged"):
+        raise SystemExit("ABORT: an arm sets mlx_int8_qmm=1 but this MLX does not change "
+                         "quantized_matmul with it (no #4802 path here)")
     names = list(arms)
     quality = {}
     quality_evidence = {}
@@ -348,7 +418,8 @@ def main():
             {"model": a.model, "arms": arms, "adapter": type(adapter).__name__,
              "tool_text_source": tool_source, "quality_vs_off": quality,
              "quality_evidence": quality_evidence,
-             "quality_execution": quality_execution,
+             "quality_execution": quality_execution, "mlx_int8_qmm_arms": mlx_qmm,
+             "mlx_int8_qmm_probe": qmm_probe,
              "swapouts_delta": swapouts() - s0, "mlx": mx.__version__},
             indent=1, default=str))
         print(json.dumps({"quality": quality, "quality_evidence": quality_evidence}, indent=1))
@@ -357,7 +428,7 @@ def main():
     for name in names:
         h = install(name)
         prefill(min(a.contexts))
-        int8_prefill.remove(h)
+        uninstall(h)
     results = {name: {str(c): [] for c in a.contexts} for name in names}
     contamination = {name: {str(c): [] for c in a.contexts} for name in names}
     engaged = {}
@@ -384,7 +455,7 @@ def main():
                     if idle:
                         raise SystemExit(f"ABORT: arm {name} did not engage: {idle}")
                 engaged.setdefault(name, st)
-                int8_prefill.remove(h)
+                uninstall(h)
                 results[name][str(ctx)].append(el)
                 print(f"{time.strftime('%H:%M:%S')} rep{rep} ctx{ctx} {name}: {el:.2f}s "
                       f"{ctx / el:.0f} tok/s" + (f" CONTAMINATED {foreign}" if foreign else ""),
@@ -420,6 +491,7 @@ def main():
            "quality_evidence": quality_evidence,
            "quality_execution": quality_execution,
            "int8_status_first_run": engaged, "peak_gib": mx.get_peak_memory() / 2**30,
+           "mlx_int8_qmm_arms": mlx_qmm, "mlx_int8_qmm_probe": qmm_probe,
            "swapouts_delta": swapouts() - s0, "mlx": mx.__version__}
     Path(a.out).write_text(json.dumps(rec, indent=1, default=str))
     print(json.dumps({"paired_gain_vs_off": paired, "quality": quality,

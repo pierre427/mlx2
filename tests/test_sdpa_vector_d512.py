@@ -27,6 +27,21 @@ def _qkv(Hq, Hkv, N, B=1, D=512, dtype=mx.bfloat16, seed=0):
 def pretend_gpu(monkeypatch):
     monkeypatch.setattr(d512.mx, "default_device", lambda: mx.gpu)
     monkeypatch.setattr(d512, "device_class", lambda: "s")
+    # The gating cases model MLX 0.32.5 (no #4941); the guard has its own test.
+    monkeypatch.setattr(d512, "upstream_tk2", lambda: False)
+
+
+def test_declines_when_upstream_has_4941(pretend_gpu, monkeypatch):
+    q, k, v = _qkv(32, 4, 2048)
+    monkeypatch.setenv("MLX2_SDPA_D512_TK2", "1")
+    assert d512.use_kernel(q, k, v)
+    monkeypatch.setattr(d512, "upstream_tk2", lambda: True)
+    assert d512.supported(q, k, v)
+    assert not d512.use_kernel(q, k, v)
+    status = d512.status()
+    assert status["upstream_tk2_4941"] is True and "4941" in status["declined"]
+    monkeypatch.setenv("MLX2_SDPA_D512_TK2", "0")
+    assert "declined" not in d512.status()
 
 
 def test_stock_blocks_copies_mlx_0324():

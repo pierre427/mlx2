@@ -23,6 +23,15 @@ is read from a buffer; TK 2.
 Selection: ``MLX2_SDPA_D512_TK2=1``.  Only geometry stock MLX would itself
 send to the two-pass kernel is taken.
 
+Redundant upstream: ml-explore/mlx #4941 (merged 2026-11-27, after 0.32.5)
+makes stock ``sdpa_vector_2pass_1`` use TK 2 when ``D + V > 512``, the same
+arithmetic as this copy.  On an installed MLX whose ``sdpa_vector.h`` carries
+that rule (``runtime.mlx_upstream.sdpa_vector_d512_tk2``) ``use_kernel``
+declines even when selected, and ``status`` says why; stock serves.  Delete
+this module (and its vector-source generator entries) at the MLX upgrade,
+after the upgrade's own requalification
+(docs/research/2026-11-27-mlx-main-upgrade-prep.md).
+
 LEFT OFF: not helpful for served Gemma 4 decode (2026-11-22,
 gemma-4-31B-it-MLX-8bit@sha256:f58e1d0a, mlx2 8f802f4ca, M5 Max, greedy B1
 --ordinary, 4K/16K/64K, one repetition under heavy system contention:
@@ -136,12 +145,24 @@ def supported(queries, keys, values, *, mask=None, sinks=None) -> bool:
     return stock_vector_d512(N, gqa) and stock_two_pass(N, gqa, device_class())
 
 
+def upstream_tk2() -> bool:
+    """Whether the installed MLX already runs TK 2 at head_dim 512 (#4941)."""
+    from ..mlx_upstream import installed_sdpa_vector_d512_tk2
+
+    return installed_sdpa_vector_d512_tk2()
+
+
 def use_kernel(queries, keys, values, *, mask=None, sinks=None) -> bool:
-    return selected() and supported(queries, keys, values, mask=mask, sinks=sinks)
+    return (selected() and not upstream_tk2()
+            and supported(queries, keys, values, mask=mask, sinks=sinks))
 
 
 def status():
+    redundant = upstream_tk2()
     return {"implemented": True, "selected": selected(), "version": VERSION, "tk": TK,
+            "upstream_tk2_4941": redundant,
+            **({"declined": "installed MLX carries ml-explore/mlx #4941 (stock TK 2); "
+                            "stock serves"} if redundant and selected() else {}),
             "head_dim": HEAD_DIM,
             "exact_vs_stock": "by construction; evidence is the Metal parity test",
             "basis": "selected_host_graph_branch",
