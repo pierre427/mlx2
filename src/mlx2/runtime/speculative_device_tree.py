@@ -49,6 +49,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from .technologies.tree_verify import TopologySpec, TreeTopology
+
 VERSION = "speculative-device-tree-v1"
 SWITCHES = ("tree_lazy", "tree_decide")
 COUNTERS = (
@@ -62,6 +64,7 @@ COUNTERS = (
 DECLINES = "external_device_tree_decline_reasons"
 # Device tree rounds whose decision stayed on the host under ``tree_decide``.
 DECIDE_SKIPS = "external_device_tree_decide_skips"
+_TOPOLOGY = TopologySpec(max_rows=None)
 
 
 @dataclass(frozen=True)
@@ -107,12 +110,9 @@ def geometry(parents):
         if not -1 <= parent < node:
             raise ValueError("tree parents must be parent-first with -1 for the anchor")
     target = (-1, *(0 if parent < 0 else parent + 1 for parent in parents))
-    rows = count + 1
-    depth = [0] * rows
-    paths = [(0,)]
-    for row in range(1, rows):
-        depth[row] = depth[target[row]] + 1
-        paths.append((*paths[target[row]], row))
+    topology = TreeTopology(target, _TOPOLOGY)
+    rows = len(topology)
+    depth, paths = topology.depths, topology.paths
     parent_rows = np.array(target[1:], dtype=np.int32)
     earlier = np.zeros((count, count), dtype=bool)
     ancestors = np.zeros((count, count), dtype=bool)
@@ -125,7 +125,7 @@ def geometry(parents):
     select = np.zeros((max_depth + 1, rows), dtype=bool)
     for row in range(rows):
         select[depth[row], row] = True
-    return TreeGeometry(target, rows, max_depth, tuple(paths), parent_rows, earlier,
+    return TreeGeometry(target, rows, max_depth, paths, parent_rows, earlier,
                         ancestors, select)
 
 
@@ -243,7 +243,7 @@ class DeviceTree:
         proposal = owner.draft.draft_tree_lazy(anchors[0], hidden, cache, count, **options)
         parents = tuple(int(parent) for parent in proposal.parents)
         tokens = proposal.tokens
-        if tokens.ndim != 1 or int(tokens.shape[0]) != len(parents) or not parents:
+        if tokens.ndim != 1 or int(tokens.shape[0]) != len(parents):
             raise RuntimeError("lazy tree proposal tokens and parents differ")
         geometry(parents)  # validates parent-first order
         _bump(owner.scheduler_stats, "external_device_tree_lazy_lanes")
@@ -386,22 +386,27 @@ class DeviceTree:
             valid = mx.isfinite(mx.stack(norms))
             plan.values, plan.norms = values, norms
         selected = selected.astype(int32)
-        drafts = _device_tokens(mx, block.tokens)
-        # A node is on the path when its token is its parent row's argmax,
-        # no earlier sibling's is (``_walk_tree`` takes the first match), and
-        # the same holds for every ancestor.
+        path = self._accepted_path(mx, geo, block.tokens, selected)
+        plan.packet = mx.concatenate([path, selected, valid.astype(int32)])
+        return plan
+
+    @staticmethod
+    def _accepted_path(mx, geo, tokens, selected):
+        if geo.rows == 1:
+            # A model-free proposal can have no matching n-gram.
+            return mx.array([0], dtype=mx.int32)
+        drafts = _device_tokens(mx, tokens)
+        # Match the parent argmax and keep the first matching sibling.
         match = drafts == mx.take(selected, mx.array(geo.parent_rows))
         earlier = mx.array(geo.earlier_siblings)
         first = match & ~mx.any(earlier & match[None, :], axis=1)
         on_path = mx.all(mx.where(mx.array(geo.ancestors), first[None, :], True), axis=1)
         on_rows = mx.concatenate([mx.array([True]), on_path])
         at_depth = mx.array(geo.depth_select) & on_rows[None, :]
-        index = mx.arange(rows, dtype=int32)
-        path = mx.where(mx.any(at_depth, axis=1),
+        index = mx.arange(geo.rows, dtype=mx.int32)
+        return mx.where(mx.any(at_depth, axis=1),
                         mx.sum(mx.where(at_depth, index[None, :], 0), axis=1),
-                        -1).astype(int32)
-        plan.packet = mx.concatenate([path, selected, valid.astype(int32)])
-        return plan
+                        -1).astype(mx.int32)
 
     def _finish(self, owner, lane, block, plan, logits):
         """The host walk of the packet's path: ``_verify_tree``'s decision."""

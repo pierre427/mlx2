@@ -151,6 +151,15 @@ class TreeTopology:
         """Rows whose root path is ``0..depth`` (a contiguous prefix view)."""
         return [list(path) == list(range(len(path))) for path in self.paths]
 
+    def leaf_representatives(self) -> list[int]:
+        """A descendant leaf whose path contains each row, including the leaf itself."""
+        leaves = list(range(len(self.parents)))
+        for row in range(len(self.parents) - 1, -1, -1):
+            parent = self.parents[row]
+            if parent >= 0:
+                leaves[parent] = leaves[row]
+        return leaves
+
     def ancestor_rows(self) -> list[list[bool]]:
         """``[row][column]``: column is ``row`` or one of its ancestors."""
         width = len(self.parents)
@@ -557,6 +566,7 @@ class TreeMixerOps(Protocol):
 
 
 KV_WINDOW_GATHER = "window_gather"
+KV_WINDOW_GATHER_SKIP_CHAIN = "window_gather_skip_chain"
 KV_RAW_ROWS_SKIP_CHAIN = "raw_rows_skip_chain"
 KV_RAW_ROWS_SKIP_CHAIN_DTYPE_GUARD = "raw_rows_skip_chain_dtype_guard"
 
@@ -569,6 +579,8 @@ class KVTreeOps:
     ``[start, start + len(path))``:
 
     * ``window_gather`` -- always gather from the private buffer's tile window;
+    * ``window_gather_skip_chain`` -- gather from the private buffer only
+      when the accepted rows do not occupy the leading tile positions;
     * ``raw_rows_skip_chain`` -- nothing for a chain prefix (rows already in
       place), else gather from the raw rows this round appended;
     * ``raw_rows_skip_chain_dtype_guard`` -- as above, but gather from the
@@ -586,16 +598,20 @@ class KVTreeOps:
 
     def prepare_commit(self, private, *, start, path, width, raw=None):
         path = list(path)
-        indices = mx.array(path, dtype=mx.int32)
         keep = len(path)
-        if self.compaction == KV_WINDOW_GATHER:
+        chain = path == list(range(keep))
+        if self.compaction == KV_WINDOW_GATHER or (
+            self.compaction == KV_WINDOW_GATHER_SKIP_CHAIN and not chain
+        ):
+            indices = mx.array(path, dtype=mx.int32)
             for field in ("keys", "values"):
                 values = getattr(private, field)
                 kept = mx.take(values[..., start:start + width, :], indices, axis=2)
                 values[..., start:start + keep, :] = kept
                 setattr(private, field, values)
         elif self.compaction in (KV_RAW_ROWS_SKIP_CHAIN, KV_RAW_ROWS_SKIP_CHAIN_DTYPE_GUARD):
-            if path != list(range(keep)):
+            if not chain:
+                indices = mx.array(path, dtype=mx.int32)
                 for field, rows in zip(("keys", "values"), raw, strict=True):
                     values = getattr(private, field)
                     source = rows
@@ -604,7 +620,7 @@ class KVTreeOps:
                         source = values[..., start:start + width, :]
                     values[..., start:start + keep, :] = mx.take(source, indices, axis=2)
                     setattr(private, field, values)
-        else:
+        elif self.compaction != KV_WINDOW_GATHER_SKIP_CHAIN:
             raise ValueError(f"unknown KV compaction {self.compaction!r}")
         private.offset = start + keep
         return private

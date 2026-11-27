@@ -69,6 +69,7 @@ UNBOUND_IMPORTS = {
 
 class KimiTreeExecutor(LingTreeExecutor):
     protocol = PROTOCOL
+    device_tree_inputs = True
     _identity_style = "name"
     # Revalidation re-hashes only when a source's metadata moved: the bound
     # set is ~0.8 MB, too much to hash on every tree dispatch.
@@ -80,6 +81,25 @@ class KimiTreeExecutor(LingTreeExecutor):
         self.source_revision_token = revision_token(self.source_identity)
         self.dispatches = 0
         self.projection_rows = 0
+
+    @staticmethod
+    def decode_round_cache_reservation(cache, *, append, child_chains, lanes=1):
+        from .models.cache import ArraysCache, KVCache, plain_kv_append_copy_bytes
+
+        if lanes != 1 or any(type(item) not in (ArraysCache, KVCache) for item in cache):
+            return None
+        copied = branch = 0
+        for item in cache:
+            if type(item) is ArraysCache:
+                # Each node can hold an independent recurrent terminal state.
+                copied += max(4, append + 1) * item.nbytes
+            elif item.keys is not None and item.keys.shape[2]:
+                per_token = item.nbytes // item.keys.shape[2]
+                copied += plain_kv_append_copy_bytes(item, append, bytes_per_token=per_token)
+                branch = max(branch, (item.offset + append) * per_token)
+        # Branch views are consumed by their layer before the next layer's
+        # attention. Committed KV still needs one full copy-on-write image.
+        return copied + child_chains * branch
 
     def forward_many(self, model, inputs, parents, caches, layers, *, cached, configured_limit):
         self.validate_revision()
@@ -93,12 +113,18 @@ class KimiTreeExecutor(LingTreeExecutor):
         for tokens, ancestry, cache in zip(inputs, parents, caches, strict=True):
             if len(tokens) != len(ancestry):
                 raise ValueError("Kimi packed tree tokens/parents differ")
+            if isinstance(tokens, mx.array):
+                if tokens.ndim != 1 or tokens.dtype not in (mx.int32, mx.uint32):
+                    raise ValueError("Kimi packed tree needs one integer token row")
+                row = tokens[None].astype(mx.uint32)
+            else:
+                row = mx.array([tokens], dtype=mx.uint32)
             tree = KimiTree(ancestry, cache)
-            output, taps = model.forward_tree_with_taps(mx.array([tokens], dtype=mx.uint32), tree, layers)
+            output, taps = model.forward_tree_with_taps(row, tree, layers)
             trees.append(tree)
             logits.append(output)
             features.append(taps)
-            self.projection_rows += len(tokens)
+        self.projection_rows += sum(len(tokens) for tokens in inputs)
         self.dispatches += 1
         return (mx.concatenate(logits, axis=0), mx.concatenate(features, axis=0),
                 KimiTreeTransaction(trees, self.source_revision_token))
@@ -106,6 +132,7 @@ class KimiTreeExecutor(LingTreeExecutor):
     def receipt(self):
         return {
             **super().receipt(), "provider": PROTOCOL,
+            "device_tree_inputs": self.device_tree_inputs,
             "kda_execution": "kimi_parent_indexed_depth_cohorts_one_token_law",
             "mla_execution": "nope_latent_exact_ancestor_rows_one_query_law",
         }

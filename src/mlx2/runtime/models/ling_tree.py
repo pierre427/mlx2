@@ -26,11 +26,12 @@ from .gated_delta import gated_delta_update
 from ..technologies.linear_recurrence import cohort_tree_recurrence, normalize_qk
 
 TOPOLOGY = legacy_topology("ling_packed")
-_KV = KVTreeOps()  # always gather from the private buffer's tile window
 _KDA = RecurrentTerminalOps(kda_terminal_planes)
 
 
 class LingTree:
+    kv_ops = KVTreeOps()
+
     def __init__(self, parents, cache):
         self.topology = TreeTopology(parents, TOPOLOGY)
         self.parents = self.topology.parents
@@ -152,8 +153,8 @@ class LingTree:
                 # Preserve the cache's allocated tail. The private array
                 # owns this COW update; accepted branches are compacted
                 # without rebuilding the entire committed prefix.
-                _KV.prepare_commit(private, start=int(live.offset), path=path,
-                                   width=len(self.parents))
+                self.kv_ops.prepare_commit(private, start=int(live.offset), path=path,
+                                           width=len(self.parents))
             else:
                 _KDA.prepare_commit(private, self.recurrent[id(private)], path)
             prepared.append((live, private.__dict__.copy()))

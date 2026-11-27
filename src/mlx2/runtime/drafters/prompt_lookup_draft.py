@@ -29,6 +29,9 @@ _TAIL_CHECK = 32
 class PromptLookupDraftModel:
     """External-draft backend over the request's own committed history."""
 
+    draft_tree_lazy_options = frozenset({"processor_histories", "topology", "mark"})
+    draft_tree_lazy_host_twins = ("propose_tree",)
+
     requires_processor_histories = True
     supports_logits_processors = True
     proposal_distribution = "deterministic_point_mass"
@@ -288,6 +291,21 @@ class PromptLookupDraftModel:
             paths, _ = self.copy_paths(history or [], anchor, int(proposal_length), 1)
             tokens.append(list(paths[0]) if paths else [])
         return tokens, [[PointMassLaw(token) for token in row] for row in tokens]
+
+    def draft_tree_lazy(self, anchor, hidden, cache, max_nodes, *, processor_histories=None,
+                        topology=None, mark=None):
+        """Upload the host's n-gram tree once so the target can decide on device."""
+        import mlx.core as mx
+
+        from ..proposal_composition import LazyDecline
+        from ..speculative_device_tree import LazyTreeProposal
+
+        if self.base is not None:
+            raise LazyDecline("prompt_lookup_graft")
+        [(tokens, parents)] = self.propose_tree(
+            [anchor], hidden, cache, max_nodes, processor_histories=processor_histories,
+            topology=topology, mark=mark)
+        return LazyTreeProposal(mx.array(tokens, dtype=mx.int32), tuple(parents))
 
     def propose_tree(self, anchors, hidden, cache, max_nodes, *, processor_histories=None,
                      forbidden_token_ids=None, topology=None, mark=None, **options):

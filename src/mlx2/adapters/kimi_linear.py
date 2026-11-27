@@ -11,7 +11,8 @@ from .ordinary_text import OrdinaryTextAdapter
 
 REPO = "KimiRio/Huihui-Kimi-Linear-REAP-35B-A3B-Instruct-abliterated"
 REVISION = "b42145adff0585a78379d1845b11d20431a40a86"
-DEFAULT_CONTEXT = 1048576
+ARTIFACT_CONTEXT = 1_048_576
+DEFAULT_CONTEXT = 262_144
 CACHE_LAYOUT = "kimi-linear-nope-latent-kda-fp32-v1"
 DESCRIPTOR = ModelDescriptor(
     model_type="kimi_linear", family="kimi-linear", variant="reap35b-bf16-ordinary",
@@ -27,7 +28,7 @@ DESCRIPTOR = ModelDescriptor(
     metadata={"execution": "mlx2.adapters.kimi_linear.KimiLinearAdapter",
               "qualification": "unqualified", "implemented": True,
               "qualified": False, "selected": False, "observed_used": False,
-              "scope": "ordinary text; 1M advertised capacity, long-context unqualified"},
+              "scope": "ordinary text; 256K serving limit, long-context unqualified"},
 )
 
 
@@ -56,7 +57,7 @@ def validate_config(config):
                 "num_key_value_heads": 32, "kv_lora_rank": 512,
                 "qk_nope_head_dim": 128, "qk_rope_head_dim": 64, "v_head_dim": 128,
                 "intermediate_size": 9216, "moe_intermediate_size": 1024,
-                "q_lora_rank": None, "mla_use_nope": True, "model_max_length": DEFAULT_CONTEXT,
+                "q_lora_rank": None, "mla_use_nope": True, "model_max_length": ARTIFACT_CONTEXT,
                 "tie_word_embeddings": False, "hidden_act": "silu",
                 "moe_router_activation_func": "sigmoid", "moe_renormalize": True,
                 "routed_scaling_factor": 2.446, "rms_norm_eps": 1e-5,
@@ -226,15 +227,29 @@ def split_policy(policy=None):
 
 def validate_tree_policy(policy):
     """Tree-route controls (reached through ``--ast`` tree tiles only)."""
+    from ..runtime.ast_tree_proposals import parse_topology
+    from ..runtime.speculative_device_round import DeviceRoundPolicy
+
+    device = DeviceRoundPolicy.from_value(policy.get("device_round"))
+    offload_tree = device is not None and device.tree_lazy
     route = policy.get("batch_size_route")
     if route is None:
-        if set(policy) & (TREE_POLICY_KEYS - {"pairwise_selection"}):
+        if offload_tree or set(policy) & (TREE_POLICY_KEYS - {"pairwise_selection"}):
             raise ValueError("Kimi AST tree controls require the tree batch_size_route (--ast)")
         return False
     if route != TREE_ROUTE:
         raise ValueError(f"Kimi external batch_size_route must be {TREE_ROUTE}")
     if policy.get("ast_target_executor", "packed") not in ("packed", "serial"):
         raise ValueError("Kimi AST target executor must be packed or serial")
+    topology = parse_topology(policy.get("ast_topology"))
+    # Keep device tree offload explicit. The 8-row loopback A/B improved
+    # host AST modestly, while ordinary decode was faster and cross-width
+    # replay diverged. See docs/research/kimi-linear-speculative-20261102.
+    if offload_tree:
+        if policy.get("ast_target_executor", "packed") != "packed":
+            raise ValueError("Kimi AST device_round.tree_lazy requires the packed target executor")
+        if topology == "drafter" and policy.get("draft_model") not in PROMPT_LOOKUP_DRAFT_NAMES:
+            raise ValueError("Kimi DFlash AST device_round.tree_lazy requires a fixed topology or chain")
     rows = policy.get("ast_tile_rows", 16)
     if type(rows) is not int or not 4 <= rows <= 16:
         raise ValueError("Kimi AST tile rows must be an integer from 4 to 16")
@@ -250,7 +265,7 @@ def validate_tree_policy(policy):
 
 def parse_policy(policy=None):
     policy = dict(policy or {})
-    # The requested 1M capacity needs a bounded attention workspace. Retain
+    # Long contexts need a bounded attention workspace. Retain
     # expanded MLA as the explicit ordinary numerical reference. Default
     # "auto" (Pierre, 2026-11-02, after the loopback A/B in
     # docs/research/kimi-linear-20261102/AUDIT-2026-11-02.md): fused expanded
@@ -322,7 +337,7 @@ class KimiLinearAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
     profile = "kimi-linear-reap35b-bf16-ordinary"
     default_max_context = DEFAULT_CONTEXT
     # Existing live memory admission determines concurrent sessions; a lane
-    # ceiling is not a promise to hold that many full 1M contexts.
+    # ceiling is not a promise to hold that many full 256K contexts.
     default_route = "ordinary"
     # Cost-latched prompt lookup is the no-flag route (Pierre, 2026-11-02):
     # 48B q8 2.27x on copy and 0.97-0.99x on math/chat/extract
@@ -514,6 +529,12 @@ class KimiLinearAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
                           tree_node_budget_by_lanes=_hybrid_tree_node_budgets(
                               self.external_policy, 4, self.default_ast_tile_rows),
                           ast_target_executor=self.external_policy.get("ast_target_executor", "packed"))
+            if "device_round" in self.external_policy:
+                from ..runtime.speculative_device_round import DeviceRoundPolicy
+
+                device = DeviceRoundPolicy.from_value(self.external_policy["device_round"])
+                if device is not None and device.tree_lazy:
+                    config["device_round"] = device.as_dict()
         return config
 
     def create_external_batch(self, **kwargs):
@@ -604,12 +625,29 @@ class KimiLinearAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
         return KimiLinearCacheBudget.from_config(config, mtp=mtp)
 
     def cache_budget(self, *, mtp):
-        # An external drafter owns additional draft KV (5 layers x 2 x 2304
-        # BF16 per committed token); keep the existing admission path for it.
-        if getattr(self, "draft_model", None) is not None:
+        from .kimi_linear_memory import DFlashCacheGeometry, KimiLinearCacheBudget
+
+        draft = getattr(self, "draft_model", None)
+        if draft is not None and self.tree_route and self.external_policy.get("ast_target_executor") == "serial":
+            # The serial oracle retains independent branch snapshots.
             return None
-        from .kimi_linear_memory import KimiLinearCacheBudget
-        return KimiLinearCacheBudget.from_config(self.config, mtp=mtp, mla=self.policy["mla"])
+        geometry = (DFlashCacheGeometry.from_drafter(draft)
+                    if draft is not None and self.drafter_kind == "dflash" else None)
+        branch_copies = 0
+        if draft is not None and self.tree_route:
+            from ..runtime.ast_tree_proposals import parse_topology
+            from .qwen38_27b import _hybrid_tree_node_budgets
+
+            nodes = _hybrid_tree_node_budgets(
+                self.external_policy, 4, self.default_ast_tile_rows)[1]
+            topology = parse_topology(self.external_policy.get("ast_topology"))
+            if topology == "drafter":
+                branch_copies = nodes - 1
+            elif topology != "chain":
+                branch_copies = min(nodes, len(topology)) - 1
+        return KimiLinearCacheBudget.from_config(
+            self.config, mtp=mtp, mla=self.policy["mla"], draft=geometry,
+            tree_branch_copies=branch_copies)
 
     def capability_receipts(self):
         """Adapter-local route states; serving and speculative receipts own selection."""

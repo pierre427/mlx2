@@ -5,6 +5,7 @@ Synthetic tiny Kimi Linear models only; no checkpoint qualification claim.
 import copy
 import hashlib
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 
 import mlx.core as mx
@@ -14,6 +15,7 @@ from mlx.utils import tree_flatten
 
 from mlx2.adapters.kimi_linear import (
     DESCRIPTOR,
+    TREE_ROUTE,
     KimiLinearAdapter,
     parse_policy,
     split_policy,
@@ -196,6 +198,40 @@ def test_tree_abort_leaves_live_state_and_ling_math_is_refused():
         m.forward_tree_with_taps(mx.array([[1, 2]], dtype=mx.uint32), LingTree([-1, 0], m.make_cache()), [0])
 
 
+@pytest.mark.parametrize("quantized", [False, True])
+def test_kimi_mla_branch_views_match_independent_ancestor_gathers(quantized):
+    from mlx import nn
+
+    from mlx2.runtime.models.kimi_linear import MultiLatentAttention
+    from mlx2.runtime.models.kimi_tree import KimiTree
+
+    module = MultiLatentAttention(replace(args(), kv_lora_rank=64))
+    module.policy = "latent_single"
+    if quantized:
+        nn.quantize(module, group_size=64, bits=8,
+                    class_predicate=lambda name, _: name == "kv_b_proj")
+    cache = KVCache()
+    prefix = 257
+    cache.update_and_fetch(mx.random.normal((1, 1, prefix, 64)),
+                           mx.random.normal((1, 1, prefix, 8)))
+    tree = KimiTree([-1, 0, 1, 0, 3, 4, 3], [cache])
+    assert tree.mla_sources[:3] == (None, None, None)
+    assert set(tree.mla_leaf_indices) == {5, 6}
+    x = mx.random.normal((1, 7, 32))
+    q, latent, shared = module.project(x)
+    latent, shared = copy.deepcopy(cache).update_and_fetch(latent, shared)
+    expected = []
+    for row, path in enumerate(tree.paths):
+        indices = mx.array(path, dtype=mx.int32) + prefix
+        keys, pieces = [
+            mx.concatenate([plane[..., :prefix, :], mx.take(plane, indices, axis=2)], axis=2)
+            for plane in (latent, shared)
+        ]
+        expected.append(module.attend(q[:, :, row:row + 1], keys, pieces, None, x.itemsize))
+    output = mx.concatenate(expected, axis=2).transpose(0, 2, 1, 3).reshape(1, 7, -1)
+    assert mx.array_equal(tree.kimi_mla(module, x, tree.private[0]), module.o_proj(output)).item()
+
+
 def test_dflash_taps_are_post_layer_residuals():
     m = model()
     tokens = mx.array([[3, 1, 4, 1, 5]])
@@ -258,6 +294,11 @@ def test_policy_split_keeps_numerics_and_speculative_keys_apart():
     ({"mla": "auto", "num_draft": 3}, "only an external draft_model"),
     ({"draft_model": "/tmp/d", "ast_tile_rows": 8}, "tree batch_size_route"),
     ({"draft_model": "/tmp/d", "ast_tree_calibration": "order"}, "only an external draft_model"),
+    ({"draft_model": "/tmp/d", "device_round": {"tree_lazy": True}}, "tree batch_size_route"),
+    ({"draft_model": "/tmp/d", "batch_size_route": TREE_ROUTE, "ast_target_executor": "serial",
+      "device_round": {"tree_lazy": True}}, "requires the packed target"),
+    ({"draft_model": "/tmp/d", "batch_size_route": TREE_ROUTE, "ast_topology": "drafter",
+      "device_round": {"tree_lazy": True}}, "requires a fixed topology or chain"),
     ({"mla": "ds41"}, "unsupported Kimi MLA"),
 ])
 def test_adapter_policy_fails_closed_before_any_tensor_load(policy, refusal, tmp_path):
@@ -295,8 +336,10 @@ def test_ast_invocation_selects_tree_tiles_for_pld_and_dflash(drafter, expected)
 
     argv = ["--model", "/tmp/m", "--ast"] + ([] if drafter is None else ["--ast-drafter", drafter])
     args = build_parser().parse_args(argv)
-    policy = apply_ast_invocation(args, None, resolution())
+    offload = {"tree_lazy": True, "tree_decide": True}
+    policy = apply_ast_invocation(args, {"device_round": offload}, resolution())
     assert policy["draft_model"] == expected and args.external_draft
+    assert policy["device_round"] == offload
     assert args.ast_route["tree_tiles"] is True
     if expected != "prompt_lookup":
         assert policy["batch_size_route"] == "tree15_b1_b4_chain_b5plus_v1"
@@ -540,6 +583,54 @@ def test_dflash_greedy_laws_trees_and_batched_rows_agree():
         assert all(p < i for i, p in enumerate(parents))
 
 
+@pytest.mark.parametrize(("budget", "topology"), [(15, "3x5"), (7, "4/4/4/3"), (15, "chain")])
+def test_dflash_lazy_tree_matches_host_tree_without_a_draft_fence(budget, topology, request, monkeypatch):
+    m = model(request=request)
+    draft = tiny_drafter(m)
+    _, taps = m.forward_with_taps(mx.array([[3, 1, 4, 1, 5]]), m.make_cache(), [0, 2])
+    host_cache, lazy_cache = draft.make_cache(), draft.make_cache()
+    [(tokens, parents)] = draft.propose_tree(
+        [7], taps, draft.batch_caches([host_cache]), budget, topology=topology)
+
+    def unexpected_read(*args):
+        pytest.fail("lazy DFlash tree evaluated its candidates before verification")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(mx, "eval", unexpected_read)
+        lazy = draft.draft_tree_lazy(
+            7, taps, draft.batch_caches([lazy_cache]), budget, topology=topology)
+    assert lazy.tokens.tolist() == tokens
+    assert list(lazy.parents) == parents
+    same_cache(host_cache, lazy_cache)
+
+
+def test_round_reservations_follow_the_plain_draft_and_packed_target_cache(request):
+    from mlx2.runtime.models.cache import plain_kv_append_copy_bytes
+
+    m = model(request=request)
+    draft = tiny_drafter(m)
+    caches = draft.make_cache()
+    context = 257
+    # Populate both draft layers across an allocation boundary.
+    draft.append_context(mx.zeros((1, context, 64)), caches)
+    pending = 13
+    layer_bytes = 2 * 2 * 16 * 4
+    copy_bytes = sum(c.nbytes for c in caches)
+    assert draft.round_cache_reservation(caches, pending_tokens=pending, prefill=True) == copy_bytes
+    transient = (context + pending + 6) * (len(caches) * layer_bytes + 2 * 6 * 4)
+    assert draft.round_cache_reservation(caches, pending_tokens=pending, prefill=False) == copy_bytes + transient
+    assert plain_kv_append_copy_bytes(caches[0], 256, bytes_per_token=layer_bytes) == 768 * layer_bytes
+    target = m.make_cache()
+    mx.eval(m(mx.array([[3, 1, 4]]), target))
+    provider = KimiTreeExecutor.create()
+    assert provider.decode_round_cache_reservation(target, append=8, child_chains=2, lanes=4) is None
+    chain = provider.decode_round_cache_reservation(target, append=8, child_chains=0)
+    branch = provider.decode_round_cache_reservation(target, append=8, child_chains=2)
+    layer_copy = max((c.offset + 8) * (c.nbytes // c.keys.shape[2])
+                     for c in target if type(c) is KVCache)
+    assert branch == chain + 2 * layer_copy
+
+
 # -- serving generators on the tiny target (greedy token identity) -----------
 
 COPY_PROMPTS = [[5, 6, 7, 8, 9, 10] * 4 + [5, 6, 7], [20, 21, 22, 23] * 6 + [20, 21]]
@@ -629,6 +720,70 @@ def test_external_dflash_generator_matches_ordinary_greedy(tree, request):
         assert m.mechanism_status()["kda"]["tree_calls"] > 0
     else:
         assert stats.get("external_hybrid_transactions", 0) > 0
+
+
+@pytest.mark.parametrize(("drafter", "temperature", "emit_logprobs"), [
+    ("dflash", 0, False), ("dflash", 0, True), ("dflash", 0.8, True),
+    ("prompt_lookup", 0, False),
+])
+def test_adapter_ast_device_round_matches_host(drafter, temperature, emit_logprobs, request):
+    from test_device_round_tree_cpu import _assert_rounds_equal, _decision, _planes
+
+    from mlx2.runtime.drafters.prompt_lookup_draft import PromptLookupDraftModel
+
+    target = model(request=request)
+    draft = tiny_drafter(target) if drafter == "dflash" else PromptLookupDraftModel(
+        target, num_draft=5)
+    topology = "3x5" if drafter == "dflash" else "chain"
+    prompt = COPY_PROMPTS[0] if drafter == "dflash" else list(range(1, 31))
+
+    def decode(device_round):
+        adapter = object.__new__(KimiLinearAdapter)
+        adapter.model, adapter.draft_model = target, draft
+        adapter.drafter_kind = drafter
+        adapter.identity = {"fingerprint": "synthetic-kimi-linear"}
+        adapter.tree_route = True
+        adapter.external_policy = {
+            "draft_model": drafter, "num_draft": 5, "batch_size_route": TREE_ROUTE,
+            "ast_topology": topology, "ast_adaptive_rows": False,
+            "cost_per_commit_handoff": False,
+        }
+        if device_round:
+            adapter.external_policy["device_round"] = device_round
+        # Bounded topology and node budgets come from the adapter.
+        batch = adapter.create_external_batch(prefill_step_size=8, completion_batch_size=1)
+        commit = batch._commit
+        rounds = []
+
+        def record(cohort, decisions, features, *, blocks, **kwargs):
+            result = commit(cohort, decisions, features, blocks=blocks, **kwargs)
+            for lane, block, decision in zip(cohort, blocks, decisions, strict=True):
+                if not hasattr(block, "parents"):
+                    continue
+                rounds.append({
+                    "tokens": list(block.tokens), "parents": list(block.parents),
+                    "decision": _decision(decision), "draws": lane.rng.draws,
+                    "cache": _planes(lane.cache), "draft": _planes(lane.draft_cache),
+                })
+            return result
+
+        batch._commit = record
+        output = drive(batch, [prompt], 8, sampling_configs=[{
+            "sampling_temp": temperature, "emit_logprobs": emit_logprobs, "seed": 42,
+        }])
+        return output, rounds, batch.scheduler_stats
+
+    host, host_rounds, host_stats = decode(None)
+    device, device_rounds, stats = decode({"tree_lazy": True, "tree_decide": True})
+    assert device == host and len(device[0]) == 8
+    _assert_rounds_equal(host_rounds, device_rounds)
+    count = host_stats["external_tree_rounds"]
+    assert stats["external_device_tree_rounds"] == stats["external_device_tree_host_reads"] == count > 0
+    assert stats["external_device_tree_declines"] == 0
+    assert stats["external_device_tree_decide_lanes"] == (0 if temperature else count)
+    assert stats["external_device_tree_host_decide_lanes"] == (count if temperature else 0)
+    if drafter == "prompt_lookup":
+        assert any(not row["tokens"] for row in device_rounds)
 
 
 @pytest.mark.skipif(not (TARGET / "tiktoken.model").exists() or not (DRAFT / "config.json").exists(),

@@ -179,12 +179,46 @@ def test_memory_budget_is_compressed_and_session_count_follows_free_memory():
     b = budget()
     assert b.kv_bytes_per_token == 7*576*2
     assert b.recurrent_live_bytes == 20*(32*128*128*4+3*3*32*128*2)
-    cost = b.project(1048576)+b.prefill_transient_bytes(1048576,512)
+    cost = b.project(262144)+b.prefill_transient_bytes(262144,512)
     assert b.full_context_sessions(cost-1) == 0
     assert b.full_context_sessions(cost) == 1
     assert b.full_context_sessions(cost*3) == 3
     assert b.full_context_sessions(cost*3,reserve_bytes=cost) == 2
     assert budget("expanded").prefill_transient_bytes(1048576,512) > b.prefill_transient_bytes(1048576,512)
+
+
+def test_ast_admission_counts_compressed_target_and_actual_dflash_cache(monkeypatch):
+    monkeypatch.setattr("mlx2.adapters.kimi_linear.validate_config", lambda _: None)
+    adapter = object.__new__(KimiLinearAdapter)
+    adapter.config = {
+        "linear_attn_config": {"full_attn_layers": list(range(7)), "kda_layers": list(range(20)),
+                               "num_heads": 32, "head_dim": 128, "short_conv_kernel_size": 4},
+        "kv_lora_rank": 512, "qk_rope_head_dim": 64, "qk_nope_head_dim": 128,
+        "v_head_dim": 128, "hidden_size": 2304, "vocab_size": 163840,
+    }
+    adapter.policy = parse_policy()
+    adapter.tree_route = True
+    adapter.external_policy = {"ast_topology": "3x5", "ast_tile_rows": 8}
+    adapter.drafter_kind = "dflash"
+    adapter.draft_model = SimpleNamespace(
+        config=SimpleNamespace(num_hidden_layers=5, num_key_value_heads=32, head_dim=72,
+                               num_attention_heads=32, block_size=16, target_layer_ids=[3, 7, 15, 19, 23]),
+        fc=SimpleNamespace(weight=mx.zeros((1,), dtype=mx.bfloat16)),
+    )
+    ordinary = budget("auto")
+    ast = adapter.cache_budget(mtp=False)
+    context = 262_144
+    assert ast.kv_bytes_per_token == ordinary.kv_bytes_per_token == 8064
+    assert ast.draft.kv_bytes_per_token == 46_080
+    assert ast.project(context) - ordinary.project(context) == (context + 256) * 46_080
+    assert ast.tree_branch_copies == 2
+    assert ast.decode_transient_bytes(context) > context * 46_080
+    assert ast.prefill_transient_bytes(context, 4096) > ordinary.prefill_transient_bytes(context, 4096)
+    adapter.external_policy["ast_target_executor"] = "serial"
+    assert adapter.cache_budget(mtp=False) is None
+    adapter.drafter_kind = "prompt_lookup"
+    adapter.external_policy = {"ast_topology": "chain"}
+    assert adapter.cache_budget(mtp=False) == ordinary
 
 
 def test_adapter_context_default_and_operator_override():
@@ -193,7 +227,7 @@ def test_adapter_context_default_and_operator_override():
     parser = build_parser()
     implicit = parser.parse_args(["--model","/tmp/model"])
     explicit = parser.parse_args(["--model","/tmp/model","--max-context","8192"])
-    assert apply_adapter_context_default(implicit,resolution) == 1048576
+    assert apply_adapter_context_default(implicit,resolution) == 262144
     assert apply_adapter_context_default(explicit,resolution) == 8192
     other = parser.parse_args(["--model","/tmp/model"])
     assert apply_adapter_context_default(other,SimpleNamespace(adapter_type=object)) == 262144
@@ -791,8 +825,10 @@ def test_absorbed_reference_starts_equal_the_padded_batch_mask():
 
 def test_latent_tiled_counter_counts_only_the_tiled_loop(monkeypatch):
     from mlx2.runtime.models import kimi_linear_mla_fused as fused
+    from mlx2.runtime.technologies.dispatch import counters_snapshot
 
-    attn = MultiLatentAttention(args())
+    attn = MultiLatentAttention(replace(args(), num_attention_heads=32, kv_lora_rank=512,
+                                       qk_nope_head_dim=128, qk_rope_head_dim=64, v_head_dim=128))
     attn.eval()
     x = mx.random.normal((1,5,32))
     mask = mx.arange(5)[:,None] >= mx.arange(5)[None,:]
@@ -800,10 +836,16 @@ def test_latent_tiled_counter_counts_only_the_tiled_loop(monkeypatch):
     attn(x, mask=mask, cache=KVCache())
     assert attn.calls["latent_tiled"] == 1
     monkeypatch.setattr(fused, "admits", lambda *a: True)
-    monkeypatch.setattr(fused, "attend", lambda qn, qs, latent, shared: mx.zeros((*qn.shape[:-1], 16)))
+    monkeypatch.setattr(fused, "attend", lambda qn, qs, latent, shared: mx.zeros(qn.shape))
+    def selected_count():
+        return sum(row["count"] for row in counters_snapshot()["selections"]
+                   if row["operation"] == "absorbed_decode" and row["path"] == "kimi_fused_split_k")
+
+    before = selected_count()
     attn.policy = "latent_fused"
     attn(x[:, :1], cache=KVCache())
     assert attn.calls["fused_mla_decode"] == 1 and attn.calls["latent_tiled"] == 1
+    assert selected_count() == before + 1
     monkeypatch.setattr(fused, "admits", lambda *a: False)
     attn(x[:, :1], cache=KVCache())
     assert attn.calls["fused_mla_declined"] == 1 and attn.calls["latent_tiled"] == 2

@@ -73,6 +73,26 @@ class KimiDFlashDraftModel(PlainDFlashDraftModel):
     receipt_name = "kimi_dflash"
     label = "Kimi DFlash"
 
+    def round_cache_reservation(self, cache, *, pending_tokens, prefill):
+        """The context append always uses plain, append-only KV storage."""
+        from ..models.cache import KVCache, plain_kv_append_copy_bytes
+
+        config = self.config
+        if len(cache) != config.num_hidden_layers or any(type(item) is not KVCache for item in cache):
+            return None
+        layer_bytes = 2 * config.num_key_value_heads * config.head_dim * self.fc.weight.dtype.size
+        copied = sum(plain_kv_append_copy_bytes(item, pending_tokens, bytes_per_token=layer_bytes)
+                     for item in cache)
+        if prefill:
+            # append_context projects and appends taps without running draft
+            # attention. Only one growing or shared cache copy is needed.
+            return copied
+        # A decode round also concatenates every layer's prefix with the
+        # trained block. Bound all such buffers and one FP32 score workspace.
+        context = max(item.offset for item in cache) + pending_tokens + config.block_size
+        return copied + context * (config.num_hidden_layers * layer_bytes
+                                   + config.num_attention_heads * config.block_size * 4)
+
 
 Model = KimiDFlashDraftModel
 

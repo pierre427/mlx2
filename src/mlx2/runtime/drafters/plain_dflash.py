@@ -104,6 +104,9 @@ class PlainDFlashDraftModel(DFlashDraftModel):
     tree_children = 4
     # Receives the AST ``topology`` (BxD distinct-root branches, chain, drafter).
     tree_topology_aware = True
+    draft_tree_lazy_options = frozenset({"topology", "mark"})
+    draft_tree_lazy_host_twins = ("propose_tree", "_pattern_trees", "_tree_pattern",
+                                  "_pattern_candidates", "_block_logits")
 
     def __init__(self, config: DFlashConfig):
         super().__init__(config)
@@ -346,20 +349,57 @@ class PlainDFlashDraftModel(DFlashDraftModel):
             mark("tree_search")
         return result
 
-    def _pattern_trees(self, anchors, hidden, cache, max_nodes, topology, forbidden, mark):
-        from ..ast_tree_proposals import paths_to_tree, pattern_for_budget
+    def draft_tree_lazy(self, anchor, hidden, cache, max_nodes, *, topology=None, mark=None):
+        """Keep a fixed-topology tree's tokens on the device through verification."""
+        from ..proposal_composition import LazyDecline
+        from ..speculative_device_tree import LazyTreeProposal, chain_branch_parents
 
-        pattern = [min(depth, self.maximum_proposal_length)
-                   for depth in pattern_for_budget(topology, max_nodes)]
+        if hidden.shape[0] != 1:
+            raise ValueError("DFlash lazy trees run one lane at a time")
+        if topology in (None, "drafter"):
+            raise LazyDecline("dflash_best_first_tree")
+        if not 1 <= int(max_nodes) <= 31:
+            raise ValueError(f"{self.label} AST serves 1..31 non-root nodes")
+        pattern = self._tree_pattern(topology, max_nodes)
+        if len(pattern) > self.config.vocab_size:
+            raise LazyDecline("dflash_tree_root_width")
+        roots, tails = self._pattern_candidates([anchor], hidden, cache, pattern, len(pattern))
+        if mark is not None:
+            mark("tree_draft_build")
+        # Distinct roots make this the same node order as paths_to_tree.
+        tokens = mx.concatenate([
+            mx.concatenate([roots[0, branch:branch + 1], tails[0, 1:depth]])
+            for branch, depth in enumerate(pattern)
+        ]).astype(mx.int32)
+        self.stats["tree_lattices"] += 1
+        self.stats["block_drafts"] += 1
+        return LazyTreeProposal(tokens, chain_branch_parents(pattern))
+
+    def _tree_pattern(self, topology, max_nodes):
+        from ..ast_tree_proposals import pattern_for_budget
+
+        return tuple(min(depth, self.maximum_proposal_length)
+                     for depth in pattern_for_budget(topology, max_nodes))
+
+    def _pattern_candidates(self, anchors, hidden, cache, pattern, width):
+        logits = self._block_logits(anchors, hidden, cache, max(pattern)).astype(mx.float32)
+        root_logits = logits[:, 0]
+        width = min(width, int(root_logits.shape[-1]))
+        # Preserve the host's argpartition ordering for equal-scoring roots.
+        roots = mx.argpartition(-root_logits, width - 1, axis=-1)[:, :width]
+        order = mx.argsort(-mx.take_along_axis(root_logits, roots, -1), -1)
+        return mx.take_along_axis(roots, order, -1), mx.argmax(logits, axis=-1)
+
+    def _pattern_trees(self, anchors, hidden, cache, max_nodes, topology, forbidden, mark):
+        from ..ast_tree_proposals import paths_to_tree
+
+        pattern = self._tree_pattern(topology, max_nodes)
         if not pattern:
             return [([], []) for _ in anchors]
-        branches, depth = len(pattern), max(pattern)
+        branches = len(pattern)
         forbidden = forbidden or [() for _ in anchors]
-        logits = self._block_logits(anchors, hidden, cache, depth).astype(mx.float32)
-        width = min(branches + max((len(row) for row in forbidden), default=0), logits.shape[-1])
-        roots = mx.argpartition(-logits[:, 0], width - 1, axis=-1)[:, :width]
-        roots = mx.take_along_axis(roots, mx.argsort(-mx.take_along_axis(logits[:, 0], roots, -1), -1), -1)
-        tails = mx.argmax(logits, axis=-1)
+        width = branches + max((len(row) for row in forbidden), default=0)
+        roots, tails = self._pattern_candidates(anchors, hidden, cache, pattern, width)
         if mark is not None:
             mark("tree_draft_build")
         mx.eval(roots, tails)

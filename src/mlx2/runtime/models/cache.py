@@ -1554,6 +1554,19 @@ class KVCache(_BaseCache):
         return self.keys.nbytes + self.values.nbytes
 
 
+def plain_kv_append_copy_bytes(cache, append, *, bytes_per_token):
+    """Bound one plain KV buffer copy, including any growth on append."""
+    needed = cache.offset + append
+    reserved = getattr(cache, "_reserve_tokens", 0)
+    capacity = 0 if cache.keys is None else cache.keys.shape[2]
+    if needed <= capacity:
+        return capacity * bytes_per_token
+    # Without an explicit reservation KVCache can add a full input chunk
+    # rounded to step at a step-aligned previous fill.
+    grown = ((max(needed, reserved) + cache.step - 1) // cache.step) * cache.step
+    return max(capacity, grown) * bytes_per_token
+
+
 class SinkWindowKVCache(_BaseCache):
     """Bounded draft-only KV with attention sinks and absolute positions.
 

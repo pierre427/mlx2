@@ -19,7 +19,7 @@ from . import moe_nax_gather
 from .base import scaled_dot_product_attention
 from .cache import BatchKVCache, KVCache
 from ..technologies import linear_recurrence as _lr
-from ..technologies.linear_recurrence import kda_gates  # noqa: F401  (kimi_tree imports it here)
+from ..technologies.linear_recurrence import kda_gates  # noqa: F401  (historical export)
 from ..technologies.moe_router import cached_spec, route as _route_reference
 
 
@@ -536,7 +536,7 @@ class MultiLatentAttention(nn.Module):
         return q, self.kv_a_layernorm(latent)[:, None], shared[:, None], q_rows
 
     def attend(self, q, latent, shared, mask, itemsize, *, q_rows=None, buffers=None, starts=None,
-               device_offset=None):
+               device_offset=None, latent_weight=None):
         """The policy's attention law over fetched latent/shared keys -> [B,H,T,V].
 
         ``starts`` (with an array ``mask``) marks a left-padded batch cache:
@@ -611,7 +611,7 @@ class MultiLatentAttention(nn.Module):
                 device_offset = None
             out = self._latent(q, latent, shared, mask, "latent_flash" if flash else policy, buffers,
                                device_offset=device_offset if flash else None,
-                               starts=starts if flash else None)
+                               starts=starts if flash else None, weight=latent_weight)
         elif flash == "expanded":
             if type(self.kv_b_proj) is nn.Linear:
                 # Head-major [B, H, S, 256] from the same product: each head
@@ -620,7 +620,7 @@ class MultiLatentAttention(nn.Module):
                 kv = latent @ w.swapaxes(-1, -2)
             else:
                 kv = self.kv_b_proj(latent[:, 0])
-            from .kimi_linear_mla_flash import expanded as flash_expanded
+            flash_expanded = self._expanded_flash_kernel(q_rows, mask)
             out = flash_expanded(q_rows, kv, shared if buffers is None else buffers[1], mask,
                                  scale=self.scale, heads=h, law=self.flash_law)
             self.calls["expanded_flash192"] += 1
@@ -632,7 +632,8 @@ class MultiLatentAttention(nn.Module):
             # Each window's re-expansion stays under the expanded bound.
             window = max(1024, self.expanded_bytes//(b*h*(n+v)*itemsize)//1024*1024)
             out = expanded_windows(q_rows, latent, shared, self.kv_b_proj, mask,
-                                   scale=self.scale, window=window, heads=h, law=self.flash_law)
+                                   scale=self.scale, window=window, heads=h, law=self.flash_law,
+                                   kernel=self._expanded_flash_kernel(q_rows, mask))
             self.calls["expanded_flash192_windows"] += 1
             self.calls[f"expanded_flash192_law_{self.flash_law}"] += 1
             self.calls["expanded_sdpa"] += 1
@@ -649,6 +650,13 @@ class MultiLatentAttention(nn.Module):
                 out = _mla.expanded_concat_attention(q, kv, shared, mask, scale=self.scale, nope=n)
             self.calls["expanded_sdpa"] += 1
         return out
+
+    def _expanded_flash_kernel(self, q_rows, mask):
+        # The model's device/variant probe has already admitted this launch.
+        kernel, _ = _mla.EXPANDED_PREFILL.select(
+            self.mla_spec, policy="kimi_flash192", device="gpu", dtype=q_rows.dtype,
+            mask="none" if mask is None else "causal")
+        return kernel
 
     def _validate_training_padded(self, mask, *, cache=None, tree=None):
         if self.training_mla_policy != "padded_sdpa":
@@ -706,16 +714,27 @@ class MultiLatentAttention(nn.Module):
                 cls._d256_available = False
         return cls._d256_available
 
+    def latent_weight(self):
+        a = self.args
+        return dense_weight(self.kv_b_proj).reshape(
+            a.num_attention_heads, a.qk_nope_head_dim + a.v_head_dim, a.kv_lora_rank)
+
     def _latent(self, q, latent, shared, mask, policy, buffers=None, *, starts=None,
-                device_offset=None):
+                device_offset=None, weight=None):
+        a = self.args
+        h, n = a.num_attention_heads, a.qk_nope_head_dim
+        w = self.latent_weight() if weight is None else weight
         if policy == "latent_flash":
             # Absorbed NAX flash over the latent cache (qk 576 / v 512):
             # bottom-right causal offset in-kernel, split partials combined.
-            from .kimi_linear_mla_flash import absorbed
-            a = self.args
-            h, n = a.num_attention_heads, a.qk_nope_head_dim
-            w = dense_weight(self.kv_b_proj).reshape(h, n+a.v_head_dim, a.kv_lora_rank)
+            mask_kind = "left_padded" if starts is not None else "none" if mask is None else "causal"
+            # The model's probe admits the physical head count, including
+            # subclasses using the grouped kernel.
+            absorbed, _ = _mla.ABSORBED_DECODE.select(
+                self.mla_spec, policy="kimi_latent_flash", device="gpu", dtype=q.dtype,
+                mask=mask_kind, probed_heads=(h,))
             qn, qs = mx.split(q, [n], -1)
+            qn = _mla.kv_b_absorb(qn, w, n)
             if starts is not None:
                 # The padded batch cache's mask is bottom-right causal after
                 # each lane's start: the kernel's causal law plus starts.
@@ -729,13 +748,13 @@ class MultiLatentAttention(nn.Module):
                 extra["packing"] = self.decode_packing
                 self.calls["latent_flash_packed"] += 1
             if buffers is None:
-                result = absorbed(qn @ w[:, :n], qs, latent, shared, mask, scale=self.scale, heads=h,
+                result = absorbed(qn, qs, latent, shared, mask, scale=self.scale, heads=h,
                                   starts=starts, **extra)
             else:
-                result = absorbed(qn @ w[:, :n], qs, *buffers, mask, scale=self.scale, heads=h,
+                result = absorbed(qn, qs, *buffers, mask, scale=self.scale, heads=h,
                                   width=latent.shape[2], starts=starts, **extra)
             self.calls["latent_flash"] += 1
-            return result @ w[:, n:].swapaxes(-1, -2)
+            return _mla.kv_b_unabsorb(result, w, n)
         # A string mask is bottom-right causal over [prefix + rows]. It is
         # built from positions for the block each pass reads, never whole:
         # a [rows, context] bool mask is 8 GiB at 8192 x 1M. Values equal
@@ -743,28 +762,29 @@ class MultiLatentAttention(nn.Module):
         # GLM/DS phase split: absorb K projection, attend on one latent per
         # token, then unabsorb V. Bounded online softmax avoids O(context*rows)
         # score storage and full-prefix expanded K/V, including at 1M.
-        a = self.args
-        h, n, v = a.num_attention_heads, a.qk_nope_head_dim, a.v_head_dim
-        w = dense_weight(self.kv_b_proj).reshape(h, n+v, a.kv_lora_rank)
         qn, qs = mx.split(q, [n], -1)
-        qn = qn @ w[:, :n]
+        qn = _mla.kv_b_absorb(qn, w, n)
         if policy == "latent_fused":
-            from .kimi_linear_mla_fused import admits, attend
+            from .kimi_linear_mla_fused import admits
             # Unmasked rows only: a causal string declines, as its
             # materialized array did.
             if admits(qn,qs,latent,shared,mask):
                 self.calls["fused_mla_decode"] += 1
-                result = attend(qn,qs,latent,shared).astype(q.dtype)
-                return result @ w[:,n:].swapaxes(-1,-2)
+                attend, _ = _mla.ABSORBED_DECODE.select(
+                    self.mla_spec, policy="kimi_fused_split_k", device="gpu",
+                    batch=1, rows=1, mask="none")
+                result = attend(qn, qs, latent, shared).astype(q.dtype)
+                return _mla.kv_b_unabsorb(result, w, n)
             self.calls["fused_mla_declined"] += 1
         if policy == "latent_single" and _mla.latent_single_fits(q, latent, self.single_score_bytes):
             # One pass over the latent cache: the same FP32 score/softmax law
             # as one key tile, without O(context/key_tile) launches per row.
             # A fully masked (padding) row yields zeros, as in the tiled law.
             self.calls["latent_single"] += 1
-            return _mla.latent_softmax_single(
+            result = _mla.latent_softmax_single(
                 qn, qs, latent, shared, mask, scale=self.scale, out_dtype=q.dtype,
-            ) @ w[:, n:].swapaxes(-1, -2)
+            )
+            return _mla.kv_b_unabsorb(result, w, n)
         if policy == "latent_single":
             # Over the score bound: same law in key tiles, with its own receipt.
             self.calls["latent_single_tiled"] += 1
@@ -773,7 +793,7 @@ class MultiLatentAttention(nn.Module):
             self.calls["latent_tiled"] += 1
         return _mla.latent_softmax_tiled(
             qn, qs, latent, shared, mask, scale=self.scale, out_dtype=q.dtype,
-            key_tile=self.key_tile, finish=lambda result: result @ w[:, n:].swapaxes(-1, -2))
+            key_tile=self.key_tile, finish=lambda result: _mla.kv_b_unabsorb(result, w, n))
 
 
 class Gate(ling.Gate):

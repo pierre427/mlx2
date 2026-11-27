@@ -622,11 +622,13 @@ def expanded(q, kv, shared, mask, *, scale, heads=HEADS, offset=None, return_lse
     return (out, lse) if return_lse else out
 
 
-def expanded_windows(q, latent, shared, kv_proj, mask, *, scale, window, heads=HEADS, law="v1"):
+def expanded_windows(q, latent, shared, kv_proj, mask, *, scale, window, heads=HEADS,
+                     law="v1", kernel=None):
     """Flash192 over the prefix in key windows of ``window`` tokens: each is
     re-expanded alone (transient bounded by one window) and the windows are
     merged by log-sum-exp in FP32. latent[B,1,S,512], shared[B,1,S,64]."""
     width, rows = latent.shape[2], q.shape[1]
+    kernel = expanded if kernel is None else kernel
     _, causal = _offset(mask, rows, width)
     natural = width-rows if causal else 0
     total, parts = None, []
@@ -635,9 +637,9 @@ def expanded_windows(q, latent, shared, kv_proj, mask, *, scale, window, heads=H
         if causal and k0 > natural+rows-1:
             break
         kv = kv_proj(latent[:, 0, k0:k1])
-        out, lse = expanded(q, kv, shared[:, :, k0:k1], mask, scale=scale, heads=heads,
-                            offset=natural-k0 if causal else None,
-                            return_lse=True, out_dtype=mx.float32, law=law)
+        out, lse = kernel(q, kv, shared[:, :, k0:k1], mask, scale=scale, heads=heads,
+                          offset=natural-k0 if causal else None,
+                          return_lse=True, out_dtype=mx.float32, law=law)
         parts.append((out, lse))
     best = parts[0][1]
     for _, lse in parts[1:]:

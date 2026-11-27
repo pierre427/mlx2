@@ -6,6 +6,34 @@ the serving admission controller's authority. No hard-coded session count.
 import os
 from dataclasses import asdict, dataclass
 
+from .kimi_linear import DEFAULT_CONTEXT
+
+
+@dataclass(frozen=True)
+class DFlashCacheGeometry:
+    layers: int
+    kv_heads: int
+    head_dim: int
+    query_heads: int
+    block_rows: int
+    capture_layers: int
+    item_bytes: int
+
+    @classmethod
+    def from_drafter(cls, draft):
+        config = draft.config
+        return cls(config.num_hidden_layers, config.num_key_value_heads, config.head_dim,
+                   config.num_attention_heads, config.block_size, len(config.target_layer_ids),
+                   draft.fc.weight.dtype.size)
+
+    @property
+    def layer_kv_bytes_per_token(self):
+        return 2 * self.kv_heads * self.head_dim * self.item_bytes
+
+    @property
+    def kv_bytes_per_token(self):
+        return self.layers * self.layer_kv_bytes_per_token
+
 
 @dataclass(frozen=True)
 class KimiLinearCacheBudget:
@@ -28,9 +56,11 @@ class KimiLinearCacheBudget:
     allocation_step: int = 256
     transcript_bytes_per_token: int = 16
     transient_gib_per_lane: float = 1.76
+    draft: DFlashCacheGeometry | None = None
+    tree_branch_copies: int = 0
 
     @classmethod
-    def from_config(cls, config, *, mtp=False, mla="auto"):
+    def from_config(cls, config, *, mtp=False, mla="auto", draft=None, tree_branch_copies=0):
         if mtp:
             raise ValueError("Kimi Linear has no staged MTP memory contract")
         from .kimi_linear import validate_config
@@ -44,7 +74,8 @@ class KimiLinearCacheBudget:
                    linear["num_heads"], linear["head_dim"],
                    config["qk_nope_head_dim"], config["v_head_dim"],
                    config["hidden_size"], config["vocab_size"],
-                   linear["short_conv_kernel_size"]-1, copies, mla)
+                   linear["short_conv_kernel_size"]-1, copies, mla,
+                   draft=draft, tree_branch_copies=tree_branch_copies)
 
     @staticmethod
     def _tokens(n):
@@ -64,9 +95,23 @@ class KimiLinearCacheBudget:
     def project(self, context_tokens):
         n = self._tokens(context_tokens)
         capacity = ((n+self.allocation_step-1)//self.allocation_step+1)*self.allocation_step
-        return (capacity * (self.kv_bytes_per_token+self.transcript_bytes_per_token)
+        draft_kv = 0 if self.draft is None else self.draft.kv_bytes_per_token
+        return (capacity * (self.kv_bytes_per_token+draft_kv+self.transcript_bytes_per_token)
                 + self.recurrent_live_bytes*(1+self.checkpoint_copies)
                 + (self.global_layers+self.recurrent_layers)*4096)
+
+    def decode_transient_bytes(self, context_tokens):
+        """Context-sized copies during speculative verify and draft attention."""
+        n = self._tokens(context_tokens)
+        draft = self.draft
+        target = self.kv_bytes_per_token // self.global_layers * self.tree_branch_copies
+        if draft is None:
+            return n * target
+        # Reserve a draft cache copy for COW, plus one layer's context+block
+        # concatenate and its FP32 attention score workspace.
+        scores = draft.query_heads * draft.block_rows * 4
+        return (n * (target + draft.kv_bytes_per_token)
+                + (n + draft.block_rows) * (draft.layer_kv_bytes_per_token + scores))
 
     def prefill_transient_bytes(self, context_tokens, chunk_rows):
         n, rows = self._tokens(context_tokens), self._tokens(chunk_rows)
@@ -80,6 +125,11 @@ class KimiLinearCacheBudget:
         # unpadded prompt per forward.
         copies = n*self.kv_bytes_per_token
         activations = rows*(16*self.heads*self.head_dim+8*self.hidden_size)*4 + self.vocab_size*4
+        if self.draft is not None:
+            # Layer taps and their concatenation coexist until the draft
+            # projection consumes them. Resident draft KV COW is reserved
+            # by decode_transient_bytes during prefill admission as well.
+            activations += 2 * rows * self.hidden_size * self.draft.capture_layers * self.item_bytes
         mask = n*min(rows, 128)
         if self.mla == "latent_single":
             # Its one-pass mask, inside the 256 MiB score bound: [rows,
@@ -104,7 +154,7 @@ class KimiLinearCacheBudget:
                        + 3*rows*n*self.heads)*4
         return copies+activations+mask+scratch
 
-    def full_context_sessions(self, free_bytes, *, context_tokens=1048576,
+    def full_context_sessions(self, free_bytes, *, context_tokens=DEFAULT_CONTEXT,
                               chunk_rows=512, reserve_bytes=0):
         """Conservative full-context session ceiling AFTER model residency.
 
@@ -113,11 +163,19 @@ class KimiLinearCacheBudget:
         every session, plus one in-flight forward workspace per session.
         """
         free_bytes, reserve_bytes = self._tokens(free_bytes), self._tokens(reserve_bytes)
-        per_session = self.project(context_tokens)+self.prefill_transient_bytes(context_tokens, chunk_rows)
+        per_session = (self.project(context_tokens) + self.prefill_transient_bytes(context_tokens, chunk_rows)
+                       + self.decode_transient_bytes(context_tokens))
         return max(0, free_bytes-reserve_bytes)//max(1, per_session)
 
     def as_dict(self):
-        return dict(schema="kimi-linear-compressed-mla-kda-v1", **asdict(self),
+        fields = asdict(self)
+        if self.draft is None:
+            fields.pop("draft")
+        else:
+            fields["draft_kv_bytes_per_token"] = self.draft.kv_bytes_per_token
+        if not self.tree_branch_copies:
+            fields.pop("tree_branch_copies")
+        return dict(schema="kimi-linear-compressed-mla-kda-v1", **fields,
                     kv_bytes_per_token=self.kv_bytes_per_token,
                     recurrent_live_bytes=self.recurrent_live_bytes,
                     bound="BF16 latent/shared cache and convolution, FP32 recurrent matrix, restore copies",

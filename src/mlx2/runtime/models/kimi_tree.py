@@ -26,11 +26,29 @@ from __future__ import annotations
 import mlx.core as mx
 from mlx import nn
 
+from ..technologies import linear_recurrence as recurrence
+from ..technologies.tree_verify import KV_WINDOW_GATHER_SKIP_CHAIN, KVTreeOps
 from .ling_tree import LingTree
-from ..technologies.linear_recurrence import cohort_tree_recurrence
 
 
 class KimiTree(LingTree):
+    kv_ops = KVTreeOps(compaction=KV_WINDOW_GATHER_SKIP_CHAIN)
+
+    def __init__(self, parents, cache):
+        super().__init__(parents, cache)
+        # A contiguous path reads the private KV buffer. For other paths,
+        # choose a leaf that contains the query row. Each leaf's private
+        # prefix + branch is built at most once per layer.
+        self.mla_sources = tuple(
+            None if contiguous else leaf
+            for contiguous, leaf in zip(
+                self.topology.chain_prefix(), self.topology.leaf_representatives(), strict=True)
+        )
+        self.mla_leaf_indices = {
+            leaf: mx.array(self.paths[leaf], dtype=mx.int32)
+            for leaf in dict.fromkeys(self.mla_sources) if leaf is not None
+        }
+
     def _merged_convolution(self, module, raw, cache):
         """Ancestry windows for the merged q/k/v depthwise convolution."""
         count = module.conv_kernel - 1
@@ -46,8 +64,6 @@ class KimiTree(LingTree):
         return mx.split(values, 3, axis=-1), mx.split(tails, 3, axis=-1)
 
     def kimi_kda(self, module, x, cache):
-        from .kimi_linear import kda_gates, l2_qk
-
         width = len(self.parents)
         h, d = module.num_heads, module.head_dim
         module.calls["tree_calls"] += 1
@@ -62,11 +78,10 @@ class KimiTree(LingTree):
             k, ks = self.convolution(module.k_conv1d, k, cache[1])
             v, vs = self.convolution(module.v_conv1d, v, cache[2])
         shape = (width, 1, h, d)
-        q, k = l2_qk(q.reshape(shape), k.reshape(shape))
-        log_decay, beta = kda_gates(
-            a.reshape(shape), beta.reshape(width, 1, h),
+        q, k = recurrence.normalize_qk(module.recurrence_spec, q.reshape(shape), k.reshape(shape))
+        gates = recurrence.gates(
+            module.recurrence_spec, a.reshape(shape), beta.reshape(width, 1, h),
             module.A_log.reshape(h, 1), module.dt_bias.reshape(h, d))
-        decay = mx.exp(log_decay)
         v = v.reshape(shape).astype(mx.float32)
         initial = cache[3]
         if initial is None:
@@ -75,8 +90,8 @@ class KimiTree(LingTree):
             module.calls["tree_levels"] += 1
             return module._recurrence(q, k, v, decay, beta, parent_states, None)
 
-        outputs, states = cohort_tree_recurrence(
-            self.parents, self.levels, initial, (q, k, v, decay, beta), step)
+        outputs, states = recurrence.cohort_tree_recurrence(
+            self.parents, self.levels, initial, (q, k, v, gates.decay, gates.beta), step)
         self.recurrent[id(cache)] = (qs, ks, vs, states)
         output = mx.concatenate(outputs, axis=1)
         out = module.norm_gate(output, gate, x.dtype)
@@ -91,14 +106,25 @@ class KimiTree(LingTree):
         q, latent, shared = module.project(x)
         start = int(cache.offset)
         latent, shared = cache.update_and_fetch(latent, shared)
+        # auto uses the one-query latent law here. For affine checkpoints
+        # share the reshaped dense weight across the tile, without changing the shape
+        # or reduction of any query's skinny matrix multiplication.
+        weight = None if module.policy == "expanded" else module.latent_weight()
+        branch_planes = {
+            leaf: tuple(mx.concatenate([plane[..., :start, :],
+                                         mx.take(plane[..., start:, :], indices, axis=2)], axis=2)
+                        for plane in (latent, shared))
+            for leaf, indices in self.mla_leaf_indices.items()
+        }
         outputs = []
-        for row, path in enumerate(self.paths):
-            indices = mx.array(path, dtype=mx.int32) + start
-            keys = mx.concatenate([latent[..., :start, :], mx.take(latent, indices, axis=2)], axis=2)
-            pieces = mx.concatenate([shared[..., :start, :], mx.take(shared, indices, axis=2)], axis=2)
+        for row, leaf in enumerate(self.mla_sources):
+            end = start + len(self.paths[row])
+            keys, pieces = (latent, shared) if leaf is None else branch_planes[leaf]
             # One query row at a time: the ordinary one-token decode law,
             # with no mask (every key is on this node's own ancestry).
-            outputs.append(module.attend(q[:, :, row:row + 1], keys, pieces, None, x.itemsize))
+            outputs.append(module.attend(
+                q[:, :, row:row + 1], keys[..., :end, :], pieces[..., :end, :],
+                None, x.itemsize, latent_weight=weight))
         out = mx.concatenate(outputs, axis=2)
         return module.o_proj(out.transpose(0, 2, 1, 3).reshape(1, width, h * v))
 

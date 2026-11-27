@@ -15368,6 +15368,7 @@ class ExternalDraftBatchGenerator:
         ast_private_required = 0
         ast_transient_per_lane = []
         reserve_draft = getattr(self.draft, "extra_memory_reservation", None)
+        reserve_draft_cache = getattr(self.draft, "round_cache_reservation", None)
         reserve_plain_cache = None
         if (
             not prefill and append == 1
@@ -15415,7 +15416,16 @@ class ExternalDraftBatchGenerator:
                 declared = ExternalDraftBatchGenerator._declared_decode_cache_reservation(self, lane, lane_append, len(lanes))
                 if declared is not None:
                     cache_required = declared
-            required += cache_required + 3*draft_bytes
+            draft_required = 3 * draft_bytes
+            if callable(reserve_draft_cache):
+                declared = reserve_draft_cache(
+                    lane.draft_cache, pending_tokens=int(lane.tail.shape[1]), prefill=prefill)
+                if declared is not None:
+                    if type(declared) is not int or declared < 0:
+                        raise ValueError("draft round cache reservation must be nonnegative bytes")
+                    draft_required = declared
+                    _bump(self.scheduler_stats, "external_declared_draft_reservation_lanes")
+            required += cache_required + draft_required
             required += lane_append*(target.num_hidden_layers*target_per_token + int(getattr(draft, "num_hidden_layers", 0) or 0)*draft_per_token)
             feature_width = getattr(draft, "feature_width", None) or target.hidden_size*len(self.layers)
             required += lane_append*int(feature_width)*8
