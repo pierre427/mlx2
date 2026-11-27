@@ -1,0 +1,74 @@
+=== 64 problems with readouts, 64 traces ===
+think length median 494 (p10 303, p90 796); guard trips: {'run_on': 42, None: 22}; natural closes 22
+previous run (no guard, cap 1800), same problems: think 76.6%, no-think 6.2%
+full-trace accuracy by guard outcome: {'run_on': '45% (n=42)', None: '95% (n=22)'}
+
+--- 1) Is it just more compute / search space? (forced answer after each kind of 'thinking')
+  nothink      accuracy   6.2%   mean answer entropy 1.373
+  empty        accuracy   4.7%   mean answer entropy 1.511
+  dots         accuracy   4.7%   mean answer entropy 1.922
+  other_trace  accuracy   0.0%   mean answer entropy 0.470
+  shuffled     accuracy  62.5%   mean answer entropy 0.494
+  cut25        accuracy  10.9%   mean answer entropy 1.197
+  cut50        accuracy  26.6%   mean answer entropy 0.826
+  cut75        accuracy  53.1%   mean answer entropy 0.449
+  full         accuracy  62.5%   mean answer entropy 0.403
+  cut-arm transitions (problems right at full): cut25 already right 15%; cut50 already right 40%; cut75 already right 82%; 
+
+--- 2) Confidence as a predictor
+  full      AUC(low entropy -> right) 0.938   AUC(top1 -> right) 0.939   acc 62%
+  cut50     AUC(low entropy -> right) 0.862   AUC(top1 -> right) 0.841   acc 27%
+  cut75     AUC(low entropy -> right) 0.953   AUC(top1 -> right) 0.950   acc 53%
+  shuffled  AUC(low entropy -> right) 0.860   AUC(top1 -> right) 0.841   acc 62%
+  dots      AUC(low entropy -> right) 0.574   AUC(top1 -> right) 0.579   acc 5%
+  nothink   AUC(low entropy -> right) 0.529   AUC(top1 -> right) 0.517   acc 6%
+    full-trace entropy in [0, 0.01):  21 problems, accuracy 95%
+    full-trace entropy in [0.01, 0.05):  15 problems, accuracy 87%
+    full-trace entropy in [0.05, 0.2):   8 problems, accuracy 75%
+    full-trace entropy in [0.2, 0.7):   4 problems, accuracy 25%
+    full-trace entropy in [0.7, 99):  16 problems, accuracy 0%
+  early exit at cut50: confident (entropy<0.05) on 10/64; those answers right 90%, equal to full-trace answer 100%
+  early exit at cut75: confident (entropy<0.05) on 32/64; those answers right 94%, equal to full-trace answer 100%
+  confidently wrong (entropy<0.05 and wrong) with full       : 5% of problems
+  confidently wrong (entropy<0.05 and wrong) with shuffled   : 3% of problems
+  confidently wrong (entropy<0.05 and wrong) with other_trace: 45% of problems
+  confidently wrong (entropy<0.05 and wrong) with dots       : 0% of problems
+
+--- 3) Ablations of MLP neurons during the readout (layers 12-28, zeroed; trace fixed)
+  sel64      accuracy  64.1% (full 62.5%)  right->wrong  0  wrong->right  1  mean d(gold first-token logprob) -0.076  entropy 0.387
+  act64      accuracy  29.7% (full 62.5%)  right->wrong 22  wrong->right  1  mean d(gold first-token logprob) -1.596  entropy 1.462
+  rnd64_s0   accuracy  62.5% (full 62.5%)  right->wrong  0  wrong->right  0  mean d(gold first-token logprob) -0.024  entropy 0.414
+  rnd64_s1   accuracy  62.5% (full 62.5%)  right->wrong  0  wrong->right  0  mean d(gold first-token logprob) +0.022  entropy 0.397
+  rnd64_s2   accuracy  60.9% (full 62.5%)  right->wrong  1  wrong->right  0  mean d(gold first-token logprob) -0.064  entropy 0.420
+  sel256     accuracy  64.1% (full 62.5%)  right->wrong  0  wrong->right  1  mean d(gold first-token logprob) -0.027  entropy 0.434
+  rnd256_s0  accuracy  64.1% (full 62.5%)  right->wrong  0  wrong->right  1  mean d(gold first-token logprob) -0.122  entropy 0.374
+
+--- 4) Thinking GENERATED with neurons ablated
+  sel64     n=20 accuracy 45%  median think length 443  trips {None: 3, 'run_on': 17}
+  rnd64_s0  n=20 accuracy 30%  median think length 423  trips {None: 6, 'run_on': 14}
+  unablated, same problems: accuracy 45%, median length 442
+
+--- 5) Attention of the answer-choice token (mean over heads)
+  gold number found in trace for 47/64 problems
+  layer              1     4     8    12    14    16    18    20    22    24    26    28
+  on prompt       0.03  0.62  0.47  0.40  0.42  0.53  0.37  0.58  0.70  0.75  0.71  0.73
+  on trace        0.63  0.18  0.16  0.38  0.32  0.22  0.40  0.25  0.23  0.09  0.13  0.04
+  on 'answer is'  0.34  0.20  0.37  0.22  0.26  0.25  0.23  0.17  0.07  0.16  0.17  0.23
+  on gold number  0.00  0.00  0.00  0.02  0.02  0.01  0.04  0.05  0.04  0.01  0.01  0.00
+  best head gold  0.02  0.04  0.02  0.09  0.12  0.06  0.15  0.29  0.18  0.06  0.03  0.00
+  strongest copy layer 20: AUC(best-head attention on gold number -> right) 0.920
+
+--- 6) How selective is thinking?
+  participation ratio (1 = all neurons equally used)
+  layer              1     4     8    12    14    16    18    20    22    24    26    28
+  thinking        0.84  0.78  0.83  0.69  0.69  0.62  0.60  0.53  0.38  0.29  0.17  0.02
+  prompt reading  0.81  0.76  0.76  0.69  0.68  0.62  0.52  0.47  0.36  0.38  0.22  0.04
+  cross-problem overlap (Jaccard) of each problem's top-1% neurons
+  thinking        0.39  0.50  0.46  0.37  0.33  0.46  0.35  0.39  0.50  0.58  0.61  0.75
+  prompt reading  0.50  0.43  0.39  0.40  0.37  0.45  0.46  0.49  0.52  0.42  0.52  0.70
+  share of neurons >e x more active on digit/operator tokens | on word tokens (within thinking)
+  digit-selective 1.0%  0.5%  0.1%  0.1%  0.2%  0.2%  0.9%  1.8%  1.1%  2.1%  1.8%  2.5%
+  word-selective  8.9%  0.3%  0.0%  0.1%  0.1%  0.2%  1.3%  1.7%  0.9%  1.2%  0.9%  1.7%
+  sel64: mean digit-vs-word log ratio -0.19
+  act64: mean digit-vs-word log ratio +0.04
+  rnd64_s0: mean digit-vs-word log ratio -0.06

@@ -1,0 +1,47 @@
+problems 80: no-think acc 1.25%, think acc 66.25% (think closed 72%)
+groups: H (reasoning helps) 53, B (both right) 0, W (both wrong) 26, R (think hurts) 1
+think length (closed): median 909 tokens
+
+1) Confidence at the answer-choice token (position predicting the first answer digit)
+  nothink  group H wrong n= 53: entropy 0.058  top1 p 0.008  margin -8.06 nats
+  nothink  group R right n=  1: entropy 0.008  top1 p 0.000  margin -8.13 nats
+  nothink  group W wrong n= 25: entropy 0.092  top1 p 0.019  margin -7.76 nats
+  think    group H right n= 53: entropy 0.239  top1 p 0.065  margin -8.97 nats
+  think    group W wrong n=  5: entropy 0.007  top1 p 0.001  margin -12.38 nats
+  no-think: AUC of (low entropy -> correct) = 0.385
+
+2) Logit lens at the no-think answer position: rank of the CORRECT first token per layer
+  group H n=53: median rank at layers [1, 8, 15, 22, 26, 27, 28]: [16675, 3348, 81, 6, 4, 4, 3] | problems where gold is top-10 at SOME layer: 94%, top-1 at some layer: 25%
+  group W n=25: median rank at layers [1, 8, 15, 22, 26, 27, 28]: [16457, 3228, 49, 4, 3, 3, 3] | problems where gold is top-10 at SOME layer: 100%, top-1 at some layer: 40%
+
+3) Mean |MLP activation| per layer, by phase (averaged over problems)
+  layer:                 1      4      8     12     16     20     24     26     28
+  nothink  prompt    0.049  0.094  0.126  0.177  0.236  0.508  0.486  0.620  1.068
+  nothink  answer    0.041  0.086  0.107  0.160  0.247  0.576  0.485  0.639  0.972
+  think    think     0.038  0.079  0.100  0.144  0.235  0.571  0.488  0.636  0.935
+  think    answer    0.039  0.083  0.103  0.146  0.245  0.571  0.495  0.646  0.969
+
+   share of |activation| mass in the top 1% of neurons (mean over layers):
+   nothink  prompt  0.087
+   nothink  answer  0.082
+   think    think   0.075
+   think    answer  0.079
+
+4) Neurons that fire more while thinking than while answering directly
+  layer 7: top think/answer log-ratio neurons [2701, 2, 671, 148, 176] ratios [0.8600000143051147, 0.8100000023841858, 0.7599999904632568, 0.7300000190734863, 0.6899999976158142]
+  layer 14: top think/answer log-ratio neurons [1656, 1501, 2694, 2567, 2905] ratios [1.0700000524520874, 0.8500000238418579, 0.7900000214576721, 0.7400000095367432, 0.7300000190734863]
+  layer 21: top think/answer log-ratio neurons [1566, 1371, 2335, 2711, 1026] ratios [1.9299999475479126, 1.7699999809265137, 1.6699999570846558, 1.5, 1.4199999570846558]
+  layer 28: top think/answer log-ratio neurons [1463, 1045, 942, 362, 2268] ratios [1.5199999809265137, 1.3700000047683716, 1.340000033378601, 1.2999999523162842, 1.2599999904632568]
+  cosine(think-phase profile, direct-answer profile) by layer: min 0.948 at layer 23, max 0.984
+  held-out (odd problems) layer 14: AUC of 'reasoning-neuron' activation at the no-think answer token for correct vs wrong = nan (n right 0, wrong 39)
+  held-out (odd problems) layer 21: AUC of 'reasoning-neuron' activation at the no-think answer token for correct vs wrong = nan (n right 0, wrong 39)
+  held-out (odd problems) layer 28: AUC of 'reasoning-neuron' activation at the no-think answer token for correct vs wrong = nan (n right 0, wrong 39)
+
+5) Same problem, answer-choice token, think vs no-think: per-layer cosine of MLP activation and residual
+  group H n=53: MLP-act cosine layers [1, 4, 8, 12, 16, 20, 24, 26, 28]: [0.3400000035762787, 0.4000000059604645, 0.3499999940395355, 0.4099999964237213, 0.41999998688697815, 0.4399999976158142, 0.5099999904632568, 0.6399999856948853, 0.800000011920929]
+             residual cosine: [0.6399999856948853, 0.6499999761581421, 0.6700000166893005, 0.6800000071525574, 0.6700000166893005, 0.6299999952316284, 0.7599999904632568, 0.8500000238418579, 0.6800000071525574]
+
+6) Next-token entropy by phase (mean over tokens)
+  think    think   tokens  81052: mean entropy 0.455, share of tokens with entropy > 1 nat 18.1%
+  think    answer  tokens  11779: mean entropy 0.244, share of tokens with entropy > 1 nat 7.7%
+  nothink  answer  tokens   3200: mean entropy 0.418, share of tokens with entropy > 1 nat 14.9%

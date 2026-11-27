@@ -1,0 +1,4 @@
+loaded in 4s
+layers 30 dense I 2112 experts 128 close 101 open [100, 45518, 107] stop [1, 50, 106]
+N 0 nothink True act64 False t=6s
+N 1 nothink True act64 False t=8s

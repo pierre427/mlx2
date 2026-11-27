@@ -1,0 +1,9 @@
+gpuq: acquired Wed Nov 25 19:07:35 EST 2026 lease=ens-donor-20261125-ens-donor-logits-20261125 swapouts=300118330
+19:07:35 start q06 Qwen3-0.6B-BF16-microscaling-source cap 600s swap 8647.44M
+19:17:45 done q06 rc=0 {"model": "~/mlx-models/Qwen3-0.6B-BF16-microscaling-source", "window": 2048, "topk": 32, "fit": {"docs": 1673, "tokens": 626932, "seconds": 599.8530430793762, "stopped": true}, "val":
+19:17:45 start q4b Qwen3-4B cap 900s swap 13967.06M
+19:19:06 done q4b rc=0 loaded ~/mlx-models/Qwen3-4B in 0.8s
+19:19:06 start nem30 NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16-mlx-8Bit cap 1500s swap 13307.25M
+19:44:11 done nem30 rc=0 19:44:11 plan done donor_nem30 rc -9
+19:44:11 all done
+gpuq: releasing Wed Nov 25 19:44:11 EST 2026 rc=0 swapouts_delta=11178013

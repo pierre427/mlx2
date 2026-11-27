@@ -1,0 +1,9 @@
+gpuq: acquired Thu Nov 26 09:29:59 EST 2026 lease=ens-donor-20261125-ens-gemma-hard2-20261126 swapouts=318737788
+09:29:59 swap used at start 9810M
+09:29:59 smoke
+09:30:22 smoke rc=0
+09:30:22 full
+09:49:51 SWAP GUARD: used 17558M (start 9810M), stopping probe
+09:49:55 full rc=0
+09:49:55 swap used at end 11274M
+gpuq: releasing Thu Nov 26 09:49:55 EST 2026 rc=0 swapouts_delta=528088

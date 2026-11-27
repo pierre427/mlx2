@@ -1,0 +1,6 @@
+loaded ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit in 2.5s
+held: 353 docs 149892 tokens 45.4s (3304 tok/s)
+val: 201 docs 59882 tokens 19.1s (3130 tok/s)
+fit: 1795 docs 799607 tokens 262.2s (3050 tok/s)
+{"model": "~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit", "window": 2048, "topk": 32, "packed": true, "held": {"docs": 353, "tokens": 149892, "seconds": 45.36314010620117, "stopped": false}, "val": {"docs": 201, "tokens": 59882, "seconds": 19.12971019744873, "stopped": false}, "fit": {"docs": 1795, "tokens": 799607, "seconds": 262.20768690109253, "stopped": false}, "peak_gib": 39.44709047116339, "total_seconds": 330.20836997032166}
+q36 exit 0

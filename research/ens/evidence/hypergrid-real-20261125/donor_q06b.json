@@ -1,0 +1,20 @@
+{
+ "model": "~/mlx-models/Qwen3-0.6B-BF16-microscaling-source",
+ "window": 2048,
+ "topk": 32,
+ "packed": true,
+ "held": {
+  "docs": 353,
+  "tokens": 149744,
+  "seconds": 17.62796115875244,
+  "stopped": false
+ },
+ "val": {
+  "docs": 200,
+  "tokens": 59776,
+  "seconds": 7.406501293182373,
+  "stopped": false
+ },
+ "peak_gib": 11.844230692833662,
+ "total_seconds": 25.62327003479004
+}

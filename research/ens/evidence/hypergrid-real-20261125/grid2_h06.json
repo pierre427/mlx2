@@ -1,0 +1,257 @@
+{
+ "prefix": "donor_h06",
+ "W": 151645,
+ "alpha": 1.0,
+ "arms": {
+  "donor": {
+   "all": 2.8460006713867188,
+   "unseen_bigram": 4.853846073150635,
+   "unseen_4gram_seen_trigram": 1.9646397829055786
+  },
+  "KN ctx2": {
+   "stored": 726472,
+   "all": 5.088502397315488,
+   "unseen_bigram": 10.372117527634963,
+   "unseen_4gram_seen_trigram": 2.692559071002081
+  },
+  "SOFT ctx2": {
+   "stored": 15009767,
+   "all": 4.864985978269824,
+   "unseen_bigram": 9.623789069831874,
+   "unseen_4gram_seen_trigram": 2.771023759217235
+  },
+  "KN ctx3": {
+   "stored": 1387132,
+   "all": 5.139048459935471,
+   "unseen_bigram": 10.515086472976476,
+   "unseen_4gram_seen_trigram": 2.851592537682912
+  },
+  "SOFT ctx3": {
+   "stored": 34173628,
+   "all": 4.8484449061857475,
+   "unseen_bigram": 9.64063446549267,
+   "unseen_4gram_seen_trigram": 2.7979622926970835
+  },
+  "KN ctx4": {
+   "stored": 2114391,
+   "all": 5.168344657793265,
+   "unseen_bigram": 10.561957071403324,
+   "unseen_4gram_seen_trigram": 2.900122077400078
+  },
+  "SOFT ctx4": {
+   "stored": 56819355,
+   "all": 4.842047415881925,
+   "unseen_bigram": 9.652668049347211,
+   "unseen_4gram_seen_trigram": 2.8109771453216985
+  },
+  "CODE L14 km1024": {
+   "stored": 1758729,
+   "beta": 3000,
+   "all": 4.702322541628081,
+   "unseen_bigram": 9.077435905255571,
+   "unseen_4gram_seen_trigram": 2.89229307022695
+  },
+  "CODE+tok L14 km1024": {
+   "stored": 6614482,
+   "beta": 10000,
+   "all": 4.699752399786609,
+   "unseen_bigram": 9.087604818665287,
+   "unseen_4gram_seen_trigram": 2.8946112524439878
+  },
+  "GATE L14 km1024": {
+   "lambda_kn_by_log2_code_count": {
+    "0": 0.3,
+    "1": 0.3,
+    "2": 0.3,
+    "3": 0.3,
+    "4": 0.3,
+    "5": 0.3,
+    "6": 0.45,
+    "7": 0.0,
+    "8": 0.3,
+    "9": 0.3,
+    "10": 0.25,
+    "11": 0.3,
+    "12": 0.15
+   },
+   "all": 4.618500169102029,
+   "unseen_bigram": 8.895839955971184,
+   "unseen_4gram_seen_trigram": 2.8339079973505705
+  },
+  "CODE L14 km4096": {
+   "stored": 3091616,
+   "beta": 1000,
+   "all": 4.693951447567856,
+   "unseen_bigram": 9.254344321715132,
+   "unseen_4gram_seen_trigram": 2.808051427757716
+  },
+  "CODE+tok L14 km4096": {
+   "stored": 8553045,
+   "beta": 3000,
+   "all": 4.691397292469995,
+   "unseen_bigram": 9.27164099670862,
+   "unseen_4gram_seen_trigram": 2.806329543288377
+  },
+  "GATE L14 km4096": {
+   "lambda_kn_by_log2_code_count": {
+    "0": 0.3,
+    "1": 0.3,
+    "2": 1.0,
+    "3": 1.0,
+    "4": 0.2,
+    "5": 0.25,
+    "6": 0.25,
+    "7": 0.25,
+    "8": 0.25,
+    "9": 0.25,
+    "10": 0.3,
+    "11": 0.4,
+    "12": 0.3
+   },
+   "all": 4.609957192930006,
+   "unseen_bigram": 9.01683935031868,
+   "unseen_4gram_seen_trigram": 2.7722300874587185
+  },
+  "CODE L14 pq256x256": {
+   "stored": 4447990,
+   "beta": 3000,
+   "all": 4.758159557478539,
+   "unseen_bigram": 9.389739573534593,
+   "unseen_4gram_seen_trigram": 2.8550082260345127
+  },
+  "CODE+tok L14 pq256x256": {
+   "stored": 11340275,
+   "beta": 10000,
+   "all": 4.760515433124349,
+   "unseen_bigram": 9.402494591477115,
+   "unseen_4gram_seen_trigram": 2.862955967008634
+  },
+  "GATE L14 pq256x256": {
+   "lambda_kn_by_log2_code_count": {
+    "0": 0.2,
+    "1": 0.25,
+    "2": 0.35,
+    "3": 0.3,
+    "4": 0.25,
+    "5": 0.25,
+    "6": 0.25,
+    "7": 0.25,
+    "8": 0.2,
+    "9": 0.25,
+    "10": 0.25,
+    "11": 0.25,
+    "12": 0.25
+   },
+   "all": 4.680142503987803,
+   "unseen_bigram": 9.1716100789551,
+   "unseen_4gram_seen_trigram": 2.81757410073771
+  },
+  "CODE L28 km1024": {
+   "stored": 1385313,
+   "beta": 1000,
+   "all": 4.397949389287572,
+   "unseen_bigram": 8.168969957537541,
+   "unseen_4gram_seen_trigram": 2.8542375412190446
+  },
+  "CODE+tok L28 km1024": {
+   "stored": 8949875,
+   "beta": 1000,
+   "all": 4.391734922730981,
+   "unseen_bigram": 8.207615590754495,
+   "unseen_4gram_seen_trigram": 2.845144530602168
+  },
+  "GATE L28 km1024": {
+   "lambda_kn_by_log2_code_count": {
+    "0": 0.3,
+    "1": 0.3,
+    "2": 0.3,
+    "3": 0.3,
+    "4": 0.0,
+    "5": 0.3,
+    "6": 0.3,
+    "7": 0.45,
+    "8": 0.5,
+    "9": 0.25,
+    "10": 0.25,
+    "11": 0.2,
+    "12": 0.25
+   },
+   "all": 4.305079948504035,
+   "unseen_bigram": 8.063754053601027,
+   "unseen_4gram_seen_trigram": 2.7575033313056236
+  },
+  "CODE L28 km4096": {
+   "stored": 2512658,
+   "beta": 300,
+   "all": 4.347282350746057,
+   "unseen_bigram": 8.339948634614878,
+   "unseen_4gram_seen_trigram": 2.7162825661810195
+  },
+  "CODE+tok L28 km4096": {
+   "stored": 11447329,
+   "beta": 1000,
+   "all": 4.343184592307435,
+   "unseen_bigram": 8.35961363606643,
+   "unseen_4gram_seen_trigram": 2.708158735255064
+  },
+  "GATE L28 km4096": {
+   "lambda_kn_by_log2_code_count": {
+    "0": 0.3,
+    "1": 0.3,
+    "2": 0.3,
+    "3": 0.55,
+    "4": 0.45,
+    "5": 0.35,
+    "6": 0.25,
+    "7": 0.2,
+    "8": 0.2,
+    "9": 0.2,
+    "10": 0.7,
+    "11": 0.3,
+    "12": 0.3
+   },
+   "all": 4.263439070751089,
+   "unseen_bigram": 8.151413737048973,
+   "unseen_4gram_seen_trigram": 2.659897321086464
+  },
+  "CODE L28 pq256x256": {
+   "stored": 4823755,
+   "beta": 300,
+   "all": 4.498723770684941,
+   "unseen_bigram": 8.64053892609778,
+   "unseen_4gram_seen_trigram": 2.795487946340982
+  },
+  "CODE+tok L28 pq256x256": {
+   "stored": 15679003,
+   "beta": 300,
+   "all": 4.492863663880451,
+   "unseen_bigram": 8.703045743928055,
+   "unseen_4gram_seen_trigram": 2.7680690011190774
+  },
+  "GATE L28 pq256x256": {
+   "lambda_kn_by_log2_code_count": {
+    "0": 0.3,
+    "1": 0.35,
+    "2": 0.35,
+    "3": 0.2,
+    "4": 0.2,
+    "5": 0.2,
+    "6": 0.2,
+    "7": 0.2,
+    "8": 0.25,
+    "9": 0.25,
+    "10": 0.3,
+    "11": 0.2,
+    "12": 0.2
+   },
+   "all": 4.394697918752063,
+   "unseen_bigram": 8.466913087451598,
+   "unseen_4gram_seen_trigram": 2.7070548220987045
+  }
+ },
+ "slice_sizes": {
+  "all": 149318,
+  "unseen_bigram": 34176,
+  "unseen_4gram_seen_trigram": 35586
+ }
+}

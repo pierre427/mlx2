@@ -1,0 +1,102 @@
+{
+ "prefix": "donor_q4b",
+ "vocab": 151645,
+ "fit_events": 796842,
+ "slice_sizes": {
+  "all": 149318,
+  "unseen_bigram": 34172,
+  "unseen_trigram_seen_bigram": 52693
+ },
+ "arms": {
+  "donor": {
+   "all": 2.4523746967315674,
+   "unseen_bigram": 4.273015022277832,
+   "unseen_trigram_seen_bigram": 2.591681480407715
+  },
+  "A_kn": {
+   "stored": 878395,
+   "all": 5.088354958294324,
+   "unseen_bigram": 10.372295687653303,
+   "unseen_trigram_seen_bigram": 5.0149102977612925
+  },
+  "A_add": {
+   "stored": 878395,
+   "b2": 10,
+   "b3": 10,
+   "all": 5.608683606012561,
+   "unseen_bigram": 12.371024761831713,
+   "unseen_trigram_seen_bigram": 5.1331180285372335
+  },
+  "S_soft a=0.25": {
+   "stored": 15775779,
+   "val": 5.0165569546922155,
+   "b2": 10,
+   "b3": 10,
+   "all": 5.050527864737359,
+   "unseen_bigram": 10.359996856042175,
+   "unseen_trigram_seen_bigram": 4.8980249420940725
+  },
+  "S_soft a=1.0": {
+   "stored": 15775779,
+   "val": 4.890405644996412,
+   "b2": 10,
+   "b3": 10,
+   "all": 4.927081513181723,
+   "unseen_bigram": 10.049091086338159,
+   "unseen_trigram_seen_bigram": 4.802969283570781
+  },
+  "S_soft a=4.0": {
+   "stored": 15775779,
+   "val": 4.912971911076093,
+   "b2": 10,
+   "b3": 10,
+   "all": 4.954027204051837,
+   "unseen_bigram": 10.179544588277617,
+   "unseen_trigram_seen_bigram": 4.832353254756284
+  },
+  "S_promote a=0.25": {
+   "stored": 1426852,
+   "val": 5.370428635599009,
+   "b2": 10,
+   "b3": 10,
+   "all": 5.403218032870479,
+   "unseen_bigram": 11.673258050629538,
+   "unseen_trigram_seen_bigram": 5.0194456288402725
+  },
+  "S_promote a=1.0": {
+   "stored": 1426852,
+   "val": 5.356220767111784,
+   "b2": 10,
+   "b3": 10,
+   "all": 5.389160471884555,
+   "unseen_bigram": 11.67898435809166,
+   "unseen_trigram_seen_bigram": 4.991480547936828
+  },
+  "S_promote a=4.0": {
+   "stored": 1426852,
+   "val": 5.518193867152973,
+   "b2": 10,
+   "b3": 10,
+   "all": 5.551441586682828,
+   "unseen_bigram": 12.129224194125339,
+   "unseen_trigram_seen_bigram": 5.124773606318984
+  },
+  "G_gate": {
+   "soft_arm": "S_soft a=1.0",
+   "lambda_memory_by_log2_ctx_count": {
+    "0": 0.3,
+    "1": 0.2,
+    "2": 0.25,
+    "3": 0.35,
+    "4": 0.4,
+    "5": 0.4,
+    "6": 0.45,
+    "7": 0.45,
+    "8": 0.5
+   },
+   "all": 4.794187425128055,
+   "unseen_bigram": 9.507840235920552,
+   "unseen_trigram_seen_bigram": 4.772920209803697
+  }
+ }
+}

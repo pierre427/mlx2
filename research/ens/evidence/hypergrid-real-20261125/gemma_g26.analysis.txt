@@ -1,0 +1,46 @@
+=== 48 problems; think length median 394 (p10 182, p90 1288); budget-forced 0; natural closes 48
+
+--- 1) what preceded 'The answer is'
+  nothink      accuracy  58.3%   answer entropy 0.227
+  empty        accuracy  52.1%   answer entropy 0.281
+  dots         accuracy  52.1%   answer entropy 0.257
+  other_trace  accuracy   6.2%   answer entropy 0.085
+  shuffled     accuracy  97.9%   answer entropy 0.001
+  cut25        accuracy  75.0%   answer entropy 0.069
+  cut50        accuracy  97.9%   answer entropy 0.035
+  cut75        accuracy 100.0%   answer entropy 0.001
+  full         accuracy 100.0%   answer entropy 0.000
+  of problems right at full, already right at: cut25 75%, cut50 98%, cut75 100%
+
+--- 2) confidence
+  full      AUC(low entropy -> right) nan  acc 100%
+  cut50     AUC(low entropy -> right) 0.936  acc 98%
+  cut75     AUC(low entropy -> right) nan  acc 100%
+  shuffled  AUC(low entropy -> right) 0.979  acc 98%
+  nothink   AUC(low entropy -> right) 0.887  acc 58%
+    full entropy [0, 0.01):  48 problems, accuracy 100%
+  early exit cut50: confident 44/48, right 100%, same as full 100%
+  early exit cut75: confident 48/48, right 100%, same as full 100%
+  confidently wrong with full       : 0%
+  confidently wrong with shuffled   : 2%
+  confidently wrong with other_trace: 71%
+
+--- 3) ablations on held-out odd problems (n=24); sets chosen on even problems, layers 13-30
+  sel64 vs act64 overlap 0.034
+  sel64     accuracy 100.0% (full 100.0%)  right->wrong  0  wrong->right  0  entropy 0.000
+  act64     accuracy   4.2% (full 100.0%)  right->wrong 23  wrong->right  0  entropy 1.081
+  rnd64_s0  accuracy 100.0% (full 100.0%)  right->wrong  0  wrong->right  0  entropy 0.000
+  rnd64_s1  accuracy 100.0% (full 100.0%)  right->wrong  0  wrong->right  0  entropy 0.000
+  esel8     accuracy 100.0% (full 100.0%)  right->wrong  0  wrong->right  0  entropy 0.000
+  eact8     accuracy 100.0% (full 100.0%)  right->wrong  0  wrong->right  0  entropy 0.003
+  ernd8     accuracy 100.0% (full 100.0%)  right->wrong  0  wrong->right  0  entropy 0.000
+
+--- 6) selectivity
+  dense participation ratio think  layers [1, 6, 11, 16, 21, 26, 30]: [0.15, 0.56, 0.31, 0.18, 0.14, 0.16, 0.27]
+  dense participation ratio prompt layers [1, 6, 11, 16, 21, 26, 30]: [0.12, 0.36, 0.35, 0.16, 0.1, 0.12, 0.29]
+  dense top-1% cross-problem Jaccard think : [0.68, 0.59, 0.74, 0.72, 0.79, 0.76, 0.61]
+  dense top-1% cross-problem Jaccard prompt: [0.81, 0.74, 0.81, 0.84, 0.77, 0.76, 0.71]
+  expert usage entropy think  (max 4.85): mean 3.71, layers [1, 6, 11, 16, 21, 26, 30]: [4.0, 3.85, 3.32, 3.88, 3.59, 3.6, 3.89]
+  expert top-8 cross-problem Jaccard think : mean 0.54
+  expert usage entropy prompt (max 4.85): mean 3.75, layers [1, 6, 11, 16, 21, 26, 30]: [4.03, 3.97, 3.53, 3.89, 3.62, 3.8, 3.73]
+  expert top-8 cross-problem Jaccard prompt: mean 0.57

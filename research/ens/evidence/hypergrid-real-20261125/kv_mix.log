@@ -1,0 +1,14 @@
+tokens: head 30 paper1 1486 paper2 1412
+rope self-check max err 8.34e-07
+injected cache lengths: {'none': 24, 'text': 2928, 'parallel': 2928, 'pooled': 286, 'blended': 158}
+q1 done 3s
+q2 done 4s
+q3 done 6s
+q4 done 8s
+q5 done 10s
+q6 done 11s
+q7 done 13s
+q8 done 14s
+q9 done 16s
+q10 done 18s
+done 17.804206132888794

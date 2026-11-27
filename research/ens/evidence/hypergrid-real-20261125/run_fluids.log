@@ -1,0 +1,13 @@
+[    0.6s] V=10000 fit=1969235 val=402982 held=390722 unk_rate_held=0.030
+[    0.7s] {'all': 390722, 'unseen_bigram': 45585, 'unseen_trigram_seen_bigram': 118926}
+[    0.9s] A {'stored': 1368631, 'val': 4.598947321616393, 'all': 4.5826379855055555, 'unseen_bigram': 10.35772437613442, 'unseen_trigram_seen_bigram': 5.835077729757772}
+[    7.7s] svd done; top singular values [379.8999938964844, 215.39999389648438, 200.89999389648438, 197.3000030517578, 156.3000030517578, 149.60000610351562, 138.5, 132.10000610351562]
+[    8.1s] B k=64 {'all': 5.61, 'unseen_bigram': 8.701, 'unseen_trigram_seen_bigram': 6.267} | C lam=0.8 {'all': 4.495, 'unseen_bigram': 9.421, 'unseen_trigram_seen_bigram': 5.694}
+[    8.5s] B k=256 {'all': 5.435, 'unseen_bigram': 9.133, 'unseen_trigram_seen_bigram': 6.153} | C lam=0.8 {'all': 4.492, 'unseen_bigram': 9.504, 'unseen_trigram_seen_bigram': 5.671}
+[    9.0s] B k=1024 {'all': 5.176, 'unseen_bigram': 9.476, 'unseen_trigram_seen_bigram': 6.029} | C lam=0.8 {'all': 4.489, 'unseen_bigram': 9.629, 'unseen_trigram_seen_bigram': 5.66}
+[   75.1s] MLP epoch 0 val_sub 4.583
+[  142.7s] MLP epoch 1 val_sub 4.515
+[  208.7s] MLP epoch 2 val_sub 4.510
+[  274.0s] MLP epoch 3 val_sub 4.521
+[  439.6s] D {'stored': 3243024, 'best_epoch': 2, 'val': 4.512014000356944, 'all': 4.491468173316477, 'unseen_bigram': 8.943380978746857, 'unseen_trigram_seen_bigram': 5.395506438096035} A+D {'lambda_memory': 0.45, 'all': 4.361629485510874, 'unseen_bigram': 9.07245725250688, 'unseen_trigram_seen_bigram': 5.416995062684047}
+[  439.6s] wrote results_fluids.json

@@ -1,0 +1,18 @@
+[   0.3s] W=151645 fit=796454 val=59547 held=149318
+[   0.6s] donor {'all': 2.8460006713867188, 'unseen_bigram': 4.853846073150635, 'unseen_4gram_seen_trigram': 1.9646397829055786}
+[   7.5s] tables built {1: (226615, 3253006), 2: (499857, 11756761), 3: (660660, 19163861), 4: (727259, 22645727)}
+[   8.0s] soft betas {1: 30, 2: 30, 3: 100, 4: 30}
+[   8.0s] ctx2 KN {'all': 5.089, 'unseen_bigram': 10.372, 'unseen_4gram_seen_trigram': 2.693} | SOFT {'all': 4.865, 'unseen_bigram': 9.624, 'unseen_4gram_seen_trigram': 2.771} stored 726472/15009767
+[   8.0s] ctx3 KN {'all': 5.139, 'unseen_bigram': 10.515, 'unseen_4gram_seen_trigram': 2.852} | SOFT {'all': 4.848, 'unseen_bigram': 9.641, 'unseen_4gram_seen_trigram': 2.798} stored 1387132/34173628
+[   8.1s] ctx4 KN {'all': 5.168, 'unseen_bigram': 10.562, 'unseen_4gram_seen_trigram': 2.9} | SOFT {'all': 4.842, 'unseen_bigram': 9.653, 'unseen_4gram_seen_trigram': 2.811} stored 2114391/56819355
+[  15.7s] L14 PCA done
+[  53.5s] L14 codes done
+[  56.9s] L14 km1024: CODE {'all': 4.702, 'unseen_bigram': 9.077, 'unseen_4gram_seen_trigram': 2.892} | +tok {'all': 4.7, 'unseen_bigram': 9.088, 'unseen_4gram_seen_trigram': 2.895} | GATE {'all': 4.619, 'unseen_bigram': 8.896, 'unseen_4gram_seen_trigram': 2.834} stored 1758729+4855753
+[  60.1s] L14 km4096: CODE {'all': 4.694, 'unseen_bigram': 9.254, 'unseen_4gram_seen_trigram': 2.808} | +tok {'all': 4.691, 'unseen_bigram': 9.272, 'unseen_4gram_seen_trigram': 2.806} | GATE {'all': 4.61, 'unseen_bigram': 9.017, 'unseen_4gram_seen_trigram': 2.772} stored 3091616+5461429
+[  63.2s] L14 pq256x256: CODE {'all': 4.758, 'unseen_bigram': 9.39, 'unseen_4gram_seen_trigram': 2.855} | +tok {'all': 4.761, 'unseen_bigram': 9.402, 'unseen_4gram_seen_trigram': 2.863} | GATE {'all': 4.68, 'unseen_bigram': 9.172, 'unseen_4gram_seen_trigram': 2.818} stored 4447990+6892285
+[  70.4s] L28 PCA done
+[ 107.5s] L28 codes done
+[ 110.5s] L28 km1024: CODE {'all': 4.398, 'unseen_bigram': 8.169, 'unseen_4gram_seen_trigram': 2.854} | +tok {'all': 4.392, 'unseen_bigram': 8.208, 'unseen_4gram_seen_trigram': 2.845} | GATE {'all': 4.305, 'unseen_bigram': 8.064, 'unseen_4gram_seen_trigram': 2.758} stored 1385313+7564562
+[ 113.5s] L28 km4096: CODE {'all': 4.347, 'unseen_bigram': 8.34, 'unseen_4gram_seen_trigram': 2.716} | +tok {'all': 4.343, 'unseen_bigram': 8.36, 'unseen_4gram_seen_trigram': 2.708} | GATE {'all': 4.263, 'unseen_bigram': 8.151, 'unseen_4gram_seen_trigram': 2.66} stored 2512658+8934671
+[ 116.7s] L28 pq256x256: CODE {'all': 4.499, 'unseen_bigram': 8.641, 'unseen_4gram_seen_trigram': 2.795} | +tok {'all': 4.493, 'unseen_bigram': 8.703, 'unseen_4gram_seen_trigram': 2.768} | GATE {'all': 4.395, 'unseen_bigram': 8.467, 'unseen_4gram_seen_trigram': 2.707} stored 4823755+10855248
+[ 116.7s] wrote grid2_h06.json

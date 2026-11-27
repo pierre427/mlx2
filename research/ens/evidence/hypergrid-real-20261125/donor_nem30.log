@@ -1,0 +1,6 @@
+19:19:08 plan start donor_q06b cap 300s
+19:19:35 plan done donor_q06b rc 0
+19:19:35 plan start donor_q4b cap 720s
+19:25:27 plan done donor_q4b rc 0
+19:25:27 plan start donor_nem30 cap 1500s
+19:44:11 plan done donor_nem30 rc -9

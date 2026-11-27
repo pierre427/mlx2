@@ -1,0 +1,23 @@
+{
+ "deadline": 1795655075,
+ "steps": [
+  {
+   "out": "donor_q06b",
+   "model": "~/mlx-models/Qwen3-0.6B-BF16-microscaling-source",
+   "budget": "held=150000,val=60000",
+   "cap": 300
+  },
+  {
+   "out": "donor_q4b",
+   "model": "~/mlx-models/Qwen3-4B",
+   "budget": "held=150000,val=60000,fit=800000",
+   "cap": 720
+  },
+  {
+   "out": "donor_nem30",
+   "model": "~/mlx-models/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16-mlx-8Bit",
+   "budget": "held=150000,val=60000,fit=800000",
+   "cap": 1500
+  }
+ ]
+}

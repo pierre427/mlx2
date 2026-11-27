@@ -1,0 +1,54 @@
+problems 80: no-think acc 5.00%, think acc 65.00% (think closed 72%)
+groups: H (reasoning helps) 49, B (both right) 3, W (both wrong) 27, R (think hurts) 1
+think length (closed): median 12 tokens
+
+1) Confidence at the answer-choice token (position predicting the first answer digit)
+  nothink  group B right n=  3: entropy 1.432  top1 p 0.488  margin 0.71 nats
+  nothink  group H wrong n= 49: entropy 1.253  top1 p 0.587  margin 1.43 nats
+  nothink  group R right n=  1: entropy 1.077  top1 p 0.733  margin 1.75 nats
+  nothink  group W wrong n= 27: entropy 1.439  top1 p 0.518  margin 1.09 nats
+  think    group B right n=  3: entropy 0.005  top1 p 1.000  margin 9.04 nats
+  think    group H right n= 49: entropy 0.022  top1 p 0.997  margin 7.60 nats
+  think    group R wrong n=  1: entropy 0.065  top1 p 0.992  margin 6.13 nats
+  think    group W wrong n= 17: entropy 0.481  top1 p 0.845  margin 4.49 nats
+  think    group W right n= 10: entropy 0.141  top1 p 0.967  margin 4.96 nats
+  no-think: AUC of (low entropy -> correct) = 0.500
+
+2) Logit lens at the no-think answer position: rank of the CORRECT first token per layer
+  group H n=49: median rank at layers [1, 8, 15, 22, 26, 27, 28]: [125383, 221, 184, 7, 7, 5, 2] | problems where gold is top-10 at SOME layer: 100%, top-1 at some layer: 37%
+  group B n=3: median rank at layers [1, 8, 15, 22, 26, 27, 28]: [124881, 165, 233, 0, 0, 0, 0] | problems where gold is top-10 at SOME layer: 100%, top-1 at some layer: 100%
+  group W n=27: median rank at layers [1, 8, 15, 22, 26, 27, 28]: [121685, 115, 137, 5, 6, 5, 2] | problems where gold is top-10 at SOME layer: 100%, top-1 at some layer: 30%
+
+3) Mean |MLP activation| per layer, by phase (averaged over problems)
+  layer:                 1      4      8     12     16     20     24     26     28
+  nothink  prompt    0.049  0.094  0.126  0.177  0.236  0.508  0.486  0.620  1.068
+  nothink  answer    0.035  0.081  0.105  0.157  0.247  0.545  0.473  0.614  0.974
+  think    think     0.038  0.079  0.100  0.144  0.235  0.571  0.488  0.636  0.937
+  think    answer    0.036  0.082  0.102  0.149  0.235  0.550  0.472  0.611  0.972
+
+   share of |activation| mass in the top 1% of neurons (mean over layers):
+   nothink  prompt  0.087
+   nothink  answer  0.098
+   think    think   0.075
+   think    answer  0.093
+
+4) Neurons that fire more while thinking than while answering directly
+  layer 7: top think/answer log-ratio neurons [489, 2032, 2701, 1620, 2] ratios [1.1100000143051147, 1.0700000524520874, 1.059999942779541, 0.9399999976158142, 0.8899999856948853]
+  layer 14: top think/answer log-ratio neurons [1246, 2567, 2131, 581, 744] ratios [1.2000000476837158, 1.1100000143051147, 1.0499999523162842, 1.0399999618530273, 1.0299999713897705]
+  layer 21: top think/answer log-ratio neurons [456, 1026, 2711, 1084, 1206] ratios [2.0799999237060547, 1.590000033378601, 1.5700000524520874, 1.5499999523162842, 1.5]
+  layer 28: top think/answer log-ratio neurons [2097, 2601, 1045, 1108, 37] ratios [2.9700000286102295, 2.390000104904175, 2.380000114440918, 1.690000057220459, 1.6100000143051147]
+  cosine(think-phase profile, direct-answer profile) by layer: min 0.880 at layer 28, max 0.966
+  held-out (odd problems) layer 14: AUC of 'reasoning-neuron' activation at the no-think answer token for correct vs wrong = 0.487 (n right 2, wrong 38)
+  held-out (odd problems) layer 21: AUC of 'reasoning-neuron' activation at the no-think answer token for correct vs wrong = 0.553 (n right 2, wrong 38)
+  held-out (odd problems) layer 28: AUC of 'reasoning-neuron' activation at the no-think answer token for correct vs wrong = 0.908 (n right 2, wrong 38)
+
+5) Same problem, answer-choice token, think vs no-think: per-layer cosine of MLP activation and residual
+  group H n=49: MLP-act cosine layers [1, 4, 8, 12, 16, 20, 24, 26, 28]: [0.9700000286102295, 0.949999988079071, 0.9100000262260437, 0.6399999856948853, 0.5199999809265137, 0.49000000953674316, 0.7599999904632568, 0.8600000143051147, 0.8600000143051147]
+             residual cosine: [0.9900000095367432, 0.9900000095367432, 0.9700000286102295, 0.9200000166893005, 0.8399999737739563, 0.7799999713897705, 0.8399999737739563, 0.9100000262260437, 0.8799999952316284]
+  group B n=3: MLP-act cosine layers [1, 4, 8, 12, 16, 20, 24, 26, 28]: [0.9700000286102295, 0.949999988079071, 0.8899999856948853, 0.6899999976158142, 0.550000011920929, 0.5199999809265137, 0.7400000095367432, 0.8600000143051147, 0.8500000238418579]
+             residual cosine: [0.9900000095367432, 0.9900000095367432, 0.9700000286102295, 0.9200000166893005, 0.8500000238418579, 0.800000011920929, 0.8399999737739563, 0.9200000166893005, 0.8799999952316284]
+
+6) Next-token entropy by phase (mean over tokens)
+  think    think   tokens  81132: mean entropy 0.455, share of tokens with entropy > 1 nat 18.1%
+  think    answer  tokens    826: mean entropy 0.491, share of tokens with entropy > 1 nat 19.7%
+  nothink  answer  tokens    752: mean entropy 0.723, share of tokens with entropy > 1 nat 32.6%

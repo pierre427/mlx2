@@ -1,0 +1,366 @@
+{
+ "vocab": 10000,
+ "fit_tokens": 1969235,
+ "held_tokens": 390722,
+ "slice_sizes": {
+  "all": 390722,
+  "unseen_bigram": 45585,
+  "unseen_trigram_seen_bigram": 118926
+ },
+ "arms": {
+  "A hypergrid": {
+   "stored": 1368631,
+   "val": 4.598947321616393,
+   "all": 4.5826379855055555,
+   "unseen_bigram": 10.35772437613442,
+   "unseen_trigram_seen_bigram": 5.835077729757772
+  },
+  "B collapse k=64": {
+   "stored": 79124,
+   "val": 5.63687457619585,
+   "all": 5.610433509897511,
+   "unseen_bigram": 8.700527688738193,
+   "unseen_trigram_seen_bigram": 6.266582223784961,
+   "class_samples": {
+    "velocity": [
+     "-",
+     "velocity",
+     "number",
+     "heat",
+     "pressure",
+     "time",
+     "temperature",
+     "reynolds",
+     "density",
+     "mass"
+    ],
+    "turbulent": [
+     "turbulent",
+     "viscous",
+     "steady",
+     "newtonian",
+     "unsteady",
+     "incompressible",
+     "laminar",
+     "active",
+     "coupled",
+     "mhd"
+    ],
+    "pressure": [
+     "-",
+     "velocity",
+     "number",
+     "heat",
+     "pressure",
+     "time",
+     "temperature",
+     "reynolds",
+     "density",
+     "mass"
+    ],
+    "equation": [
+     "which",
+     "model",
+     "it",
+     "method",
+     "study",
+     "equation",
+     "one",
+     "system",
+     "analysis",
+     "problem"
+    ],
+    "increases": [
+     "is",
+     "can",
+     "has",
+     "was",
+     "'",
+     "may",
+     "will",
+     "\u2019",
+     "increases",
+     "leads"
+    ],
+    "we": [
+     "are",
+     "we",
+     "be",
+     "been",
+     "also",
+     "not",
+     "more",
+     "were",
+     "they",
+     "only"
+    ],
+    "flow": [
+     "flow",
+     "fluid",
+     "surface",
+     "particle",
+     "layer",
+     "particles",
+     "liquid",
+     "wall",
+     "phase",
+     "water"
+    ],
+    "reynolds": [
+     "-",
+     "velocity",
+     "number",
+     "heat",
+     "pressure",
+     "time",
+     "temperature",
+     "reynolds",
+     "density",
+     "mass"
+    ]
+   }
+  },
+  "C A+B k=64": {
+   "lambda_memory": 0.8,
+   "val": 4.511752331193597,
+   "all": 4.495417036616975,
+   "unseen_bigram": 9.42143110745188,
+   "unseen_trigram_seen_bigram": 5.694262207719096
+  },
+  "B collapse k=256": {
+   "stored": 286036,
+   "val": 5.459366195834195,
+   "all": 5.4345843537093295,
+   "unseen_bigram": 9.133461133214784,
+   "unseen_trigram_seen_bigram": 6.152821155272705,
+   "class_samples": {
+    "velocity": [
+     "flow",
+     "velocity",
+     "heat",
+     "boundary",
+     "pressure",
+     "turbulence",
+     "energy",
+     "temperature",
+     "convection",
+     "thermal"
+    ],
+    "turbulent": [
+     "turbulent",
+     "steady",
+     "unsteady",
+     "convective",
+     "incompressible",
+     "laminar",
+     "mhd",
+     "compressible",
+     "stratified",
+     "atmospheric"
+    ],
+    "pressure": [
+     "flow",
+     "velocity",
+     "heat",
+     "boundary",
+     "pressure",
+     "turbulence",
+     "energy",
+     "temperature",
+     "convection",
+     "thermal"
+    ],
+    "equation": [
+     "equation",
+     "system",
+     "structure",
+     "solution",
+     "theory",
+     "properties",
+     "function",
+     "state",
+     "stability",
+     "form"
+    ],
+    "increases": [
+     "field",
+     "ratio",
+     "distribution",
+     "measurements",
+     "gradient",
+     "fluctuations",
+     "increases",
+     "profile",
+     "profiles",
+     "changes"
+    ],
+    "we": [
+     "to",
+     "that",
+     "we",
+     "which",
+     "one",
+     "only",
+     "even",
+     "either",
+     "instead",
+     "naturally"
+    ],
+    "flow": [
+     "flow",
+     "velocity",
+     "heat",
+     "boundary",
+     "pressure",
+     "turbulence",
+     "energy",
+     "temperature",
+     "convection",
+     "thermal"
+    ],
+    "reynolds": [
+     "reynolds",
+     "rayleigh",
+     "prandtl",
+     "mach",
+     "nusselt",
+     "enough",
+     "knudsen",
+     "richardson",
+     "rossby",
+     "hartmann"
+    ]
+   }
+  },
+  "C A+B k=256": {
+   "lambda_memory": 0.8,
+   "val": 4.508084468900335,
+   "all": 4.491688568824047,
+   "unseen_bigram": 9.504198154368575,
+   "unseen_trigram_seen_bigram": 5.6708197500602875
+  },
+  "B collapse k=1024": {
+   "stored": 542363,
+   "val": 5.197235662422118,
+   "all": 5.1761139961982305,
+   "unseen_bigram": 9.476415826217165,
+   "unseen_trigram_seen_bigram": 6.028976131852465,
+   "class_samples": {
+    "velocity": [
+     "velocity",
+     "heat",
+     "pressure",
+     "energy",
+     "temperature",
+     "density",
+     "mass",
+     "power",
+     "momentum",
+     "concentration"
+    ],
+    "turbulent": [
+     "turbulent",
+     "turbulence",
+     "convection",
+     "convective",
+     "cavitation",
+     "atmospheric",
+     "streaming",
+     "dynamo",
+     "mesoscale",
+     "submesoscale"
+    ],
+    "pressure": [
+     "velocity",
+     "heat",
+     "pressure",
+     "energy",
+     "temperature",
+     "density",
+     "mass",
+     "power",
+     "momentum",
+     "concentration"
+    ],
+    "equation": [
+     "equation",
+     "form",
+     "set",
+     "expression",
+     "definition",
+     "formula",
+     "transformation",
+     "specification"
+    ],
+    "increases": [
+     "increases",
+     "becomes",
+     "remains",
+     "appears",
+     "exists",
+     "varies",
+     "reaches",
+     "exceeds",
+     "dominates",
+     "holds"
+    ],
+    "we": [
+     "to",
+     "that",
+     "we",
+     "which",
+     "can",
+     "may",
+     "will",
+     "could",
+     "should",
+     "must"
+    ],
+    "flow": [
+     "flow",
+     "boundary",
+     "wave",
+     "vortex",
+     "state",
+     "wake",
+     "shock",
+     "eddy",
+     "cloud"
+    ],
+    "reynolds": [
+     "reynolds",
+     "prandtl",
+     "mach",
+     "enough",
+     "knudsen",
+     "hartmann",
+     "weber",
+     "schmidt",
+     "grashof",
+     "weissenberg"
+    ]
+   }
+  },
+  "C A+B k=1024": {
+   "lambda_memory": 0.8,
+   "val": 4.504860765695451,
+   "all": 4.489191370055246,
+   "unseen_bigram": 9.62932409599045,
+   "unseen_trigram_seen_bigram": 5.659997591213467
+  },
+  "D MLP": {
+   "stored": 3243024,
+   "best_epoch": 2,
+   "val": 4.512014000356944,
+   "all": 4.491468173316477,
+   "unseen_bigram": 8.943380978746857,
+   "unseen_trigram_seen_bigram": 5.395506438096035
+  },
+  "A+D": {
+   "lambda_memory": 0.45,
+   "all": 4.361629485510874,
+   "unseen_bigram": 9.07245725250688,
+   "unseen_trigram_seen_bigram": 5.416995062684047
+  }
+ }
+}

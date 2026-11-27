@@ -1,0 +1,5 @@
+loaded ~/mlx-models/Qwen3-0.6B-BF16-microscaling-source in 0.3s
+fit: 1673 docs 626932 tokens 599.9s (1045 tok/s) STOPPED at time cap
+val: 1 docs 240 tokens 0.3s (842 tok/s) STOPPED at time cap
+held: 1 docs 325 tokens 0.5s (653 tok/s) STOPPED at time cap
+{"model": "~/mlx-models/Qwen3-0.6B-BF16-microscaling-source", "window": 2048, "topk": 32, "fit": {"docs": 1673, "tokens": 626932, "seconds": 599.8530430793762, "stopped": true}, "val": {"docs": 1, "tokens": 240, "seconds": 0.28516507148742676, "stopped": true}, "held": {"docs": 1, "tokens": 325, "seconds": 0.49738502502441406, "stopped": true}, "peak_gib": 10.384513858705759, "total_seconds": 602.8159899711609}

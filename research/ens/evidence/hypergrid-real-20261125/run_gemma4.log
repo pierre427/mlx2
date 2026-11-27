@@ -1,0 +1,12 @@
+09:53:36 gate file seen: 66057
+12:05:44 raon unit done (pid file: 999999); starting
+gpuq: acquired Thu Nov 26 12:06:29 EST 2026 lease=ens-donor-20261125-ens-gemma-hard3-20261126 swapouts=319749631
+12:06:30 swap used at start 10719M
+12:06:30 smoke
+12:06:49 smoke rc=0
+12:06:49 full
+12:07:50 SWAP GUARD: used 15680M (start 10719M), stopping probe
+12:07:53 full rc=0
+12:07:53 swap used at end 15622M
+gpuq: releasing Thu Nov 26 12:07:53 EST 2026 rc=0 swapouts_delta=335336
+12:07:53 all done

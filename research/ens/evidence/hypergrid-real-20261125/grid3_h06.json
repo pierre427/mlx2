@@ -1,0 +1,233 @@
+{
+ "prefix": "donor_h06",
+ "layer": 28,
+ "k": 4096,
+ "slice_sizes": {
+  "all": 149318,
+  "unseen_bigram": 34176,
+  "text_seen_3x": 89305
+ },
+ "donor": {
+  "all": 2.8460006713867188,
+  "unseen_bigram": 4.853846073150635,
+  "text_seen_3x": 1.3876948356628418
+ },
+ "arms": {
+  "TEXT": {
+   "beta": 300,
+   "all": 4.578952511926935,
+   "unseen_bigram": 9.104383205258062,
+   "text_seen_3x": 2.1675167391970778,
+   "gate": {
+    "all": 4.572510250185057,
+    "unseen_bigram": 9.11506065353584,
+    "text_seen_3x": 2.1827828483915397
+   },
+   "override_2x": 0.0,
+   "override_2x_seen": 0.0,
+   "override_1.25x": 0.0,
+   "override_1.25x_seen": 0.0,
+   "override_1.1x_seen": 0.0,
+   "worst_cut_seen_x": 1.0,
+   "boost_2x": 0.0
+  },
+  "SOFT a=0.03": {
+   "beta": 300,
+   "all": 4.512535985696264,
+   "unseen_bigram": 8.85020055066199,
+   "text_seen_3x": 2.162767602127257,
+   "gate": {
+    "all": 4.5091990315304145,
+    "unseen_bigram": 8.867958637511753,
+    "text_seen_3x": 2.169951228937832
+   },
+   "override_2x": 0.0,
+   "override_2x_seen": 0.0,
+   "override_1.25x": 0.0,
+   "override_1.25x_seen": 0.0,
+   "override_1.1x_seen": 0.0,
+   "worst_cut_seen_x": 1.0213571665614798,
+   "boost_2x": 0.02599820517285257
+  },
+  "SOFT a=0.1": {
+   "beta": 300,
+   "all": 4.460210883134514,
+   "unseen_bigram": 8.671891327107394,
+   "text_seen_3x": 2.1526372986164026,
+   "gate": {
+    "all": 4.459035584999565,
+    "unseen_bigram": 8.683808807366189,
+    "text_seen_3x": 2.156873972990533
+   },
+   "override_2x": 0.0,
+   "override_2x_seen": 0.0,
+   "override_1.25x": 0.0,
+   "override_1.25x_seen": 0.0,
+   "override_1.1x_seen": 0.0,
+   "worst_cut_seen_x": 1.0711251341999704,
+   "boost_2x": 0.04523902007795443
+  },
+  "SOFT a=0.3": {
+   "beta": 300,
+   "all": 4.391305766335505,
+   "unseen_bigram": 8.45478969820846,
+   "text_seen_3x": 2.1293574318287884,
+   "gate": {
+    "all": 4.389662502920885,
+    "unseen_bigram": 8.473076880558065,
+    "text_seen_3x": 2.1331678052973233
+   },
+   "override_2x": 0.0,
+   "override_2x_seen": 0.0,
+   "override_1.25x": 0.0,
+   "override_1.25x_seen": 0.0,
+   "override_1.1x_seen": 0.049851632047477744,
+   "worst_cut_seen_x": 1.2128166335329256,
+   "boost_2x": 0.06723234975019757
+  },
+  "SOFT a=1.0": {
+   "beta": 300,
+   "all": 4.308376185782729,
+   "unseen_bigram": 8.199681528721984,
+   "text_seen_3x": 2.083671282268001,
+   "gate": {
+    "all": 4.303604350777174,
+    "unseen_bigram": 8.225912387484334,
+    "text_seen_3x": 2.086911196709976
+   },
+   "override_2x": 0.0,
+   "override_2x_seen": 0.0,
+   "override_1.25x": 0.17184800225023106,
+   "override_1.25x_seen": 0.08238060578914955,
+   "override_1.1x_seen": 0.20326969374615084,
+   "worst_cut_seen_x": 1.7029459292354523,
+   "boost_2x": 0.10322934944213022
+  },
+  "SOFT a=3.0": {
+   "beta": 300,
+   "all": 4.275425449063016,
+   "unseen_bigram": 8.048328229829355,
+   "text_seen_3x": 2.046298633898746,
+   "gate": {
+    "all": 4.254408621954977,
+    "unseen_bigram": 8.091440210613676,
+    "text_seen_3x": 2.0509836407720163
+   },
+   "override_2x": 0.08435687592922488,
+   "override_2x_seen": 0.028609820278819774,
+   "override_1.25x": 0.29238270000937594,
+   "override_1.25x_seen": 0.1862157773920833,
+   "override_1.1x_seen": 0.26397178209506744,
+   "worst_cut_seen_x": 3.0554990314282637,
+   "boost_2x": 0.17020051165967934
+  },
+  "PRIOR rho=0.1": {
+   "beta": 300,
+   "all": 4.452023742331997,
+   "unseen_bigram": 8.647618776669432,
+   "text_seen_3x": 2.1512573144332743,
+   "gate": {
+    "all": 4.450858307457811,
+    "unseen_bigram": 8.659439131514787,
+    "text_seen_3x": 2.155356134245792
+   },
+   "override_2x": 0.0,
+   "override_2x_seen": 0.0,
+   "override_1.25x": 0.0,
+   "override_1.25x_seen": 0.0,
+   "override_1.1x_seen": 0.0,
+   "worst_cut_seen_x": 1.0727953312129206,
+   "boost_2x": 0.04817905409930484
+  },
+  "PRIOR rho=0.25": {
+   "beta": 300,
+   "all": 4.393921085701553,
+   "unseen_bigram": 8.466210172942766,
+   "text_seen_3x": 2.1318264663722344,
+   "gate": {
+    "all": 4.392189275182774,
+    "unseen_bigram": 8.481121464442108,
+    "text_seen_3x": 2.1352388309580412
+   },
+   "override_2x": 0.0,
+   "override_2x_seen": 0.0,
+   "override_1.25x": 0.0,
+   "override_1.25x_seen": 0.0,
+   "override_1.1x_seen": 0.034342981915906165,
+   "worst_cut_seen_x": 1.181974246170609,
+   "boost_2x": 0.06669658045245717
+  },
+  "PRIOR rho=0.5": {
+   "beta": 300,
+   "all": 4.344668809452484,
+   "unseen_bigram": 8.317284321984754,
+   "text_seen_3x": 2.108196436200714,
+   "gate": {
+    "all": 4.342387062260043,
+    "unseen_bigram": 8.337516235396953,
+    "text_seen_3x": 2.1120951555710548
+   },
+   "override_2x": 0.0,
+   "override_2x_seen": 0.0,
+   "override_1.25x": 0.02968161909481777,
+   "override_1.25x_seen": 0.009730698169195454,
+   "override_1.1x_seen": 0.13655450422708695,
+   "worst_cut_seen_x": 1.363901562486541,
+   "boost_2x": 0.0849462221567393
+  },
+  "PRIOR rho=1.0": {
+   "beta": 300,
+   "all": 4.300786090005713,
+   "unseen_bigram": 8.178927054366383,
+   "text_seen_3x": 2.0793746220433373,
+   "gate": {
+    "all": 4.295792787009827,
+    "unseen_bigram": 8.207097440944901,
+    "text_seen_3x": 2.083349106987103
+   },
+   "override_2x": 0.0,
+   "override_2x_seen": 0.0,
+   "override_1.25x": 0.19684833710604213,
+   "override_1.25x_seen": 0.09196573540115335,
+   "override_1.1x_seen": 0.20936117798555512,
+   "worst_cut_seen_x": 1.7276154781528883,
+   "boost_2x": 0.10979252333945003
+  },
+  "PRIOR rho=2.0": {
+   "beta": 300,
+   "all": 4.2769289688402585,
+   "unseen_bigram": 8.078224354306036,
+   "text_seen_3x": 2.0535405443121553,
+   "gate": {
+    "all": 4.26270645871442,
+    "unseen_bigram": 8.107145181802286,
+    "text_seen_3x": 2.056854539804158
+   },
+   "override_2x": 0.025777200337534657,
+   "override_2x_seen": 0.006237052796595935,
+   "override_1.25x": 0.27366426016957096,
+   "override_1.25x_seen": 0.16323834051844802,
+   "override_1.1x_seen": 0.2518783942668384,
+   "worst_cut_seen_x": 2.4544809492893167,
+   "boost_2x": 0.14937248021002156
+  },
+  "PRIOR rho=4.0": {
+   "beta": 1000,
+   "all": 4.2734392371220835,
+   "unseen_bigram": 8.1126012267952,
+   "text_seen_3x": 2.0982925115300253,
+   "gate": {
+    "all": 4.27218811763475,
+    "unseen_bigram": 8.13073816833315,
+    "text_seen_3x": 2.1010101005181725
+   },
+   "override_2x": 0.02759211883363024,
+   "override_2x_seen": 0.008823694082078271,
+   "override_1.25x": 0.11809694745442613,
+   "override_1.25x_seen": 0.07961480320250826,
+   "override_1.1x_seen": 0.2156430211074408,
+   "worst_cut_seen_x": 4.197401628958339,
+   "boost_2x": 0.12784794867330126
+  }
+ }
+}

@@ -1,0 +1,311 @@
+{
+ "prefix": "donor_h06",
+ "slice_sizes": {
+  "all": 149318,
+  "unseen_bigram": 34176,
+  "bigram_seen_3x": 97683
+ },
+ "donor": {
+  "all": 2.8460007756523344,
+  "unseen_bigram": 4.8538463692205225,
+  "bigram_seen_3x": 2.010181190611627
+ },
+ "tiles": {
+  "KN 4-token (text only)": {
+   "tile_alone": {
+    "all": 5.168344657793265,
+    "unseen_bigram": 10.561957071403324,
+    "bigram_seen_3x": 3.120047861825225
+   },
+   "blend_global": {
+    "lambda_donor": 0.925,
+    "all": 2.8098216827897113,
+    "unseen_bigram": 4.890004255245021,
+    "bigram_seen_3x": 1.9595279240777386
+   },
+   "blend_bucketed": {
+    "all": 2.807475285654039,
+    "unseen_bigram": 4.882942774530929,
+    "bigram_seen_3x": 1.958777360511791
+   },
+   "delta_vs_donor": {
+    "all": -0.03852548999829564,
+    "unseen_bigram": 0.02909640531040658,
+    "bigram_seen_3x": -0.05140383009983607
+   }
+  },
+  "code L14 rho=0.0": {
+   "tile_alone": {
+    "all": 4.904122257558959,
+    "unseen_bigram": 9.924295988245005,
+    "bigram_seen_3x": 3.000125034755154
+   },
+   "blend_global": {
+    "lambda_donor": 0.925,
+    "all": 2.809490327471397,
+    "unseen_bigram": 4.877402079565343,
+    "bigram_seen_3x": 1.9627038272626784
+   },
+   "blend_bucketed": {
+    "all": 2.80730994698283,
+    "unseen_bigram": 4.878481014538573,
+    "bigram_seen_3x": 1.9593418065778279
+   },
+   "delta_vs_donor": {
+    "all": -0.03869082866950446,
+    "unseen_bigram": 0.024634645318050374,
+    "bigram_seen_3x": -0.050839384033799284
+   }
+  },
+  "code L14 rho=0.25": {
+   "tile_alone": {
+    "all": 4.7512087570121695,
+    "unseen_bigram": 9.366152126399522,
+    "bigram_seen_3x": 2.984927472195503
+   },
+   "blend_global": {
+    "lambda_donor": 0.925,
+    "all": 2.810475408962523,
+    "unseen_bigram": 4.870948677097675,
+    "bigram_seen_3x": 1.966214163608472
+   },
+   "blend_bucketed": {
+    "all": 2.8080782695706934,
+    "unseen_bigram": 4.877270895462228,
+    "bigram_seen_3x": 1.9609938580770365
+   },
+   "delta_vs_donor": {
+    "all": -0.03792250608164105,
+    "unseen_bigram": 0.023424526241705657,
+    "bigram_seen_3x": -0.04918733253459062
+   }
+  },
+  "code L14 rho=0.5": {
+   "tile_alone": {
+    "all": 4.7060113287830525,
+    "unseen_bigram": 9.211874828346694,
+    "bigram_seen_3x": 2.975254047006832
+   },
+   "blend_global": {
+    "lambda_donor": 0.925,
+    "all": 2.811072799627913,
+    "unseen_bigram": 4.868884035262315,
+    "bigram_seen_3x": 1.9673182108952358
+   },
+   "blend_bucketed": {
+    "all": 2.8086250625490896,
+    "unseen_bigram": 4.875140121419556,
+    "bigram_seen_3x": 1.9620254732405142
+   },
+   "delta_vs_donor": {
+    "all": -0.037375713103244834,
+    "unseen_bigram": 0.021293752199033733,
+    "bigram_seen_3x": -0.048155717371112905
+   }
+  },
+  "code L14 rho=1.0": {
+   "tile_alone": {
+    "all": 4.669877892848291,
+    "unseen_bigram": 9.074554503579717,
+    "bigram_seen_3x": 2.971004989021588
+   },
+   "blend_global": {
+    "lambda_donor": 0.925,
+    "all": 2.8124368642479984,
+    "unseen_bigram": 4.866475997202074,
+    "bigram_seen_3x": 1.9693017920109959
+   },
+   "blend_bucketed": {
+    "all": 2.809932531029055,
+    "unseen_bigram": 4.87080317811473,
+    "bigram_seen_3x": 1.9644768944176811
+   },
+   "delta_vs_donor": {
+    "all": -0.03606824462327962,
+    "unseen_bigram": 0.016956808894207143,
+    "bigram_seen_3x": -0.045704296193946004
+   }
+  },
+  "code L28 rho=0.0": {
+   "tile_alone": {
+    "all": 4.575375844454784,
+    "unseen_bigram": 9.08729624711534,
+    "bigram_seen_3x": 2.8478543712323257
+   },
+   "blend_global": {
+    "lambda_donor": 0.9,
+    "all": 2.8035489967596408,
+    "unseen_bigram": 4.861631929356949,
+    "bigram_seen_3x": 1.9602269033248854
+   },
+   "blend_bucketed": {
+    "all": 2.800373596205386,
+    "unseen_bigram": 4.863350424033448,
+    "bigram_seen_3x": 1.9551426023626166
+   },
+   "delta_vs_donor": {
+    "all": -0.045627179446948496,
+    "unseen_bigram": 0.009504054812925489,
+    "bigram_seen_3x": -0.055038588249010534
+   }
+  },
+  "code L28 rho=0.25": {
+   "tile_alone": {
+    "all": 4.390612565629602,
+    "unseen_bigram": 8.455519162877636,
+    "bigram_seen_3x": 2.811299926991201
+   },
+   "blend_global": {
+    "lambda_donor": 0.9,
+    "all": 2.803356516273875,
+    "unseen_bigram": 4.856777804670136,
+    "bigram_seen_3x": 1.96123231074667
+   },
+   "blend_bucketed": {
+    "all": 2.800379441423766,
+    "unseen_bigram": 4.860989548837941,
+    "bigram_seen_3x": 1.9556942270596553
+   },
+   "delta_vs_donor": {
+    "all": -0.04562133422856851,
+    "unseen_bigram": 0.007143179617418838,
+    "bigram_seen_3x": -0.0544869635519718
+   }
+  },
+  "code L28 rho=0.5": {
+   "tile_alone": {
+    "all": 4.3412655588323,
+    "unseen_bigram": 8.308701159051935,
+    "bigram_seen_3x": 2.794903955582814
+   },
+   "blend_global": {
+    "lambda_donor": 0.9,
+    "all": 2.8036819115607683,
+    "unseen_bigram": 4.85396706567504,
+    "bigram_seen_3x": 1.9622945239787208
+   },
+   "blend_bucketed": {
+    "all": 2.800666579259058,
+    "unseen_bigram": 4.858147084596129,
+    "bigram_seen_3x": 1.9567187529803438
+   },
+   "delta_vs_donor": {
+    "all": -0.045334196393276294,
+    "unseen_bigram": 0.004300715375606501,
+    "bigram_seen_3x": -0.05346243763128333
+   }
+  },
+  "code L28 rho=1.0": {
+   "tile_alone": {
+    "all": 4.297222669698581,
+    "unseen_bigram": 8.172938980296927,
+    "bigram_seen_3x": 2.7811348368966393
+   },
+   "blend_global": {
+    "lambda_donor": 0.9,
+    "all": 2.8047706394293863,
+    "unseen_bigram": 4.850600660932038,
+    "bigram_seen_3x": 1.9643387766174827
+   },
+   "blend_bucketed": {
+    "all": 2.801856242950718,
+    "unseen_bigram": 4.857483203623651,
+    "bigram_seen_3x": 1.9580149362221042
+   },
+   "delta_vs_donor": {
+    "all": -0.044144532701616335,
+    "unseen_bigram": 0.0036368344031281197,
+    "bigram_seen_3x": -0.05216625438952294
+   }
+  },
+  "merged state R4 +tok": {
+   "tile_alone": {
+    "all": 5.068853825400128,
+    "unseen_bigram": 10.243675994726361,
+    "bigram_seen_3x": 3.1165245903449366
+   },
+   "blend_global": {
+    "lambda_donor": 0.925,
+    "all": 2.8136687733718175,
+    "unseen_bigram": 4.880024434940368,
+    "bigram_seen_3x": 1.967430871542447
+   },
+   "blend_bucketed": {
+    "all": 2.811209011139768,
+    "unseen_bigram": 4.879245480898476,
+    "bigram_seen_3x": 1.964146213945949
+   },
+   "delta_vs_donor": {
+    "all": -0.03479176451256638,
+    "unseen_bigram": 0.02539911167795328,
+    "bigram_seen_3x": -0.04603497666567824
+   }
+  }
+ },
+ "state_merge": {
+  "round 1": {
+   "keys_kept": 14487,
+   "held_key_coverage": 0.5335257638061051,
+   "beta": 3000,
+   "state": {
+    "all": 5.046334622069495,
+    "unseen_bigram": 10.207975410737697,
+    "bigram_seen_3x": 3.0984282541554258
+   },
+   "state+tok": {
+    "all": 5.069642368638524,
+    "unseen_bigram": 10.295507942143296,
+    "bigram_seen_3x": 3.1025303015447268
+   },
+   "stored": 552502
+  },
+  "round 2": {
+   "keys_kept": 15648,
+   "held_key_coverage": 0.494206994468182,
+   "beta": 3000,
+   "state": {
+    "all": 5.046921182673779,
+    "unseen_bigram": 10.18273788970629,
+    "bigram_seen_3x": 3.103335148783198
+   },
+   "state+tok": {
+    "all": 5.064773800245394,
+    "unseen_bigram": 10.249939252790908,
+    "bigram_seen_3x": 3.107441582498789
+   },
+   "stored": 596883
+  },
+  "round 3": {
+   "keys_kept": 15266,
+   "held_key_coverage": 0.474805448773758,
+   "beta": 3000,
+   "state": {
+    "all": 5.047740775946403,
+    "unseen_bigram": 10.180840704261444,
+    "bigram_seen_3x": 3.105136226987878
+   },
+   "state+tok": {
+    "all": 5.065387167737698,
+    "unseen_bigram": 10.246771708085873,
+    "bigram_seen_3x": 3.1099442062199905
+   },
+   "stored": 598279
+  },
+  "round 4": {
+   "keys_kept": 15204,
+   "held_key_coverage": 0.473385660134746,
+   "beta": 3000,
+   "state": {
+    "all": 5.0507572075547245,
+    "unseen_bigram": 10.17943148599925,
+    "bigram_seen_3x": 3.110295571952699
+   },
+   "state+tok": {
+    "all": 5.068853825400128,
+    "unseen_bigram": 10.243675994726361,
+    "bigram_seen_3x": 3.1165245903449366
+   },
+   "stored": 597572
+  }
+ }
+}

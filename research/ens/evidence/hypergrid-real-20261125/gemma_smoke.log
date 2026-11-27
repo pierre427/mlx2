@@ -1,0 +1,12 @@
+loaded in 3s
+layers 30 dense I 2112 experts 128 close 101 open [100, 45518, 107] stop [1, 50, 106]
+A 0 len 57 forced True t=4s
+A 1 len 57 forced True t=5s
+A 2 len 57 forced True t=6s
+A 3 len 57 forced True t=7s
+S done: sel64/act64 overlap 0.049 t=7s
+B 0 full True nothink True t=9s
+B 1 full True nothink True t=10s
+B 2 full False nothink True t=12s
+B 3 full True nothink True t=14s
+done 14s peak 25.2 GiB

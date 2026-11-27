@@ -1,0 +1,6 @@
+loaded in 0.4s layers=28 hidden=1024
+self-check max |logit diff| = 0
+held: 353 docs 149744 tokens 14.4s (10426 tok/s)
+val: 200 docs 59776 tokens 5.6s (10719 tok/s)
+fit: 1795 docs 798637 tokens 74.3s (10743 tok/s)
+{"model": "~/mlx-models/Qwen3-0.6B-BF16-microscaling-source", "layers": [14, 28], "window": 2048, "packed": true, "held": {"docs": 353, "tokens": 149744, "seconds": 14.362616062164307, "stopped": false}, "val": {"docs": 200, "tokens": 59776, "seconds": 5.576855182647705, "stopped": false}, "fit": {"docs": 1795, "tokens": 798637, "seconds": 74.34250378608704, "stopped": false}, "peak_gib": 13.022941634058952, "total_seconds": 95.7269811630249}

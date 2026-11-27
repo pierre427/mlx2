@@ -1,0 +1,6 @@
+loaded ~/mlx-models/Qwen3-4B in 0.8s
+loaded ~/mlx-models/Qwen3-4B in 0.8s
+held: 353 docs 149744 tokens 53.9s (2777 tok/s)
+val: 200 docs 59776 tokens 20.6s (2904 tok/s)
+fit: 1795 docs 798637 tokens 274.2s (2912 tok/s)
+{"model": "~/mlx-models/Qwen3-4B", "window": 2048, "topk": 32, "packed": true, "held": {"docs": 353, "tokens": 149744, "seconds": 53.92533302307129, "stopped": false}, "val": {"docs": 200, "tokens": 59776, "seconds": 20.583810091018677, "stopped": false}, "fit": {"docs": 1795, "tokens": 798637, "seconds": 274.21103382110596, "stopped": false}, "peak_gib": 18.175650615245104, "total_seconds": 350.44382309913635}

@@ -1,0 +1,6 @@
+gpuq: acquired Thu Nov 26 04:25:24 EST 2026 lease=ens-donor-20261125-ens-gemma-probe-20261126 swapouts=312306330
+04:25:24 smoke
+04:25:40 smoke rc=0
+04:25:40 full
+04:35:14 full rc=0
+gpuq: releasing Thu Nov 26 04:35:14 EST 2026 rc=0 swapouts_delta=5643395

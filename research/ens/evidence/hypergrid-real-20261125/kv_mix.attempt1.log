@@ -1,0 +1,9 @@
+tokens: head 30 paper1 1486 paper2 1412
+rope self-check max err 4.68e+00
+Traceback (most recent call last):
+  File "~/Desktop/mlx2/output/ens-hypergrid-real-20261125/kv_mix.py", line 167, in <module>
+    main()
+  File "~/Desktop/mlx2/output/ens-hypergrid-real-20261125/kv_mix.py", line 129, in main
+    assert err < 1e-3
+           ^^^^^^^^^^
+AssertionError

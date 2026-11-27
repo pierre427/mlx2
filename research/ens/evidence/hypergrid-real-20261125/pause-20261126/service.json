@@ -1,0 +1,2496 @@
+{
+  "label": "com.example.mlx2-flash-next",
+  "command": [
+    "./gate_then_run.sh"
+  ],
+  "driver_sha256": "d2d3c299d27ede2e2b63eba35e5cf1a5f1439bf11825c373c5fc8582862a082a",
+  "service_before": {
+    "state": "ready",
+    "model": "Qwen3.8-Flash-Next-Uncensored-MLX2-4bit-MTP",
+    "runtime": {
+      "source_sha256": "7c79213c1e3d7af4e8ada576bfd0e1cb9b67780d6e0f1331ece2ab2d615312d1",
+      "mlx_native_sha256": "1fe14307be23c7198745a8c7f06ed1413c865945face7b69275032ffcabffd93",
+      "python": "3.12.13",
+      "macos": "27.0.1",
+      "mlx": "0.32.5",
+      "transformers": "5.17.0",
+      "dependencies": {
+        "numpy": "2.5.1",
+        "tokenizers": "0.23.2",
+        "jinja2": "3.1.6",
+        "psutil": "7.2.2",
+        "regex": "2026.9.10",
+        "safetensors": "0.8.0"
+      },
+      "pillow": "12.3.0"
+    },
+    "build_runtime": {
+      "source_sha256": "7c79213c1e3d7af4e8ada576bfd0e1cb9b67780d6e0f1331ece2ab2d615312d1",
+      "mlx_native_sha256": "1fe14307be23c7198745a8c7f06ed1413c865945face7b69275032ffcabffd93",
+      "python": "3.12.13",
+      "macos": "27.0.1",
+      "mlx": "0.32.5",
+      "transformers": "5.17.0",
+      "dependencies": {
+        "numpy": "2.5.1",
+        "tokenizers": "0.23.2",
+        "jinja2": "3.1.6",
+        "psutil": "7.2.2",
+        "regex": "2026.9.10",
+        "safetensors": "0.8.0"
+      },
+      "pillow": "12.3.0"
+    },
+    "runtime_source_scope": {
+      "mode": "full_source",
+      "reason": "reviewed dispatcher changed: mlx2.adapters.registry"
+    },
+    "dependency_builds": {
+      "mlx_vlm": null
+    },
+    "artifact": "25c2da42836b90dd13fc63e1b0d49aa765512de8ff07a22384595bf5b3fd5248",
+    "base_artifact": "25c2da42836b90dd13fc63e1b0d49aa765512de8ff07a22384595bf5b3fd5248",
+    "artifact_derivation": null,
+    "profile": "flash-next-apcv2-mtp3",
+    "settings": {
+      "prefill_execution": {
+        "version": 1,
+        "hc": {
+          "schema": "mlx2.hc-prefill.v1",
+          "law": "rounded-combine-f32-norm-storage-gate-mix"
+        }
+      },
+      "lane_matmul": {
+        "mode": "crossover",
+        "law_id": "lane-matmul-v1+stock-below[bf16:16,fp16:16,q2:8,q3:8,q4:8,q5:8,q6:8,q8:8]+skip[83456f40a80b]+grouped",
+        "covered": {
+          "affine-q8-g64": 248
+        }
+      },
+      "max_context": 131072,
+      "default_max_tokens": 65536,
+      "generation_event_timeout_seconds": 1800.0,
+      "max_lanes": 4,
+      "max_inflight": 8,
+      "prefill_step": 8192,
+      "prefill_step_source": "adapter",
+      "prefill_step_autoscale": false,
+      "cache_bytes": 17179869184,
+      "cache_bytes_source": "explicit",
+      "cache_bytes_clamped_from": null,
+      "cache_bytes_headroom": {
+        "requested_bytes": 17179869184,
+        "floor_bytes": 0,
+        "admission_limit_bytes": 98784247808,
+        "resident_bytes": 74417223604,
+        "stream_reserve_bytes": 0,
+        "lanes": 4,
+        "lane_need_bytes": 1385812568,
+        "budget_bytes": 18823773932,
+        "reason": "fits"
+      },
+      "disk_cache": true,
+      "apc_disk_max_bytes": 63678286233,
+      "apc_persistence": false,
+      "apc_persist_on_shutdown": false,
+      "apc_persist_shutdown_seconds": 5.0,
+      "apc_session_max_ttl_seconds": 3600,
+      "apc_session_pinned_disk_bytes": 68719476736,
+      "apc_session_pinned_disk_bytes_global": 63678286233,
+      "apc_session_pinned_resident_bytes": 12884901888,
+      "apc_session_prefetch_ttl_seconds": 30,
+      "apc_quarantine_max_entries": 128,
+      "apc_quarantine_max_bytes": 1073741824,
+      "host_prompt_cache_entries": 128,
+      "host_prompt_cache_tokens": 1048576,
+      "coalesce_window_ms": 5.0,
+      "batch_cohort_timeout_ms": 1000.0,
+      "mtp": true,
+      "tenant_scoped_cache": false,
+      "environment": {
+        "HF_HUB_OFFLINE": "1",
+        "TRANSFORMERS_OFFLINE": "1",
+        "MLX_ENABLE_TF32": "0",
+        "MLX_QWEN4_PLE_NVME": "~/mlx-models/Qwen3.8-Flash-Next-Uncensored-MLX2-4bit-MTP/ple_rows.bin",
+        "MLX_QWEN4_PLE_NVME_LRU_MB": "2048",
+        "MLX_QWEN4_PLE_COMPILE": "1",
+        "MLX_QWEN4_QSA_POOLED_KEY_CACHE": "1",
+        "MLX_QWEN4_QSA_SCATTER_CHOSEN": "1",
+        "MLX_QWEN4_FUSED_GDN_DECODE": "1",
+        "MLX_QWEN4_FUSED_GDN_VERIFY": "1",
+        "MLX_QWEN4_FUSED_GDN_REPLAY_ROLLBACK": "1",
+        "MLX_QWEN4_FUSED_GDN_PREFILL": "1",
+        "MLX_QWEN4_MOE_WEIGHTED_SUM": "1",
+        "MLX_GDN_PACKED": "1",
+        "MLX_GDN_CORE": "0",
+        "MLX_QWEN4_MOE_FUSED_GATE_UP": "0",
+        "MLX_QWEN4_FUSED_EXPERT_KERNEL": "auto",
+        "MLX_QWEN4_MEGAKERNEL": "0",
+        "MLX_LM_COMPILED_DECODE": "0",
+        "MLX_LM_SEGMENTED_SELF_MTP": "1",
+        "MLX_LM_TRUE_BATCHED_SEGMENTED_MTP": "1",
+        "MLX_QWEN4_RMSNORM_FAST": "1",
+        "MLX_QWEN4_RMSNORM_FAST_MAX_WIDTH": "8",
+        "MLX_LM_MTP_BOUNDARY_COW": "1",
+        "MLX_LM_SHARED_QSA_SUFFIX": "auto",
+        "MLX_LM_SHARED_QSA_SUFFIX_MIN_CONTEXT": "16380",
+        "MLX_LM_SHARED_QSA_SUFFIX_MAX_REMAINING": "64",
+        "MLX_LM_SEGMENTED_ASYNC_QSA_PROMOTION": "1",
+        "MLX_QWEN4_QSA_INDEXED": "auto",
+        "MLX_QWEN4_QSA_INDEXED_MIN_CONTEXT": "16384",
+        "MLX_LM_QSA_PRIVATE_DELTA_MIN_CONTEXT_MN": "65536",
+        "MLX_LM_QSA_PRIVATE_DELTA_MIN_CONTEXT_M1": "2147483647",
+        "MLX_QWEN4_QSA_INDEXED_FUSED_MERGE": "0",
+        "MLX_QWEN4_QSA_INDEXED_FUSED_GATE": "0",
+        "MLX_QWEN4_QSA_INDEXED_ALLOW_UNVERIFIED_MLX": "0",
+        "MLX_QWEN4_EAGER_DISPATCH": "1",
+        "MLX_QWEN4_EAGER_DISPATCH_MAX_ROWS": "64",
+        "MLX_QWEN4_EAGER_DISPATCH_STRIDE": "2",
+        "MLX_QWEN4_QSA_LAZY_CAUSAL_MASK": "1",
+        "MLX_QWEN4_HC_PREFILL": "1",
+        "MLX_QWEN4_QSA_FUSED_SCORES": "1",
+        "MLX_QWEN4_FUSED_GDN_VERIFY_MAX_STEPS": "17",
+        "MLX_QWEN4_MOE_ROUTED_DECODE": "gate_up_down_shared",
+        "MLX_QWEN4_HC_DECODE": "1",
+        "MLX_QWEN4_FUSED_GDN_BATCH_DECODE": "row_exact",
+        "MLX_QWEN4_ATTN_FUSED_ROWS": "1",
+        "MLX_QWEN4_MOE_TOPK_FOLD": "launch",
+        "MLX2_MOE_NAX_GATHER": "fused",
+        "MLX2_MOE_RHS_PAD_POLICY": "adaptive",
+        "MLX_QWEN4_QSA_BATCH_DECODE_SPARSE": "indexed",
+        "MLX_QWEN4_QSA_BATCH_DECODE_SPARSE_MIN_CONTEXT": "32768",
+        "MLX_QWEN4_QSA_NAX_AUTO_MIN_PHYSICAL_KV": "8192",
+        "MLX_QWEN4_QSA_NAX_LAW": "v2",
+        "MLX_QWEN4_PLE_NVME_READ_POLICY": "adaptive",
+        "MLX_QWEN4_PLE_NVME_ADAPTIVE_WARM": "1"
+      },
+      "adapter_policy": {
+        "num_draft": 3,
+        "shared_qsa_suffix": "auto",
+        "async_qsa_promotion": true,
+        "known_tail_ple_prefetch": true,
+        "indexed_qsa": "auto",
+        "indexed_fused_merge": false,
+        "indexed_output_gate": false,
+        "allow_unverified_indexed": false,
+        "shared_qsa_min_context": 16380,
+        "shared_qsa_max_remaining": 64,
+        "private_delta_min_context": 65536,
+        "indexed_min_context": 16384,
+        "eager_dispatch": true,
+        "eager_dispatch_max_rows": 64,
+        "eager_dispatch_stride": 2,
+        "prefill_step": 8192,
+        "prefill_plan_exact_slices": true,
+        "qsa_lazy_causal_mask": true,
+        "ple_read_policy": "adaptive",
+        "ple_adaptive_warm": true,
+        "hc_prefill_kernels": true,
+        "qsa_batch_decode_sparse": "indexed",
+        "qsa_batch_decode_sparse_min_context": 32768,
+        "lane_dense": true
+      },
+      "qsa_indexer": {
+        "budget": 2048,
+        "compress_ratio": 4,
+        "head_dim": 128,
+        "n_heads": 4
+      },
+      "moe_rhs_pad": {
+        "policy": "adaptive",
+        "min_rows_per_expert": 3
+      },
+      "adaptive_mtp_depth": {
+        "enabled": false,
+        "ewma_alpha": 0.25,
+        "shrink_gate": 0.35,
+        "grow_gate": 0.8,
+        "loss_rounds": 3,
+        "gain_rounds": 3,
+        "park_rounds": 4
+      },
+      "mtp_acceptance_log": null,
+      "fly_verification": {
+        "enabled": false,
+        "entropy_threshold": 2.0,
+        "window": 2,
+        "min_prob": 0.01
+      },
+      "self_mtp_copy_draft": {
+        "enabled": true,
+        "ngram_min": 3,
+        "ngram_max": 6,
+        "max_span": 7,
+        "batched_max_span": 0,
+        "probe_span": 2,
+        "lookback": 8192,
+        "min_samples": 3,
+        "gate_window": 32,
+        "reprobe_interval": 16,
+        "min_yield_ratio": 1.0,
+        "verify_row_cost": 0.1,
+        "draft_step_cost": 0.15,
+        "min_match": 8,
+        "strong_match": 32,
+        "strong_max_span": 14,
+        "initial_span": 7
+      },
+      "spomin_live_surgery": {
+        "enabled": false,
+        "capacity_tokens": 0,
+        "segment_tokens": 1024,
+        "strategy": "oldest_contiguous",
+        "protect_prefix_segments": 1
+      },
+      "thinking_budget": 0,
+      "thinking_steer": {
+        "alpha": 0.0,
+        "hammer": 0.0,
+        "calibration": {
+          "state": "unsupported"
+        }
+      },
+      "thinking_defaults_source": "none",
+      "constrained_tool_grammar": false,
+      "tolerant_tool_markers": false,
+      "cache_capsules": {
+        "enabled": false,
+        "backend": "gpu",
+        "fallback": "gpu",
+        "deadline_ms": 50.0,
+        "verify_raw_bits": false
+      },
+      "persistent_block_bytes": 0,
+      "apc_interior_checkpoints": {
+        "count": 4,
+        "min_stride": 256,
+        "placement": "auto",
+        "headroom_fraction": 0.5,
+        "min_uncached_fraction": 0.5
+      },
+      "apc_pressure_drop_superseded": {
+        "enabled": true,
+        "source": "policy"
+      },
+      "host_memory_signals": {
+        "enabled": true,
+        "fall_after_seconds": 5.0
+      },
+      "mtp_ordinary_handoff": {
+        "enabled": true,
+        "max_mtp_width": 3
+      },
+      "approximate_kv": {
+        "enabled": false,
+        "operation": null,
+        "start_tokens": 0,
+        "evidence": [],
+        "descriptor": null
+      },
+      "exact_self_mtp_rows": {
+        "schema": "mlx2.exact-self-mtp-rows.v1",
+        "max_exact_self_mtp_verification_rows": 17,
+        "max_exact_self_mtp_rollback_rows": 17,
+        "effective_max_self_mtp_rows": 17,
+        "effective_max_self_mtp_proposer_depth": 16,
+        "requested_self_mtp_num_draft": 3,
+        "effective_self_mtp_num_draft": 3,
+        "requested_self_mtp_copy_max_span": 14,
+        "effective_self_mtp_copy_max_span": 14,
+        "clamped": false,
+        "effective_self_mtp_draft_ceiling": 3,
+        "effective_self_mtp_verify_rows": 15
+      },
+      "verify_topology": {
+        "selected": null,
+        "tile_edges": null,
+        "law_id": "lane-matmul-v1+stock-below[bf16:16,fp16:16,q2:8,q3:8,q4:8,q5:8,q6:8,q8:8]+skip[83456f40a80b]+grouped"
+      },
+      "execution_policy": {
+        "persistent": true,
+        "num_draft": 3,
+        "rate_gate": false,
+        "prefill_step_size": 8192,
+        "segment_aware_live_tip": true,
+        "segment_aware_cohort_size": 4,
+        "segment_aware_async_qsa_promotion": true,
+        "prefetch_known_tail_ple": true,
+        "prefill_plan_exact": true
+      },
+      "apc_rolling_checkpoints": {
+        "interval_tokens": 8192
+      },
+      "apc_rolling_checkpoints_default": true,
+      "prefill_scheduling": {
+        "order": "srpt",
+        "max_bypass": 3,
+        "one_slice_contention": true
+      },
+      "decode_first": {
+        "enabled": true,
+        "shared_prefill_budget": false,
+        "prefill_token_budget": null
+      },
+      "gpu_keep_warm": {
+        "enabled": true,
+        "window_seconds": 60.0,
+        "interval_seconds": 0.5
+      },
+      "prompt_lookup": {},
+      "decode_time_fairness": {
+        "enabled": true,
+        "fair_share": 0.5,
+        "stall_target_ms": 500.0,
+        "estimator": "cost_model"
+      },
+      "speculation": "self_mtp",
+      "route": "native_mtp",
+      "route_selection_source": "adapter_default",
+      "route_default_selection": {
+        "schema": "mlx2.best-route-default-selection.v1",
+        "status": "kept_current_default",
+        "applied": false,
+        "qualification": "unqualified",
+        "table": {
+          "path": "src/mlx2/best_route_defaults.json",
+          "sha256": "cd1a13918d81a78d4c49f8e161827d71ea10ce29dae87f6c556d0460dde6836c"
+        },
+        "adapter": "FlashNextAdapter",
+        "match": "family",
+        "checkpoint": null,
+        "fingerprint": "25c2da42836b90dd13fc63e1b0d49aa765512de8ff07a22384595bf5b3fd5248",
+        "reason": "native MTP stays: DFlash2 external lost to native MTP on every B1 smoke cell (Flash-Next 4bit code 80 vs 113, explain 65 vs 90) and Flash-Next packed AST lost to ordinary (23.7 vs 63.1); B4 rule cells not measured",
+        "evidence": {
+          "files": [
+            "qualification/runs/model-matrix-20261021/SUMMARY.md",
+            "docs/research/RETRO-2026-10-18-to-21.md"
+          ],
+          "source_revision": "ca786630c6c48cd07cc9d384a2747cb2331d3acd"
+        }
+      },
+      "cache_budget": {
+        "schema": "flash-next-cache-geometry-v1",
+        "qsa_layers": 13,
+        "recurrent_layers": 36,
+        "kv_heads": 2,
+        "head_dim": 256,
+        "index_dim": 128,
+        "pool_ratio": 4,
+        "recurrent_heads": 48,
+        "recurrent_key_dim": 128,
+        "recurrent_value_dim": 128,
+        "recurrent_key_heads": 16,
+        "conv_kernel": 4,
+        "ple_layers": 1,
+        "ple_dim": 2560,
+        "ple_kernel": 4,
+        "item_bytes": 4,
+        "allocation_step": 256,
+        "fixed_bytes": 235622400,
+        "bound": "fp32-capacity-plus-recurrent-rollback"
+      }
+    },
+    "chat_template_options": {},
+    "weight_residency": {
+      "wired": true,
+      "wired_limit_bytes": 120259084288,
+      "previous_wired_limit_bytes": 0,
+      "active_bytes_at_wire": 74417223600,
+      "mechanism": "mlx set_wired_limit -> MTLResidencySet requestResidency"
+    },
+    "mlx_build": {
+      "build": "0.32.5",
+      "kernels_verified": true
+    },
+    "route_receipt": "unqualified",
+    "capabilities": [
+      "apc_v2",
+      "continuous_batch",
+      "grammar",
+      "layered_cache",
+      "mtp",
+      "prefix_reuse",
+      "reasoning",
+      "segmented_mtp",
+      "streaming",
+      "text",
+      "tools"
+    ],
+    "implemented_capabilities": [
+      "apc_v2",
+      "continuous_batch",
+      "grammar",
+      "layered_cache",
+      "mtp",
+      "prefix_reuse",
+      "prompt_lookup",
+      "reasoning",
+      "segmented_mtp",
+      "streaming",
+      "text",
+      "tools"
+    ],
+    "selected_capabilities": [
+      "apc_v2",
+      "continuous_batch",
+      "grammar",
+      "layered_cache",
+      "mtp",
+      "prefix_reuse",
+      "reasoning",
+      "segmented_mtp",
+      "streaming",
+      "text",
+      "tools"
+    ],
+    "qualified_capabilities": [],
+    "media_route": null,
+    "qualification": "unqualified",
+    "max_context": 131072,
+    "max_lanes": 4,
+    "thinking_default": false,
+    "thinking_allowance_tokens": null,
+    "structured_output": {
+      "engines": [
+        "automaton",
+        "scanner"
+      ],
+      "thinking_deferral": true,
+      "constrained_tools": false,
+      "constrained_tools_implemented": true
+    },
+    "http": {
+      "max_request_bytes": 4259840
+    },
+    "sampling_defaults": {
+      "schema": "mlx2.sampling-defaults.v1",
+      "model": "Qwen/Qwen3.8-Flash-Next",
+      "general": "thinking",
+      "thinking": "thinking",
+      "non_thinking": "instruct",
+      "profiles": {
+        "thinking": {
+          "values": {
+            "temperature": 1.0,
+            "top_p": 0.95,
+            "top_k": 20,
+            "min_p": 0.0,
+            "repetition_penalty": 1.0,
+            "presence_penalty": 0.0
+          },
+          "sources": {
+            "temperature": "generation_config.json",
+            "top_p": "generation_config.json",
+            "top_k": "generation_config.json",
+            "min_p": "model card (Qwen/Qwen3.8-Flash-Next): thinking mode",
+            "repetition_penalty": "model card (Qwen/Qwen3.8-Flash-Next): thinking mode",
+            "presence_penalty": "model card (Qwen/Qwen3.8-Flash-Next): thinking mode"
+          }
+        },
+        "instruct": {
+          "values": {
+            "temperature": 0.7,
+            "top_p": 0.8,
+            "top_k": 20,
+            "min_p": 0.0,
+            "repetition_penalty": 1.0,
+            "presence_penalty": 1.5
+          },
+          "sources": {
+            "temperature": "model card (Qwen/Qwen3.8-Flash-Next): instruct (non-thinking) mode",
+            "top_p": "model card (Qwen/Qwen3.8-Flash-Next): instruct (non-thinking) mode",
+            "top_k": "model card (Qwen/Qwen3.8-Flash-Next): instruct (non-thinking) mode",
+            "min_p": "model card (Qwen/Qwen3.8-Flash-Next): instruct (non-thinking) mode",
+            "repetition_penalty": "model card (Qwen/Qwen3.8-Flash-Next): instruct (non-thinking) mode",
+            "presence_penalty": "model card (Qwen/Qwen3.8-Flash-Next): instruct (non-thinking) mode"
+          }
+        }
+      },
+      "artifact": {
+        "generation_config": {
+          "do_sample": true,
+          "temperature": 1.0,
+          "top_p": 0.95,
+          "top_k": 20
+        },
+        "mismatches": {}
+      }
+    },
+    "apcv2": {
+      "lookups": 5,
+      "hits": 0,
+      "misses": 5,
+      "queried_tokens": 135,
+      "cached_tokens": 0,
+      "stores": 0,
+      "interior_hits": 0,
+      "rolling_hits": 0,
+      "junction_hits": 0,
+      "sidecar_ancestor_hits": 0,
+      "pressure_live_alias_skips": 0,
+      "clears": 0,
+      "discarded_lookups": {},
+      "retention": {
+        "policy": {
+          "policy": "lru"
+        },
+        "value_evictions": 0,
+        "value_reordered_evictions": 0
+      },
+      "lifetime": {
+        "lookups": 5,
+        "hits": 0,
+        "misses": 5,
+        "queried_tokens": 135,
+        "cached_tokens": 0,
+        "stores": 0,
+        "interior_hits": 0,
+        "rolling_hits": 0,
+        "junction_hits": 0,
+        "sidecar_ancestor_hits": 0,
+        "pressure_live_alias_skips": 0
+      },
+      "cow_enabled": true,
+      "cow": {
+        "sources": 0,
+        "source_bytes": 0,
+        "freeze_failures": 0,
+        "branches": 0,
+        "branch_failures": 0,
+        "stale_rejections": 0,
+        "invalidations": 0,
+        "active_leases": 0,
+        "peak_leases": 0,
+        "descriptor_aliases": 0,
+        "descriptor_bytes": 0,
+        "avoided_copy_bytes": 0,
+        "materializations": 0,
+        "materialized_bytes": 0,
+        "fallback_deepcopies": 0,
+        "fallback_bytes": 0,
+        "freeze_ns": 0,
+        "branch_ns": 0,
+        "fallback_ns": 0,
+        "releases": 0,
+        "planes": {},
+        "materialized_bytes_are_estimated": true,
+        "array_readbacks": 0
+      },
+      "recurrent_state_codec": {
+        "enabled": false,
+        "operation": null,
+        "codec": null,
+        "revision": null,
+        "fidelity": "exact",
+        "qualified": null,
+        "state": null,
+        "scope": "apcv2 stored entries (resident, interior checkpoints, disk); live state and rollback records stay exact",
+        "stores_encoded": 0,
+        "encoded_leaves": 0,
+        "source_bytes": 0,
+        "encoded_bytes": 0,
+        "key_mismatch_refusals": 0,
+        "disk_restore_validated": 0,
+        "payload_refusals": 0,
+        "process_decoded_leaves": 0
+      },
+      "max_tokens": 131072,
+      "resident_max_bytes": 17179869184,
+      "max_entry_tokens": 0,
+      "overlength_rejections": 0,
+      "boundary_rejections": 0,
+      "alignment_refusals": {},
+      "last_alignment_refusal": null,
+      "nonfinite_state_rejections": 0,
+      "stale_entry_drops": 0,
+      "idle_disk": {
+        "enabled": true,
+        "persistent": false,
+        "block_bytes": 0,
+        "idle_seconds": 180.0,
+        "resident_bytes": 0,
+        "disk_bytes": 0,
+        "disk_max_bytes": 63678286233,
+        "background_spill": true,
+        "pressure_drop_superseded": true,
+        "background_spill_inflight": 0,
+        "background_spill_inflight_bytes": 0,
+        "background_spill_retained_bytes": 0,
+        "background_spill_settle_seconds": 5.0,
+        "spill_write_seconds": 60.0,
+        "restore_read_seconds": 60.0,
+        "restore_staging_reserved_bytes": 0,
+        "restore_read_failed": false,
+        "background_spill_writes_blocked": false,
+        "background_spill_max_bytes": 4294967296,
+        "recent": {
+          "spills": {
+            "10s": {
+              "count": 0
+            },
+            "1m": {
+              "count": 0
+            },
+            "5m": {
+              "count": 0
+            },
+            "30m": {
+              "count": 0
+            }
+          },
+          "restores": {
+            "10s": {
+              "count": 0
+            },
+            "1m": {
+              "count": 0
+            },
+            "5m": {
+              "count": 0
+            },
+            "30m": {
+              "count": 0
+            }
+          }
+        },
+        "disk_entries": 0,
+        "idle_spills": 0,
+        "pressure_spills": 0,
+        "background_spills_submitted": 0,
+        "background_spills_published": 0,
+        "background_spills_kept_hot": 0,
+        "background_spills_discarded": 0,
+        "background_spill_failures": 0,
+        "background_spill_timeouts": 0,
+        "late_spills_published": 0,
+        "background_spill_sync_fallbacks": 0,
+        "restores": 0,
+        "restore_failures": 0,
+        "restore_budget_deferrals": 0,
+        "restore_transient_deferrals": 0,
+        "spill_failures": 0,
+        "oversize_spills": 0,
+        "spill_capacity_skips": 0,
+        "park_deferred_to_worker": 0,
+        "shutdown_parks_skipped": 0,
+        "pinned_parks_lost": 0,
+        "disk_evictions": 0,
+        "bytes_written": 0,
+        "bytes_read": 0,
+        "parks": 0,
+        "resumes": 0,
+        "prefetch_restores_ok": 0,
+        "prefetch_restores_abandoned": 0,
+        "prefetch_restores_failed": 0,
+        "prefetch_restores_cancelled": 0,
+        "prefetch_hits": 0,
+        "prefetch_misses": 0,
+        "session_deletes": 0,
+        "pin_expiries": 0,
+        "pin_cap_rejections": 0,
+        "publication_rejections": 0,
+        "persistence_io_failures": 0,
+        "persisted_writes": 0,
+        "quarantined": 0,
+        "quarantine_evictions": 0,
+        "restore_digest_failures": 0,
+        "restore_nonfinite_state": 0,
+        "pressure_superseded_drops": 0,
+        "pressure_superseded_drop_bytes": 0,
+        "superseded_drop_regrets": 0,
+        "superseded_drop_regret_tokens": 0
+      },
+      "persistence": {
+        "enabled": false,
+        "metadata_transaction": {
+          "completion": "ready",
+          "reload_required": false,
+          "worker_pending": false,
+          "payload_bytes": 0,
+          "directory_lock_retained": false,
+          "deadline_seconds": 5.0,
+          "operation": null
+        },
+        "rescan": {
+          "registered": 0,
+          "registered_bytes": 0,
+          "suspension_epochs": {},
+          "skipped": 0,
+          "discarded": {},
+          "elapsed_seconds": 0.0
+        },
+        "schema": null,
+        "quarantine": {
+          "entries": 0,
+          "bytes": 0,
+          "evictions": 0,
+          "max_entries": 128,
+          "max_bytes": 1073741824
+        }
+      },
+      "sessions": {
+        "enabled": true,
+        "max_ttl_seconds": 3600,
+        "pinned_disk_bytes_per_tenant": 68719476736,
+        "pinned_disk_bytes_global": 63678286233,
+        "pinned_disk_bytes_current": 0,
+        "pinned_resident_bytes_per_tenant": 12884901888,
+        "prefetch_ttl_seconds": 30
+      },
+      "cache_capsules": {
+        "reservations": 0,
+        "reservation_rejections": 0,
+        "reserved_bytes_peak": 0,
+        "reserved_bytes": 0
+      },
+      "ast_memo": {
+        "schema": "mlx2.apcv2.ast-memo.v1",
+        "authority": "APCv2",
+        "enabled": false,
+        "debug_enabled": false,
+        "apc_semantic_epoch": 0,
+        "scope_epochs": [],
+        "executor_entries": 0,
+        "session_entries": 0,
+        "executor_bytes": 0,
+        "session_bytes": 0,
+        "scopes": 0,
+        "tag_bindings": 0,
+        "debug_records": 0,
+        "debug_bytes": 0,
+        "stats": {},
+        "invalidations": {}
+      },
+      "interior": {
+        "entries": 0,
+        "max_entries": 512,
+        "resident_bytes": 0,
+        "reused_entries": 0,
+        "lifetime_reused_entries": 0
+      },
+      "reuse_telemetry": {
+        "hit_age_seconds": {
+          "buckets": [
+            1.0,
+            5.0,
+            30.0,
+            120.0,
+            600.0,
+            3600.0
+          ],
+          "bucket_counts": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "count": 0,
+          "sum": 0.0
+        },
+        "eviction_age_seconds": {
+          "buckets": [
+            1.0,
+            5.0,
+            30.0,
+            120.0,
+            600.0,
+            3600.0
+          ],
+          "bucket_counts": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "count": 0,
+          "sum": 0.0
+        },
+        "eviction_idle_seconds": {
+          "buckets": [
+            1.0,
+            5.0,
+            30.0,
+            120.0,
+            600.0,
+            3600.0
+          ],
+          "bucket_counts": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "count": 0,
+          "sum": 0.0
+        },
+        "eviction_hit_count": {
+          "buckets": [
+            0.0,
+            1.0,
+            2.0,
+            5.0,
+            10.0
+          ],
+          "bucket_counts": [
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "count": 0,
+          "sum": 0.0
+        }
+      },
+      "recent_drops": [],
+      "version": 2,
+      "layout_name": "qwen4-exp-layer-segments-v1",
+      "layer_segments": {
+        "schema": "apcv2.layer-segments.v1",
+        "entries": 0,
+        "disk_entries": 0,
+        "layers": 0,
+        "plane_layers": 0,
+        "segments": 0,
+        "logical_bytes": 0,
+        "by_plane": {}
+      }
+    },
+    "cache_capsules": null,
+    "approximate_kv": {
+      "enabled": false,
+      "state": "implemented",
+      "fidelity": "exact",
+      "applied": 0,
+      "declined": 0,
+      "mtp_lanes": 0,
+      "requantized_prefix_hits": 0,
+      "apcv2_store_skipped_approximate": 0
+    },
+    "scheduler": {
+      "self_mtp_copy_rounds": 0,
+      "self_mtp_copy_proposed_tokens": 0,
+      "self_mtp_copy_accepted_tokens": 0,
+      "self_mtp_copy_probe_rounds": 0,
+      "self_mtp_copy_gate_declines": 0,
+      "self_mtp_copy_lookup_misses": 0,
+      "self_mtp_copy_cohort_refusals": 0,
+      "prefill_scheduling_bypasses": 0,
+      "prefill_scheduling_bypass_forced": 0,
+      "prefill_scheduling_one_slice_clamps": 0,
+      "prefill_rounds": 0,
+      "prefill_only_rounds": 0,
+      "decode_priority_release_rounds": 0,
+      "decode_priority_deferred_rounds": 0,
+      "adaptive_prefill_release_rounds": 0,
+      "adaptive_prefill_slack_deferred_rounds": 0,
+      "adaptive_prefill_deadline_forced_rounds": 0,
+      "adaptive_prefill_apc_priority_admissions": 0,
+      "mtp_short_prefill_interleaved": 0,
+      "mtp_prefill_plan_exact_reshaped": 0,
+      "ordinary_prefill_plan_exact_reshaped": 0,
+      "short_prefill_overflow_admissions": 0,
+      "apc_interior_checkpoints_captured": 0,
+      "apc_interior_checkpoints_skipped_trimmable": 0,
+      "apc_interior_checkpoints_skipped_inexact": 0,
+      "prefill_chunk_rounds_recorded": 0,
+      "prefill_chunk_varied_requests": 0,
+      "adaptive_prefill_chunk_histogram": {},
+      "kv_planned_growth": true
+    },
+    "segmented_self_mtp": {
+      "requests": 0,
+      "physical_join_flag_reconciled": 0,
+      "width_lock_plain_fallbacks": 0,
+      "engaged": 0,
+      "declined": 0,
+      "failures": 0,
+      "fallback_physical_b2": 0,
+      "physical_b2_formations": 0,
+      "b1_target_forwards": 0,
+      "b1_draft_forwards": 0,
+      "batched_target_forwards": 0,
+      "batched_draft_forwards": 0,
+      "true_batched_requests": 0,
+      "true_batched_engaged": 0,
+      "true_batched_declined": 0,
+      "true_batched_generic_view": 0,
+      "true_batched_declined_no_view_operations": 0,
+      "true_batched_declined_view_refused": 0,
+      "live_width_change_deferrals": 0,
+      "layer_local_materializations": 0,
+      "recurrent_state_materializations": 0,
+      "recurrent_state_materialized_bytes": 0,
+      "row_state_splits": 0,
+      "segmented_attention_calls": 0,
+      "private_delta_candidate_checks": 0,
+      "private_delta_ineligible_disabled": 0,
+      "private_delta_ineligible_missing_base": 0,
+      "private_delta_ineligible_ragged_step": 0,
+      "private_delta_ineligible_empty_step": 0,
+      "private_delta_group_checks": 0,
+      "private_delta_group_shared_suffix": 0,
+      "private_delta_group_plain_shared": 0,
+      "private_delta_group_plain_unshared": 0,
+      "private_delta_group_base_tokens_cumulative": 0,
+      "private_delta_requests": 0,
+      "private_delta_declines": 0,
+      "private_delta_preflight_declines": 0,
+      "private_delta_late_gather_fallbacks": 0,
+      "private_delta_attention_calls": 0,
+      "private_delta_rows": 0,
+      "private_delta_base_tokens_cumulative": 0,
+      "private_delta_base_tokens_last": 0,
+      "private_delta_base_tokens_min": 0,
+      "private_delta_base_tokens_max": 0,
+      "private_delta_duplicate_base_storage_bytes_not_formed_cumulative": 0,
+      "shared_qsa_rows": 0,
+      "shared_qsa_base_bytes": 0,
+      "shared_qsa_private_bytes": 0,
+      "shared_qsa_materializations": 0,
+      "shared_qsa_materialized_bytes": 0,
+      "shared_qsa_batched_selections": 0,
+      "shared_qsa_policy_checks": 0,
+      "shared_qsa_policy_admitted": 0,
+      "shared_qsa_policy_declined": 0,
+      "shared_qsa_policy_context_tokens_cumulative": 0,
+      "shared_qsa_policy_remaining_tokens_cumulative": 0,
+      "shared_qsa_policy_cutoff_tokens_cumulative": 0,
+      "exact_set_fold_requests": 0,
+      "exact_set_fold_declines": 0,
+      "exact_set_fold_preflight_declines": 0,
+      "exact_set_fold_private_fallbacks": 0,
+      "exact_set_fold_attention_calls": 0,
+      "exact_set_fold_rows": 0,
+      "exact_set_fold_device_proofs": 0,
+      "independent_lineages_consumed": 0,
+      "full_prefix_materializations": 0,
+      "full_prefix_materialized_bytes": 0,
+      "transaction_branches": 0,
+      "transaction_promotions": 0,
+      "transaction_rejections": 0,
+      "transaction_canonicalizations": 0,
+      "committed_cycles": 0,
+      "recovery_checkpoint_captures": 0,
+      "recovery_checkpoint_restores": 0,
+      "recovery_checkpoint_failures": 0,
+      "accepted_zero": 0,
+      "accepted_partial": 0,
+      "accepted_all": 0,
+      "async_qsa_promotion_requests": 0,
+      "async_qsa_promotion_queued": 0,
+      "async_qsa_promotion_engaged": 0,
+      "async_qsa_promotion_declined": 0,
+      "async_qsa_promotion_declined_shared_suffix": 0,
+      "async_qsa_promotion_declined_memory": 0,
+      "async_qsa_admission_settled": 0,
+      "async_qsa_promotion_failures": 0,
+      "async_qsa_promotion_reserved_bytes": 0,
+      "async_qsa_promotion_patched_bytes": 0,
+      "async_qsa_promotion_wait_ns": 0,
+      "async_qsa_prequeue_requests": 0,
+      "async_qsa_prequeue_queued": 0,
+      "async_qsa_prequeue_bound": 0,
+      "async_qsa_prequeue_declined": 0,
+      "async_shared_state_prefix_fused_layers": 0,
+      "async_qsa_budget_checks": 0,
+      "async_qsa_budget_retained_segmented": 0,
+      "async_qsa_budget_promotions": 0,
+      "async_qsa_budget_remaining_tokens_cumulative": 0,
+      "async_qsa_budget_cutoff_tokens_cumulative": 0,
+      "device_synchronizations": 0,
+      "proposal_ns": 0,
+      "commit_ns": 0,
+      "zero_depth_fast_rounds": 0,
+      "quantized_kv_segmented_layers": 0,
+      "quantized_kv_segmented_attention_calls": 0,
+      "private_delta_width_1_requests": 0,
+      "private_delta_width_1_engaged": 0,
+      "private_delta_width_1_declined": 0,
+      "private_delta_width_2_requests": 0,
+      "private_delta_width_2_engaged": 0,
+      "private_delta_width_2_declined": 0,
+      "private_delta_width_3_requests": 0,
+      "private_delta_width_3_engaged": 0,
+      "private_delta_width_3_declined": 0,
+      "private_delta_width_4_requests": 0,
+      "private_delta_width_4_engaged": 0,
+      "private_delta_width_4_declined": 0,
+      "private_delta_width_5_requests": 0,
+      "private_delta_width_5_engaged": 0,
+      "private_delta_width_5_declined": 0,
+      "private_delta_width_6_requests": 0,
+      "private_delta_width_6_engaged": 0,
+      "private_delta_width_6_declined": 0,
+      "private_delta_width_7_requests": 0,
+      "private_delta_width_7_engaged": 0,
+      "private_delta_width_7_declined": 0,
+      "private_delta_width_8_requests": 0,
+      "private_delta_width_8_engaged": 0,
+      "private_delta_width_8_declined": 0,
+      "private_delta_width_9_requests": 0,
+      "private_delta_width_9_engaged": 0,
+      "private_delta_width_9_declined": 0,
+      "private_delta_width_other_requests": 0,
+      "private_delta_width_other_engaged": 0,
+      "private_delta_width_other_declined": 0,
+      "async_qsa_shared_prefix_fused_layers": 0,
+      "schema_version": 2,
+      "private_delta_decline_reasons": {},
+      "exact_set_fold_decline_reasons": {},
+      "environment_enabled": true,
+      "true_batched_environment_enabled": true,
+      "qsa_private_delta_environment_enabled": true,
+      "qsa_exact_set_fold_environment_enabled": true,
+      "shared_qsa_suffix_mode": "auto",
+      "shared_qsa_suffix_environment_enabled": true,
+      "async_qsa_promotion_environment_enabled": true,
+      "timing_enabled": false,
+      "counter_scope": "segmented_mechanism_only",
+      "array_readbacks": 0
+    },
+    "round_probe": {
+      "enabled": false
+    },
+    "spomin_live_surgery": {
+      "enabled": false
+    },
+    "metal_active_bytes": 74417223604,
+    "metal_peak_bytes": 75316257980,
+    "process_physical_footprint_bytes": 75219048664,
+    "execution": {
+      "moe": {
+        "fused_gate_up_layers": 0,
+        "expert_modes": [
+          "auto"
+        ],
+        "dispatches": {
+          "scalar": 0,
+          "tile4": 0
+        },
+        "fallbacks": 0,
+        "router_calls": 0,
+        "routed_decode": {
+          "modes": [
+            "gate_up_down_shared"
+          ],
+          "calls": 0,
+          "degraded": 0,
+          "fallbacks": 0,
+          "last_fallback": null,
+          "down_calls": 0,
+          "down_fallbacks": 0,
+          "down_last_fallback": null,
+          "shared_fold_calls": 0,
+          "shared_fold_fallbacks": 0,
+          "shared_fold_last_fallback": null,
+          "expert_views": true,
+          "served_down_rows": 2
+        },
+        "moe_window": {
+          "consumers": [],
+          "calls": {
+            "row_exact": 0,
+            "batch_decode": 0,
+            "verify": 0
+          },
+          "rows": 0,
+          "shared_fold_calls": 0,
+          "fallbacks": {
+            "row_exact": 0,
+            "batch_decode": 0,
+            "verify": 0
+          },
+          "last_fallback": null,
+          "topk_modes": [
+            "launch"
+          ],
+          "topk_calls": {
+            "launch": 0,
+            "fold": 0
+          },
+          "topk_fallbacks": 0,
+          "topk_last_fallback": null,
+          "topk_fold_max_rows": 3,
+          "batch_decode_max_rows": 8,
+          "window_shared": true
+        },
+        "weighted_sum": {
+          "layers": 49,
+          "calls": 0,
+          "fallbacks": 0,
+          "last_fallback": null
+        }
+      },
+      "policy": {
+        "num_draft": 3,
+        "shared_qsa_suffix": "auto",
+        "async_qsa_promotion": true,
+        "known_tail_ple_prefetch": true,
+        "indexed_qsa": "auto",
+        "indexed_fused_merge": false,
+        "indexed_output_gate": false,
+        "allow_unverified_indexed": false,
+        "shared_qsa_min_context": 16380,
+        "shared_qsa_max_remaining": 64,
+        "private_delta_min_context": 65536,
+        "indexed_min_context": 16384,
+        "eager_dispatch": true,
+        "eager_dispatch_max_rows": 64,
+        "eager_dispatch_stride": 2,
+        "prefill_step": 8192,
+        "prefill_plan_exact_slices": true,
+        "qsa_lazy_causal_mask": true,
+        "ple_read_policy": "adaptive",
+        "ple_adaptive_warm": true,
+        "hc_prefill_kernels": true,
+        "qsa_batch_decode_sparse": "indexed",
+        "qsa_batch_decode_sparse_min_context": 32768,
+        "lane_dense": true
+      },
+      "hc_decode": {
+        "enabled": true,
+        "broken": false,
+        "calls": 0,
+        "inject_calls": 0,
+        "row_exact_calls": 0,
+        "row_exact_mode": false,
+        "multi_row_mode": "auto",
+        "launches": 0,
+        "declines": {},
+        "calls_by_format": {},
+        "errors": 0,
+        "last_decline": null,
+        "last_error": null
+      },
+      "round_levers": {
+        "ple_tail_prefetch_requests": 0,
+        "ple_tail_prefetch_tables": 0,
+        "ple_tail_prefetch_declined": 0,
+        "ple_tail_prefetch_failures": 0,
+        "ple_prefetch_submitted": 0,
+        "ple_prefetch_rows": 0,
+        "ple_dq_hits": 0,
+        "ple_dq_misses": 0,
+        "device_sampled_drafts": 0,
+        "host_accept_rounds": 0,
+        "host_accept_rows_skipped": 0,
+        "hedge_built": 0,
+        "hedge_hit": 0,
+        "hedge_miss": 0,
+        "hedge_consumed": 0,
+        "hedge_skipped": 0,
+        "hedge_discarded": 0,
+        "eager_async_evals": 0,
+        "eager_dispatch_forwards": 0,
+        "eager_dispatch_row_declines": 0,
+        "qsa_pooled_key_cache_hits": 0,
+        "qsa_pooled_key_cache_misses": 0,
+        "qsa_pooled_key_tail_hits": 0,
+        "qsa_scatter_chosen_calls": 0
+      },
+      "hc_prefill": {
+        "enabled": true,
+        "qualified": false,
+        "max_rows": 8192,
+        "counters": {}
+      },
+      "moe_pad": {
+        "policy": "adaptive",
+        "floor_rows_per_expert": 3,
+        "padded_calls": 0,
+        "pad_rows": 0,
+        "engaged": false,
+        "qualified": false,
+        "cost_model_host": "Apple M5 Max",
+        "cost_model_host_matches": true,
+        "cost_model_assignment_range": [
+          160,
+          2040
+        ],
+        "cost_model_mlx": "0.32.4",
+        "cost_model_runtime_matches": false,
+        "choices": {}
+      },
+      "moe_nax_gather": {
+        "mode": "fused",
+        "nax_host": true,
+        "device_name": "Apple M5 Max",
+        "calls": {
+          "gather": 0,
+          "swiglu": 0,
+          "swiglu_map": 0,
+          "swiglu_split": 0,
+          "swiglu_split_map": 0
+        },
+        "calls_by_format": {},
+        "affine_bits": [
+          4,
+          6,
+          8
+        ],
+        "fallbacks": {},
+        "not_candidates": 0,
+        "not_prefill": 0,
+        "last_fallback": null,
+        "verified": {}
+      },
+      "eager_dispatch": {
+        "enabled": true,
+        "max_rows": 64,
+        "stride": 2,
+        "forwards": 0,
+        "row_declines": 0,
+        "async_evals": 0
+      },
+      "ple_tables": [
+        {
+          "lookups": 0,
+          "rows": 0,
+          "unique_rows": 0,
+          "bytes_read": 0,
+          "elapsed_seconds": 0.0,
+          "cache_hits": 0,
+          "cache_misses": 0,
+          "cache_evictions": 0,
+          "read_policy": {
+            "schema": "mlx2.qwen4-ple-read-policy.v1",
+            "configured": "adaptive",
+            "selected": true,
+            "qualified": false,
+            "effective": "pooled",
+            "phase": "load",
+            "failure": null,
+            "io": {
+              "deadline_seconds": 60.0,
+              "foreground_failure": null,
+              "prefetch_failure": null,
+              "warm_failure": null
+            },
+            "warming": {
+              "enabled": true,
+              "state": "completed",
+              "refresh_pending": true,
+              "error": null
+            },
+            "calibration": {
+              "phase": "load",
+              "rows_per_arm": 128,
+              "serial_ns": 11220375,
+              "pooled_ns": 8213083,
+              "pooled_workers": 64,
+              "margin_percent": 20,
+              "selected": "pooled"
+            },
+            "counts": {
+              "load_calibrations": 1,
+              "warmed_calibrations": 0,
+              "warm_signals": 1,
+              "warm_refreshes": 0,
+              "warm_refresh_failures": 0,
+              "foreground_serial_calls": 0,
+              "foreground_pooled_calls": 0,
+              "foreground_serial_rows": 0,
+              "foreground_pooled_rows": 0
+            },
+            "last_receipt": {
+              "event": "calibration",
+              "phase": "load",
+              "rows_per_arm": 128,
+              "serial_ns": 11220375,
+              "pooled_ns": 8213083,
+              "pooled_workers": 64,
+              "margin_percent": 20,
+              "selected": "pooled"
+            }
+          }
+        }
+      ],
+      "fused_gdn": {
+        "fused_calls": 0,
+        "fused_outproj_calls": 0,
+        "fallbacks": 0,
+        "last_fallbacks": {},
+        "decode_fallback_reasons": {},
+        "verify_calls": 0,
+        "verify_fallbacks": 0,
+        "verify_last_fallbacks": {},
+        "verify_fallback_reasons": {},
+        "replay_verify_calls": 0,
+        "replay_rollback_calls": 0,
+        "replay_rollback_tokens": 0,
+        "replay_fallbacks": 0,
+        "replay_fallback_reasons": {},
+        "catchup_calls": 0,
+        "catchup_fallbacks": 0,
+        "catchup_last_fallbacks": {},
+        "prefill_calls": 0,
+        "prefill_fallbacks": 0,
+        "prefill_norm_eager": 0,
+        "prefill_fallback_reasons": {},
+        "batch_decode": {
+          "modes": [
+            "row_exact"
+          ],
+          "calls": 0,
+          "rows": 0,
+          "fallbacks": 0,
+          "fallback_reasons": {},
+          "last_fallbacks": {}
+        }
+      },
+      "fused_gate_inject": {
+        "enabled": false,
+        "implemented": true,
+        "model_validation_passed": true,
+        "qualified": false,
+        "selected": false,
+        "observed_used": false,
+        "counts": {},
+        "last_decision": null,
+        "upstream_revision": "03a667aa304f2a8e02a9a02b2e3fb45d64bcae7f",
+        "model_validation_receipt": "qualification/runs/qwen4-gate-inject-20260930/model-validation.json",
+        "physical_engagement_receipt": "qualification/runs/qwen4-gate-inject-20260930/candidate-dispatch-count.json"
+      },
+      "ple_compile": {
+        "enabled": true,
+        "cache_max": 32,
+        "min_seen": 2,
+        "counts": {
+          "builds": 0,
+          "hits": 0,
+          "fallbacks": 0,
+          "cold_eager": 0,
+          "evictions": 0,
+          "skips": 0,
+          "retraces": 0,
+          "invalidations": 0
+        },
+        "last_receipt": null
+      },
+      "indexed_qsa": {
+        "enabled": true,
+        "mode": "auto",
+        "min_query_width": 2,
+        "max_query_width": 8,
+        "min_context": 16384,
+        "max_context": 0,
+        "auto_min_context_m3": 16384,
+        "auto_min_context_m1": 65536,
+        "splits_override": 0,
+        "split_candidates": [
+          128,
+          64,
+          32,
+          16,
+          8
+        ],
+        "hpt_override": 0,
+        "hpt_candidates": [
+          12
+        ],
+        "hpt_ladder_enabled": false,
+        "mlx_version": "0.32.5",
+        "mlx_build_hash": null,
+        "mlx_build_verified": true,
+        "mlx_build_allow_unverified": false,
+        "sdpa_header_verified": true,
+        "sdpa_header_sha256_prefix": "b44d2c3541a0",
+        "counts": {},
+        "query_width_counts": {
+          "1": {},
+          "2-8": {},
+          "9-17": {},
+          ">17": {}
+        },
+        "candidate": null,
+        "geometry_candidates": {},
+        "fallbacks": 0,
+        "device_attestation": {
+          "expected": 0,
+          "observed": 0,
+          "mismatches": 0,
+          "pending": 0
+        },
+        "fused_merge": {
+          "engaged": false,
+          "fallbacks": 0,
+          "candidate": null,
+          "gate_engaged": false,
+          "gate_path": null,
+          "gate_refusals": 0,
+          "gate_last_refusal": null
+        },
+        "fully_masked_output": "zero",
+        "last_decision": null
+      },
+      "qsa_stage1": {
+        "mode": "auto",
+        "min_query_width": 64,
+        "min_physical_kv": 65024,
+        "candidates": {
+          "keys_stationary_configured": false,
+          "keys_stationary_min_query": 64,
+          "keys_stationary_qualification": "not_qualified_benefit",
+          "keys_stationary_selected": false,
+          "onepass_topk_configured": false,
+          "onepass_topk_min_blocks": 2048,
+          "onepass_topk_qualification": "rejected_performance",
+          "onepass_topk_selected": false,
+          "direct_selector_configured": "off",
+          "direct_selector_min_blocks": 1,
+          "direct8_qualification": "qualified_default_off",
+          "direct4_qualification": "qualified_default_off",
+          "gvr_qualification": "unqualified_research_candidate",
+          "selective_qualification": "unqualified_scalar_f32_candidate",
+          "selective_selected": false,
+          "gvr_count_paths": false,
+          "direct_selector_selected": false,
+          "direct_selector_observed_used": false,
+          "qualification_receipt": "qualification/runs/qsa-stage1-pr91-20260928/qualification.json",
+          "direct_selector_qualification_receipt": "qualification/runs/qsa-stage1-direct-selector-20261004/qualification-direct8-accepted-final.json",
+          "direct_selector_model_receipt": "qualification/runs/qsa-stage1-direct-selector-20261004/model-ab-65k-direct8.json",
+          "default_producer": "mpp_exact_band",
+          "default_selector": "radix_exact",
+          "runtime_counts": {}
+        },
+        "attempts": 0,
+        "engagements": 0,
+        "fallbacks": 0,
+        "counts": {},
+        "last_receipt": null
+      },
+      "qsa_nax_prefill": {
+        "mode": "auto",
+        "min_query_width": 64,
+        "min_physical_kv": 8192,
+        "batched": false,
+        "law": "v2",
+        "law_id": "qsa-nax-v2-bf16p",
+        "nax_host": true,
+        "device_name": "Apple M5 Max",
+        "kernel_available": null,
+        "attempts": 0,
+        "engagements": 0,
+        "fallbacks": 0,
+        "counts": {},
+        "last_receipt": null
+      },
+      "qsa_lazy_causal_mask": {
+        "qualification": "unqualified",
+        "counts": {}
+      },
+      "qsa_batch_decode_sparse": {
+        "mode": "indexed",
+        "min_context": 32768,
+        "attempts": 0,
+        "engagements": 0,
+        "fallbacks": 0,
+        "counts": {}
+      },
+      "qsa_mtp_amendment": {
+        "calls": 0,
+        "noops": 0,
+        "amendments": 0,
+        "failures": 0,
+        "appended_blocks": 0,
+        "max_appended_blocks": 0
+      },
+      "qsa_rollback": {
+        "physical_finalize_calls": 0,
+        "physical_finalize_noops": 0,
+        "physical_kv_roll_calls": 0,
+        "physical_kv_arrays_rolled": 0,
+        "physical_kv_bytes_rewritten": 0,
+        "physical_index_roll_calls": 0,
+        "segmented_finalize_calls": 0,
+        "segmented_self_mtp_finalize_calls": 0,
+        "segmented_trim_calls": 0,
+        "segmented_rows_trimmed": 0
+      },
+      "segmented_mtp": {
+        "requests": 0,
+        "physical_join_flag_reconciled": 0,
+        "width_lock_plain_fallbacks": 0,
+        "engaged": 0,
+        "declined": 0,
+        "failures": 0,
+        "fallback_physical_b2": 0,
+        "physical_b2_formations": 0,
+        "b1_target_forwards": 0,
+        "b1_draft_forwards": 0,
+        "batched_target_forwards": 0,
+        "batched_draft_forwards": 0,
+        "true_batched_requests": 0,
+        "true_batched_engaged": 0,
+        "true_batched_declined": 0,
+        "true_batched_generic_view": 0,
+        "true_batched_declined_no_view_operations": 0,
+        "true_batched_declined_view_refused": 0,
+        "live_width_change_deferrals": 0,
+        "layer_local_materializations": 0,
+        "recurrent_state_materializations": 0,
+        "recurrent_state_materialized_bytes": 0,
+        "row_state_splits": 0,
+        "segmented_attention_calls": 0,
+        "private_delta_candidate_checks": 0,
+        "private_delta_ineligible_disabled": 0,
+        "private_delta_ineligible_missing_base": 0,
+        "private_delta_ineligible_ragged_step": 0,
+        "private_delta_ineligible_empty_step": 0,
+        "private_delta_group_checks": 0,
+        "private_delta_group_shared_suffix": 0,
+        "private_delta_group_plain_shared": 0,
+        "private_delta_group_plain_unshared": 0,
+        "private_delta_group_base_tokens_cumulative": 0,
+        "private_delta_requests": 0,
+        "private_delta_declines": 0,
+        "private_delta_preflight_declines": 0,
+        "private_delta_late_gather_fallbacks": 0,
+        "private_delta_attention_calls": 0,
+        "private_delta_rows": 0,
+        "private_delta_base_tokens_cumulative": 0,
+        "private_delta_base_tokens_last": 0,
+        "private_delta_base_tokens_min": 0,
+        "private_delta_base_tokens_max": 0,
+        "private_delta_duplicate_base_storage_bytes_not_formed_cumulative": 0,
+        "shared_qsa_rows": 0,
+        "shared_qsa_base_bytes": 0,
+        "shared_qsa_private_bytes": 0,
+        "shared_qsa_materializations": 0,
+        "shared_qsa_materialized_bytes": 0,
+        "shared_qsa_batched_selections": 0,
+        "shared_qsa_policy_checks": 0,
+        "shared_qsa_policy_admitted": 0,
+        "shared_qsa_policy_declined": 0,
+        "shared_qsa_policy_context_tokens_cumulative": 0,
+        "shared_qsa_policy_remaining_tokens_cumulative": 0,
+        "shared_qsa_policy_cutoff_tokens_cumulative": 0,
+        "exact_set_fold_requests": 0,
+        "exact_set_fold_declines": 0,
+        "exact_set_fold_preflight_declines": 0,
+        "exact_set_fold_private_fallbacks": 0,
+        "exact_set_fold_attention_calls": 0,
+        "exact_set_fold_rows": 0,
+        "exact_set_fold_device_proofs": 0,
+        "independent_lineages_consumed": 0,
+        "full_prefix_materializations": 0,
+        "full_prefix_materialized_bytes": 0,
+        "transaction_branches": 0,
+        "transaction_promotions": 0,
+        "transaction_rejections": 0,
+        "transaction_canonicalizations": 0,
+        "committed_cycles": 0,
+        "recovery_checkpoint_captures": 0,
+        "recovery_checkpoint_restores": 0,
+        "recovery_checkpoint_failures": 0,
+        "accepted_zero": 0,
+        "accepted_partial": 0,
+        "accepted_all": 0,
+        "async_qsa_promotion_requests": 0,
+        "async_qsa_promotion_queued": 0,
+        "async_qsa_promotion_engaged": 0,
+        "async_qsa_promotion_declined": 0,
+        "async_qsa_promotion_declined_shared_suffix": 0,
+        "async_qsa_promotion_declined_memory": 0,
+        "async_qsa_admission_settled": 0,
+        "async_qsa_promotion_failures": 0,
+        "async_qsa_promotion_reserved_bytes": 0,
+        "async_qsa_promotion_patched_bytes": 0,
+        "async_qsa_promotion_wait_ns": 0,
+        "async_qsa_prequeue_requests": 0,
+        "async_qsa_prequeue_queued": 0,
+        "async_qsa_prequeue_bound": 0,
+        "async_qsa_prequeue_declined": 0,
+        "async_shared_state_prefix_fused_layers": 0,
+        "async_qsa_budget_checks": 0,
+        "async_qsa_budget_retained_segmented": 0,
+        "async_qsa_budget_promotions": 0,
+        "async_qsa_budget_remaining_tokens_cumulative": 0,
+        "async_qsa_budget_cutoff_tokens_cumulative": 0,
+        "device_synchronizations": 0,
+        "proposal_ns": 0,
+        "commit_ns": 0,
+        "zero_depth_fast_rounds": 0,
+        "quantized_kv_segmented_layers": 0,
+        "quantized_kv_segmented_attention_calls": 0,
+        "private_delta_width_1_requests": 0,
+        "private_delta_width_1_engaged": 0,
+        "private_delta_width_1_declined": 0,
+        "private_delta_width_2_requests": 0,
+        "private_delta_width_2_engaged": 0,
+        "private_delta_width_2_declined": 0,
+        "private_delta_width_3_requests": 0,
+        "private_delta_width_3_engaged": 0,
+        "private_delta_width_3_declined": 0,
+        "private_delta_width_4_requests": 0,
+        "private_delta_width_4_engaged": 0,
+        "private_delta_width_4_declined": 0,
+        "private_delta_width_5_requests": 0,
+        "private_delta_width_5_engaged": 0,
+        "private_delta_width_5_declined": 0,
+        "private_delta_width_6_requests": 0,
+        "private_delta_width_6_engaged": 0,
+        "private_delta_width_6_declined": 0,
+        "private_delta_width_7_requests": 0,
+        "private_delta_width_7_engaged": 0,
+        "private_delta_width_7_declined": 0,
+        "private_delta_width_8_requests": 0,
+        "private_delta_width_8_engaged": 0,
+        "private_delta_width_8_declined": 0,
+        "private_delta_width_9_requests": 0,
+        "private_delta_width_9_engaged": 0,
+        "private_delta_width_9_declined": 0,
+        "private_delta_width_other_requests": 0,
+        "private_delta_width_other_engaged": 0,
+        "private_delta_width_other_declined": 0,
+        "async_qsa_shared_prefix_fused_layers": 0,
+        "schema_version": 2,
+        "private_delta_decline_reasons": {},
+        "exact_set_fold_decline_reasons": {},
+        "environment_enabled": true,
+        "true_batched_environment_enabled": true,
+        "qsa_private_delta_environment_enabled": true,
+        "qsa_exact_set_fold_environment_enabled": true,
+        "shared_qsa_suffix_mode": "auto",
+        "shared_qsa_suffix_environment_enabled": true,
+        "async_qsa_promotion_environment_enabled": true,
+        "timing_enabled": false,
+        "counter_scope": "segmented_mechanism_only",
+        "array_readbacks": 0
+      },
+      "attn_fused_rows": {
+        "enabled": true,
+        "device_class": "s",
+        "counts": {},
+        "kernel_failures": []
+      },
+      "tensorfold_longctx": {
+        "selected": [
+          "qsa_fused_scores"
+        ],
+        "qsa_fused_scores": {
+          "enabled": true,
+          "counts": {}
+        }
+      },
+      "norm_convention": {
+        "trunk": "converted",
+        "head": {
+          "mtp.hyper_connection_mixer.hc_norm.weight": {
+            "raw": false,
+            "evidence": "sha256 known shifted: Qwen3.8-Flash-Next-MLX-4bit-MTP (float32-upcast SHA-256, 2026-09-25; identical in -Uncensored-MLX2-4bit-MTP, -Uncensored-MLX-Serve-4bit and -MLX-4bit-MTP-VLM; self-MTP acceptance 0.742)",
+            "stored_mean": 4.7882
+          },
+          "mtp.layers.0.attn_hyper_connection.hc_norm.weight": {
+            "raw": false,
+            "evidence": "mean 1.275 vs trunk family 1.036 (gap -0.239) in [-0.8, 0.25]",
+            "stored_mean": 1.2751
+          },
+          "mtp.layers.0.mlp_hyper_connection.hc_norm.weight": {
+            "raw": false,
+            "evidence": "sha256 known shifted: Qwen3.8-Flash-Next-MLX-4bit-MTP (float32-upcast SHA-256, 2026-09-25; identical in -Uncensored-MLX2-4bit-MTP, -Uncensored-MLX-Serve-4bit and -MLX-4bit-MTP-VLM; self-MTP acceptance 0.742)",
+            "stored_mean": 2.7311
+          },
+          "mtp.layers.0.self_attn.indexer.k_layernorm.weight": {
+            "raw": false,
+            "evidence": "mean 1.082 vs trunk family 0.954 (gap -0.127) in [-0.8, 0.25]",
+            "stored_mean": 1.0819
+          },
+          "mtp.layers.0.self_attn.indexer.q_layernorm.weight": {
+            "raw": false,
+            "evidence": "mean 1.099 vs trunk family 0.954 (gap -0.145) in [-0.8, 0.25]",
+            "stored_mean": 1.0987
+          },
+          "mtp.layers.0.self_attn.k_norm.weight": {
+            "raw": false,
+            "evidence": "sha256 known shifted: Qwen3.8-Flash-Next-MLX-4bit-MTP (float32-upcast SHA-256, 2026-09-25; identical in -Uncensored-MLX2-4bit-MTP, -Uncensored-MLX-Serve-4bit and -MLX-4bit-MTP-VLM; self-MTP acceptance 0.742)",
+            "stored_mean": 3.6766
+          },
+          "mtp.layers.0.self_attn.q_norm.weight": {
+            "raw": false,
+            "evidence": "sha256 known shifted: Qwen3.8-Flash-Next-MLX-4bit-MTP (float32-upcast SHA-256, 2026-09-25; identical in -Uncensored-MLX2-4bit-MTP, -Uncensored-MLX-Serve-4bit and -MLX-4bit-MTP-VLM; self-MTP acceptance 0.742)",
+            "stored_mean": 3.6769
+          },
+          "mtp.pre_fc_norm_embedding.weight": {
+            "raw": false,
+            "evidence": "unpaired mean 0.236 >= 0.15",
+            "stored_mean": 0.2358
+          },
+          "mtp.pre_fc_norm_hidden.weight": {
+            "raw": false,
+            "evidence": "unpaired mean 0.672 >= 0.15",
+            "stored_mean": 0.6716
+          }
+        },
+        "repaired_head": []
+      },
+      "lane_dense": {
+        "schema": "mlx2.flash-next-lane-dense.v1",
+        "state": "implemented-unqualified",
+        "law_id": "lane-matmul-v1+stock-below[bf16:16,fp16:16,q2:8,q3:8,q4:8,q5:8,q6:8,q8:8]+skip[83456f40a80b]+grouped",
+        "mode": "crossover",
+        "min_rows": {
+          "q2": 8,
+          "q3": 8,
+          "q4": 8,
+          "q5": 8,
+          "q6": 8,
+          "q8": 8,
+          "bf16": 16,
+          "fp16": 16
+        },
+        "covered_by_format": {
+          "affine-q8-g64": 248
+        },
+        "covered": {
+          "language_model.lm_head": 1,
+          "language_model.model.layers.*.linear_attn.in_proj_a": 36,
+          "language_model.model.layers.*.linear_attn.in_proj_b": 36,
+          "language_model.model.layers.*.linear_attn.in_proj_qkv": 36,
+          "language_model.model.layers.*.linear_attn.in_proj_z": 36,
+          "language_model.model.layers.*.linear_attn.out_proj": 36,
+          "language_model.model.layers.*.self_attn.indexer.index_qk_proj": 12,
+          "language_model.model.layers.*.self_attn.k_proj": 12,
+          "language_model.model.layers.*.self_attn.o_proj": 12,
+          "language_model.model.layers.*.self_attn.q_proj": 12,
+          "language_model.model.layers.*.self_attn.v_proj": 12,
+          "mtp.fc_embedding": 1,
+          "mtp.fc_hidden": 1,
+          "mtp.layers.*.self_attn.indexer.index_qk_proj": 1,
+          "mtp.layers.*.self_attn.k_proj": 1,
+          "mtp.layers.*.self_attn.o_proj": 1,
+          "mtp.layers.*.self_attn.q_proj": 1,
+          "mtp.layers.*.self_attn.v_proj": 1
+        },
+        "excluded": {
+          "language_model.model.hyper_connection_mixer.input_mix_weight_down": {
+            "reason": "hyper-connection projections: hc_decode_kernels (1-8 rows), hc_prefill_kernels (9+ rows) and the compiled HC glue read their weights directly",
+            "count": 1
+          },
+          "language_model.model.hyper_connection_mixer.input_mix_weight_up": {
+            "reason": "hyper-connection projections: hc_decode_kernels (1-8 rows), hc_prefill_kernels (9+ rows) and the compiled HC glue read their weights directly",
+            "count": 1
+          },
+          "language_model.model.layers.*.attn_hyper_connection.block_inject_weight": {
+            "reason": "hyper-connection projections: hc_decode_kernels (1-8 rows), hc_prefill_kernels (9+ rows) and the compiled HC glue read their weights directly",
+            "count": 48
+          },
+          "language_model.model.layers.*.attn_hyper_connection.input_mix_weight_down": {
+            "reason": "hyper-connection projections: hc_decode_kernels (1-8 rows), hc_prefill_kernels (9+ rows) and the compiled HC glue read their weights directly",
+            "count": 48
+          },
+          "language_model.model.layers.*.attn_hyper_connection.input_mix_weight_up": {
+            "reason": "hyper-connection projections: hc_decode_kernels (1-8 rows), hc_prefill_kernels (9+ rows) and the compiled HC glue read their weights directly",
+            "count": 48
+          },
+          "language_model.model.layers.*.mlp.gate": {
+            "reason": "mixture-of-experts block: the router gate, the shared expert and its gate stay on the routed kernels (moe_routed_decode folds the shared expert and gate into its launches, moe_window and varlen sparse MoE read their weights directly); routed experts are SwitchLinear, never lane classes",
+            "count": 48
+          },
+          "language_model.model.layers.*.mlp.shared_expert.down_proj": {
+            "reason": "mixture-of-experts block: the router gate, the shared expert and its gate stay on the routed kernels (moe_routed_decode folds the shared expert and gate into its launches, moe_window and varlen sparse MoE read their weights directly); routed experts are SwitchLinear, never lane classes",
+            "count": 48
+          },
+          "language_model.model.layers.*.mlp.shared_expert.gate_proj": {
+            "reason": "mixture-of-experts block: the router gate, the shared expert and its gate stay on the routed kernels (moe_routed_decode folds the shared expert and gate into its launches, moe_window and varlen sparse MoE read their weights directly); routed experts are SwitchLinear, never lane classes",
+            "count": 48
+          },
+          "language_model.model.layers.*.mlp.shared_expert.up_proj": {
+            "reason": "mixture-of-experts block: the router gate, the shared expert and its gate stay on the routed kernels (moe_routed_decode folds the shared expert and gate into its launches, moe_window and varlen sparse MoE read their weights directly); routed experts are SwitchLinear, never lane classes",
+            "count": 48
+          },
+          "language_model.model.layers.*.mlp.shared_expert_gate": {
+            "reason": "mixture-of-experts block: the router gate, the shared expert and its gate stay on the routed kernels (moe_routed_decode folds the shared expert and gate into its launches, moe_window and varlen sparse MoE read their weights directly); routed experts are SwitchLinear, never lane classes",
+            "count": 48
+          },
+          "language_model.model.layers.*.mlp.switch_mlp.down_proj": {
+            "reason": "mixture-of-experts block: the router gate, the shared expert and its gate stay on the routed kernels (moe_routed_decode folds the shared expert and gate into its launches, moe_window and varlen sparse MoE read their weights directly); routed experts are SwitchLinear, never lane classes",
+            "count": 48
+          },
+          "language_model.model.layers.*.mlp.switch_mlp.gate_proj": {
+            "reason": "mixture-of-experts block: the router gate, the shared expert and its gate stay on the routed kernels (moe_routed_decode folds the shared expert and gate into its launches, moe_window and varlen sparse MoE read their weights directly); routed experts are SwitchLinear, never lane classes",
+            "count": 48
+          },
+          "language_model.model.layers.*.mlp.switch_mlp.up_proj": {
+            "reason": "mixture-of-experts block: the router gate, the shared expert and its gate stay on the routed kernels (moe_routed_decode folds the shared expert and gate into its launches, moe_window and varlen sparse MoE read their weights directly); routed experts are SwitchLinear, never lane classes",
+            "count": 48
+          },
+          "language_model.model.layers.*.mlp_hyper_connection.block_inject_weight": {
+            "reason": "hyper-connection projections: hc_decode_kernels (1-8 rows), hc_prefill_kernels (9+ rows) and the compiled HC glue read their weights directly",
+            "count": 48
+          },
+          "language_model.model.layers.*.mlp_hyper_connection.input_mix_weight_down": {
+            "reason": "hyper-connection projections: hc_decode_kernels (1-8 rows), hc_prefill_kernels (9+ rows) and the compiled HC glue read their weights directly",
+            "count": 48
+          },
+          "language_model.model.layers.*.mlp_hyper_connection.input_mix_weight_up": {
+            "reason": "hyper-connection projections: hc_decode_kernels (1-8 rows), hc_prefill_kernels (9+ rows) and the compiled HC glue read their weights directly",
+            "count": 48
+          },
+          "language_model.model.layers.*.ple.key_proj": {
+            "reason": "PLE projections run inside the PLE compiled chain (mx.compile): the lane dispatch and its counters would be fixed at trace time",
+            "count": 1
+          },
+          "language_model.model.layers.*.ple.value_proj": {
+            "reason": "PLE projections run inside the PLE compiled chain (mx.compile): the lane dispatch and its counters would be fixed at trace time",
+            "count": 1
+          },
+          "mtp.hyper_connection_mixer.input_mix_weight_down": {
+            "reason": "hyper-connection projections: hc_decode_kernels (1-8 rows), hc_prefill_kernels (9+ rows) and the compiled HC glue read their weights directly",
+            "count": 1
+          },
+          "mtp.hyper_connection_mixer.input_mix_weight_up": {
+            "reason": "hyper-connection projections: hc_decode_kernels (1-8 rows), hc_prefill_kernels (9+ rows) and the compiled HC glue read their weights directly",
+            "count": 1
+          },
+          "mtp.layers.*.attn_hyper_connection.block_inject_weight": {
+            "reason": "hyper-connection projections: hc_decode_kernels (1-8 rows), hc_prefill_kernels (9+ rows) and the compiled HC glue read their weights directly",
+            "count": 1
+          },
+          "mtp.layers.*.attn_hyper_connection.input_mix_weight_down": {
+            "reason": "hyper-connection projections: hc_decode_kernels (1-8 rows), hc_prefill_kernels (9+ rows) and the compiled HC glue read their weights directly",
+            "count": 1
+          },
+          "mtp.layers.*.attn_hyper_connection.input_mix_weight_up": {
+            "reason": "hyper-connection projections: hc_decode_kernels (1-8 rows), hc_prefill_kernels (9+ rows) and the compiled HC glue read their weights directly",
+            "count": 1
+          },
+          "mtp.layers.*.mlp.gate": {
+            "reason": "mixture-of-experts block: the router gate, the shared expert and its gate stay on the routed kernels (moe_routed_decode folds the shared expert and gate into its launches, moe_window and varlen sparse MoE read their weights directly); routed experts are SwitchLinear, never lane classes",
+            "count": 1
+          },
+          "mtp.layers.*.mlp.shared_expert.down_proj": {
+            "reason": "mixture-of-experts block: the router gate, the shared expert and its gate stay on the routed kernels (moe_routed_decode folds the shared expert and gate into its launches, moe_window and varlen sparse MoE read their weights directly); routed experts are SwitchLinear, never lane classes",
+            "count": 1
+          },
+          "mtp.layers.*.mlp.shared_expert.gate_proj": {
+            "reason": "mixture-of-experts block: the router gate, the shared expert and its gate stay on the routed kernels (moe_routed_decode folds the shared expert and gate into its launches, moe_window and varlen sparse MoE read their weights directly); routed experts are SwitchLinear, never lane classes",
+            "count": 1
+          },
+          "mtp.layers.*.mlp.shared_expert.up_proj": {
+            "reason": "mixture-of-experts block: the router gate, the shared expert and its gate stay on the routed kernels (moe_routed_decode folds the shared expert and gate into its launches, moe_window and varlen sparse MoE read their weights directly); routed experts are SwitchLinear, never lane classes",
+            "count": 1
+          },
+          "mtp.layers.*.mlp.shared_expert_gate": {
+            "reason": "mixture-of-experts block: the router gate, the shared expert and its gate stay on the routed kernels (moe_routed_decode folds the shared expert and gate into its launches, moe_window and varlen sparse MoE read their weights directly); routed experts are SwitchLinear, never lane classes",
+            "count": 1
+          },
+          "mtp.layers.*.mlp.switch_mlp.down_proj": {
+            "reason": "mixture-of-experts block: the router gate, the shared expert and its gate stay on the routed kernels (moe_routed_decode folds the shared expert and gate into its launches, moe_window and varlen sparse MoE read their weights directly); routed experts are SwitchLinear, never lane classes",
+            "count": 1
+          },
+          "mtp.layers.*.mlp.switch_mlp.gate_proj": {
+            "reason": "mixture-of-experts block: the router gate, the shared expert and its gate stay on the routed kernels (moe_routed_decode folds the shared expert and gate into its launches, moe_window and varlen sparse MoE read their weights directly); routed experts are SwitchLinear, never lane classes",
+            "count": 1
+          },
+          "mtp.layers.*.mlp.switch_mlp.up_proj": {
+            "reason": "mixture-of-experts block: the router gate, the shared expert and its gate stay on the routed kernels (moe_routed_decode folds the shared expert and gate into its launches, moe_window and varlen sparse MoE read their weights directly); routed experts are SwitchLinear, never lane classes",
+            "count": 1
+          },
+          "mtp.layers.*.mlp_hyper_connection.block_inject_weight": {
+            "reason": "hyper-connection projections: hc_decode_kernels (1-8 rows), hc_prefill_kernels (9+ rows) and the compiled HC glue read their weights directly",
+            "count": 1
+          },
+          "mtp.layers.*.mlp_hyper_connection.input_mix_weight_down": {
+            "reason": "hyper-connection projections: hc_decode_kernels (1-8 rows), hc_prefill_kernels (9+ rows) and the compiled HC glue read their weights directly",
+            "count": 1
+          },
+          "mtp.layers.*.mlp_hyper_connection.input_mix_weight_up": {
+            "reason": "hyper-connection projections: hc_decode_kernels (1-8 rows), hc_prefill_kernels (9+ rows) and the compiled HC glue read their weights directly",
+            "count": 1
+          }
+        },
+        "refused": {
+          "skipped": 545
+        },
+        "routed_experts": "SwitchLinear tables: not lane classes, kernels unchanged",
+        "draft_loop_prior": null
+      }
+    },
+    "admission": {},
+    "memory_waiting": 0,
+    "headroom_bytes": 13958643712,
+    "host_memory_pressure_level": 0,
+    "host_memory_available_bytes": 0,
+    "host_snapshot_timing": {
+      "collections": 400,
+      "collection_ns": 1534125,
+      "publication_wait_ns": 917,
+      "publication_hold_ns": 47625,
+      "max_collection_ns": 38232209,
+      "max_publication_hold_ns": 232375
+    },
+    "healthy": true,
+    "error": null,
+    "eval_watchdog": {
+      "enabled": true,
+      "bound_seconds": 600.0,
+      "abort_on_trip": false,
+      "phase": null,
+      "stall": null,
+      "trips": 0,
+      "recoveries": 0
+    },
+    "residency_heartbeat": {
+      "implemented": true,
+      "qualified": false,
+      "enabled": true,
+      "state": "beating",
+      "reason": null,
+      "running": true,
+      "keep_seconds": 600.0,
+      "interval_seconds": 0.5,
+      "idle_seconds": 416.97,
+      "pulses": 748,
+      "pulse_ms_last": 0.605,
+      "pulse_ms_max": 40.709,
+      "idle_expiries": 0,
+      "pressure_stops": 0,
+      "restarts": 0,
+      "last_pressure_level": 0,
+      "stream_index": 3,
+      "generation_stream_index": 1,
+      "mechanism": "tiny command buffer on the heartbeat thread's own GPU stream (MLX attaches its wired residency set to every queue)",
+      "error": null
+    },
+    "inflight": 0,
+    "accepted_lifecycles": 0,
+    "tokenizers_v1": {
+      "implemented": true,
+      "qualified": false,
+      "selected": false,
+      "observed_used": false,
+      "serving_qualified": false
+    },
+    "queue_depth": 0,
+    "counts": {
+      "thinking_budget_forced_closes": 0,
+      "apc_shutdown_parks_skipped": 0,
+      "apc_shutdown_pinned_parks_lost": 0,
+      "tool_call_parse_fallbacks": 0,
+      "tool_markers_served_as_text": 0,
+      "output_framing_repairs": 0,
+      "tool_call_constraint_failures": 0,
+      "tool_call_constraint_truncations": 0,
+      "tool_call_id_replacements": 0,
+      "schema_ref_failures": 0,
+      "structured_output_dead_ends": 0,
+      "structured_reasoning_force_closed": 0,
+      "structured_reasoning_unclosed": 0,
+      "constrained_tool_grammar_engagements": 0,
+      "constrained_tool_grammar_skips": 0,
+      "constrained_tool_grammar_auto_engagements": 0,
+      "constrained_tool_grammar_streams": 0,
+      "tolerant_tool_marker_requests": 0,
+      "quiesce_requests": 0,
+      "drains_completed": 0,
+      "drain_timeouts": 0,
+      "jobs_drained": 0,
+      "suspends": 0,
+      "suspended_entries": 0,
+      "suspended_bytes": 0,
+      "suspend_failures": 0,
+      "resumes": 0,
+      "prefetches_queued": 0,
+      "prefetches_cancelled": 0,
+      "apc_invalidation_pinned_parks_lost": 0,
+      "apc_suspend_pinned_parks_lost": 0,
+      "apc_interior_positions_planned_turn": 0,
+      "apc_interior_positions_planned_tail": 0,
+      "apc_interior_positions_planned_lattice": 0,
+      "apc_interior_positions_skipped_media": 0,
+      "apc_interior_requests_skipped_continuation": 0,
+      "apc_warm_slices_unaligned": 0,
+      "apc_interior_positions_dropped_unaligned": 0,
+      "apc_interior_positions_headroom_capped": 0,
+      "apc_interior_hits": 0,
+      "apc_interior_hits_turn_boundary": 0,
+      "apc_interior_hit_tokens": 0,
+      "apc_interior_turn_marker_missing": 0,
+      "admissions_rejected_rerank": 0,
+      "admissions_rejected_batch": 0,
+      "admissions_rejected_generation": 0,
+      "admissions_rejected_projection": 0,
+      "admissions_rejected_session_prefetch": 0,
+      "admissions_rejected_embeddings": 0,
+      "admissions_rejected_distributed": 0,
+      "admissions_rejected_audio": 0,
+      "gpu_keep_warm_ticks": 0,
+      "gpu_keep_warm_idle_windows": 0,
+      "gpu_keep_warm_expired_windows": 0,
+      "gpu_keep_warm_warm_resumes": 0,
+      "gpu_keep_warm_failures": 0,
+      "memory_cache_reclaims_before_reject": 3332,
+      "memory_footprint_settles": 3332,
+      "memory_footprint_settle_settled": 3332,
+      "memory_footprint_settle_wait_ms": 88,
+      "memory_footprint_settle_released_bytes": 1771159624,
+      "memory_admission_deferred": 5,
+      "memory_admission_retries": 1104,
+      "memory_admission_timeouts": 5
+    },
+    "gpu_keep_warm": {
+      "enabled": true,
+      "window_seconds": 60.0,
+      "interval_seconds": 0.5,
+      "active": true,
+      "failed": false,
+      "counts": {
+        "tick": 0,
+        "idle_window": 0,
+        "expired_window": 0,
+        "warm_resume": 0,
+        "failure": 0
+      }
+    },
+    "quiesce": {
+      "state": "serving",
+      "terminal_cleanup_pending": 0,
+      "since": 1795700137.547301,
+      "timestamps": {
+        "serving": 1795700137.547301
+      },
+      "drain_deadline": null,
+      "suspend_requested": false,
+      "last_transition": {
+        "from": null,
+        "to": "serving",
+        "at": 1795700137.547301,
+        "result": {
+          "status": "initialized"
+        }
+      },
+      "model_residency": null
+    },
+    "admissions_rejected": {
+      "audio": 0,
+      "batch": 0,
+      "distributed": 0,
+      "embeddings": 0,
+      "generation": 0,
+      "projection": 0,
+      "rerank": 0,
+      "session_prefetch": 0
+    },
+    "int8_prefill": {
+      "schema": "mlx2.int8-prefill.v1",
+      "enabled": false,
+      "scope": "mlp",
+      "row_threshold": 512,
+      "cache": "auto",
+      "ttl_s": 120.0,
+      "active": false,
+      "fidelity": "exact",
+      "modules": 0,
+      "counts": {},
+      "selected": false,
+      "observed_used": false,
+      "auto": {
+        "requested": "auto",
+        "census": {
+          "q8": 300,
+          "q45": 0,
+          "other_quantized": 0,
+          "linear": 0
+        },
+        "policy": {
+          "enabled": true,
+          "scope": "all",
+          "row_threshold": 512,
+          "cache": "auto",
+          "ttl_s": 120.0,
+          "q8_inplace": true,
+          "act_scale": "group64",
+          "q8_only": true
+        },
+        "feature_record": {
+          "checkpoint": "Qwen3.8-Flash-Next-Uncensored-MLX2-4bit-MTP@sha256:25c2da42836b90dd13fc63e1b0d49aa765512de8ff07a22384595bf5b3fd5248",
+          "approved": "Pierre, 2026-11-09 (\"Yes, qualify it\")",
+          "evidence": {
+            "files": [
+              "qualification/runs/fn-int8-experts-e2e-20261109-r2/results.json"
+            ],
+            "source_revision": "e3e917442723bd23271b54f853be2051bbd0abc1",
+            "decision_row": true
+          },
+          "bound_set_sha256": null
+        },
+        "resolved": "off",
+        "revision": "46f0d38f7a6683afbebcdcc236c49d825846cab70d6dd2e12d39d841ccfb1c4e",
+        "reason": "bind refused: int8 prefill weight build needs 21656698880 headroom bytes; available 13958643712"
+      }
+    },
+    "recurrent_state_codec": {
+      "enabled": false
+    },
+    "lane_matmul": {
+      "requested": "auto",
+      "mode": "crossover",
+      "installed": true,
+      "law_id": "lane-matmul-v1+stock-below[bf16:16,fp16:16,q2:8,q3:8,q4:8,q5:8,q6:8,q8:8]+skip[83456f40a80b]+grouped",
+      "arithmetic_class": {
+        "schema": "mlx2.arithmetic-class.v1",
+        "operation": "installed-lane-projection-family",
+        "algorithm_version": 1,
+        "architecture": "applegpu_g17s",
+        "runtime_revision": "0.32.5",
+        "scope": "family-recipe; loaded-artifact-and-installed-format-bindings-required",
+        "input_dtype": "mixed-supported",
+        "output_dtype": "mixed-supported",
+        "accumulator_dtype": "float32",
+        "dimensions": [],
+        "dataflow": [
+          [
+            "backend",
+            "apple-mpp-tensor-ops"
+          ],
+          [
+            "formats",
+            "existing-per-format-primitive-and-rounding; no-cross-format-equality"
+          ],
+          [
+            "split",
+            "fixed-by-stacked-weight-shape-and-format; independent-of-M"
+          ],
+          [
+            "merge",
+            "ascending-split-order-fp32-add"
+          ],
+          [
+            "epilogue",
+            "existing-per-format-output-cast-after-complete-fold"
+          ],
+          [
+            "implementation_sha256",
+            "d63340a10048a0b073669ef8dc1ed31e130cc00d34cab69cdd0b902c10076532"
+          ]
+        ],
+        "fingerprint": "d5d66fa54918a1540b40969863da224b5460095b47e82a703a3c5885380e5ab2"
+      },
+      "arithmetic_class_fingerprint": "d5d66fa54918a1540b40969863da224b5460095b47e82a703a3c5885380e5ab2",
+      "backend": "mpp",
+      "simd_twins": null,
+      "covered": {
+        "affine-q8-g64": 248
+      },
+      "refused": {
+        "skipped": 545
+      },
+      "groups": {
+        "affine-q8-g64x3": 13,
+        "affine-q8-g64x4": 36
+      },
+      "declared_groups": {},
+      "min_rows": {
+        "q2": 8,
+        "q3": 8,
+        "q4": 8,
+        "q5": 8,
+        "q6": 8,
+        "q8": 8,
+        "bf16": 16,
+        "fp16": 16
+      },
+      "max_rows": 32,
+      "exact_verify_window": null,
+      "detected": {
+        "moe": true,
+        "formats": {
+          "q8": 646,
+          "bf16": 147
+        },
+        "backend": "mpp"
+      },
+      "family": "qwen4-flash-next",
+      "sources": {
+        "mode": "adapter:qwen4-flash-next.moe",
+        "max_rows": "builtin",
+        "chunk_above_max": "builtin",
+        "grouping": "builtin",
+        "declared_groups": "builtin",
+        "skip": "adapter:qwen4-flash-next",
+        "min_rows.q2": "builtin",
+        "min_rows.q3": "builtin",
+        "min_rows.q4": "builtin",
+        "min_rows.q5": "builtin",
+        "min_rows.q6": "builtin",
+        "min_rows.q8": "builtin",
+        "min_rows.bf16": "builtin",
+        "min_rows.fp16": "builtin",
+        "moe": "adapter:qwen4-flash-next"
+      },
+      "counts": {}
+    },
+    "verify_bitexact": {
+      "schema": "mlx2.verify-bitexact.v1",
+      "enabled": false,
+      "active": false
+    },
+    "sp_qmm": {
+      "enabled": false
+    },
+    "qmm_row_pad": {
+      "enabled": false
+    },
+    "qsdpa_verify": {
+      "counts": {
+        "verify_kernel_calls": 0,
+        "verify_kernel_left_padded": 0,
+        "composed_calls": 0
+      },
+      "by_rows": {},
+      "selected_host_branches": {
+        "scope": "process",
+        "process_id": 83744,
+        "basis": "selected_host_graph_branch",
+        "epoch": 0,
+        "counts": {
+          "direct_decode": 0,
+          "direct_verify": 0,
+          "composed": 0,
+          "composed_tiled": 0,
+          "dequantized_flash": 0
+        }
+      }
+    },
+    "fp_decode_attention": {
+      "implemented": true,
+      "selected": false,
+      "version": "fp-gqa-strided-masked-v4",
+      "min_context": 65536,
+      "basis": "selected_host_graph_branch",
+      "observed_host_dispatch": false,
+      "counts": {
+        "fp_decode_kernel_calls": 0,
+        "fp_decode_gqa16_calls": 0
+      }
+    },
+    "d512_decode_attention": {
+      "loaded": false,
+      "counts": {}
+    },
+    "fp_verify_attention": {
+      "implemented": true,
+      "selected": false,
+      "qualified": false,
+      "observed_host_dispatch": false,
+      "profile": "m5-fp-verify-tensor-v1",
+      "counts": {}
+    },
+    "batch_rows_attention": {
+      "configured": "sdpa",
+      "qualification": "unqualified_research_option",
+      "counts": {
+        "rows_calls": 0,
+        "rows_padding_reads": 0,
+        "rows_fallbacks": 0,
+        "rows_foreign_mask": 0
+      }
+    },
+    "prefill_tail_row": {
+      "loaded": false,
+      "counts": {}
+    },
+    "prefill_tail_skip": {
+      "configured": "unset",
+      "family_defaults": {
+        "gemma4": "1",
+        "nemotron_h": "1",
+        "gpt_oss": "1",
+        "qwen38_27b": "1",
+        "flint": "1",
+        "mellum": "1",
+        "laguna": "1",
+        "hy_v4_flash": "1"
+      },
+      "unlisted_family_default": "0",
+      "effective_modes": {},
+      "counts": {}
+    },
+    "sampling_filter": {
+      "configured": "unset",
+      "default": "0",
+      "policy": "reference",
+      "qualification": "unqualified_opt_in",
+      "counts_unit": "constructions",
+      "max_top_k": 1024,
+      "counts": {},
+      "top_p_topk512": {
+        "configured": "unset",
+        "default": "0",
+        "policy": "reference",
+        "qualification": "unqualified_opt_in",
+        "window": 512,
+        "counts_unit": "calls",
+        "counts": {
+          "fast": 0,
+          "dense_fallback": 0,
+          "eager_checks": 0,
+          "deferred_checks": 0,
+          "deferred_redos": 0
+        }
+      }
+    },
+    "recent_receipts": [],
+    "checkpoint_resources": {
+      "action": "not_applicable"
+    },
+    "recent_operation_receipts": [],
+    "model_revision": 0,
+    "kernel_reload": {
+      "enabled": false,
+      "epoch": 0,
+      "execution_identity": null,
+      "pending": false,
+      "phase": "idle",
+      "last_reload": null,
+      "weight_space_conflicts": []
+    },
+    "lora": {
+      "enabled": false,
+      "active": null
+    },
+    "multi_lora": {
+      "enabled": false
+    },
+    "weight_overlays": {
+      "implemented": true,
+      "qualified": false,
+      "selected": false,
+      "observed_used": false
+    },
+    "layer_excision": {
+      "implemented": true,
+      "qualified": false,
+      "selected": false,
+      "observed_used": false
+    },
+    "ablation_overlays": {
+      "implemented": true,
+      "qualified": false,
+      "selected": false,
+      "observed_used": false
+    },
+    "expert_masks": {
+      "implemented": true,
+      "qualified": false,
+      "selected": false,
+      "observed_used": false
+    },
+    "host_prompt_cache": {
+      "schema": "mlx2.host-prompt-cache.v1",
+      "entries": 1,
+      "tokens": 27,
+      "max_entries": 128,
+      "max_tokens": 1048576,
+      "clears": 1,
+      "cleared_entries": 0,
+      "misses": 1,
+      "stores": 1,
+      "hits": 4
+    },
+    "incremental_tokenizer_cache": {
+      "schema": "mlx2.incremental-tokenizer-cache.v1",
+      "implemented": true,
+      "qualified": false,
+      "selected": false,
+      "observed_used": false,
+      "serving_qualified": false,
+      "default": "off",
+      "tokenizer_revision": null,
+      "lifecycle_epoch": 1,
+      "source_mutation_policy": "isolated_by_immutable_bound_snapshots",
+      "ordinary_reference": "independent_bound_full_snapshot",
+      "refusal": null,
+      "entries": 0,
+      "characters": 0,
+      "tokens": 0,
+      "bounds": {
+        "entries": 0,
+        "characters": 8388608,
+        "tokens": 1048576
+      }
+    },
+    "reasoning_signing": {
+      "key_id": "71e43f137e528165",
+      "ephemeral": true
+    },
+    "target_artifact": "25c2da42836b90dd13fc63e1b0d49aa765512de8ff07a22384595bf5b3fd5248",
+    "api_resources": {
+      "responses": {
+        "entries": 0,
+        "bytes": 0,
+        "max_entries": 128,
+        "max_bytes": 33554432,
+        "durable": false,
+        "counts": {}
+      },
+      "files": {
+        "files": 0,
+        "bytes": 0,
+        "max_files": 128,
+        "max_file_bytes": 33554432,
+        "max_bytes": 134217728,
+        "durable": false,
+        "counts": {}
+      },
+      "batches": {
+        "batches": 0,
+        "max_batches": 32,
+        "max_lines": 1000,
+        "durable": false,
+        "states": {},
+        "requests_completed": 0,
+        "requests_failed": 0,
+        "counts": {}
+      }
+    },
+    "tenant_auth": {
+      "enabled": false
+    },
+    "usage": {
+      "enabled": true,
+      "persistent": false,
+      "timezone": "EST",
+      "limits": {
+        "enabled": false
+      }
+    },
+    "agent_compat": {
+      "mode": "on",
+      "enabled": true,
+      "custom_tool_grammar": "off",
+      "tenant_policies": 0,
+      "detection": false
+    },
+    "reasoning_replay": {
+      "enabled": true,
+      "format": "mlx2.reasoning.v1",
+      "authentication": "HMAC-SHA256",
+      "confidentiality": false,
+      "payload_encoding": "base64url-utf8",
+      "scope": [
+        "model",
+        "tenant"
+      ],
+      "key_persistence": "process"
+    },
+    "hosted_tools": {
+      "configured": false
+    },
+    "semantic_memory": {
+      "enabled": false
+    }
+  },
+  "plist_sha256": "027a7f33e3363b87e331c2fd529d0f90ac2bc18a9c077e335ff1247d0f96ba43",
+  "service_restoration_required": true,
+  "thermal_before": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded\n",
+  "swap_before": "total = 14336.00M  used = 12845.25M  free = 1490.75M  (encrypted)\n"
+}

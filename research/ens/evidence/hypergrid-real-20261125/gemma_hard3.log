@@ -1,0 +1,10 @@
+loaded in 2s
+layers 30 dense I 2112 experts 128 close 101 open [100, 45518, 107] stop [1, 50, 106]
+reused 49 traces from gemma_hard2.traces.json
+S done: sel64/act64 overlap 0.043 t=18s
+B 0 full True nothink True t=20s
+B 1 full True nothink False t=30s
+B 2 full True nothink False t=34s
+B 3 full True nothink False t=39s
+B 4 full True nothink False t=50s
+B 5 full True nothink False t=59s

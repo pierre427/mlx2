@@ -1,0 +1,16 @@
+--- held-out odd, n=24: no-think unablated 50.0%
+  sel64      50.0%  right->wrong  0  wrong->right  0  entropy 0.187
+  act64       0.0%  right->wrong 12  wrong->right  0  entropy 1.358
+  rnd64_s0   58.3%  right->wrong  0  wrong->right  2  entropy 0.277
+  rnd64_s1   41.7%  right->wrong  2  wrong->right  0  entropy 0.245
+  esel8      58.3%  right->wrong  0  wrong->right  2  entropy 0.241
+  eact8      25.0%  right->wrong  6  wrong->right  0  entropy 0.656
+  ernd8      45.8%  right->wrong  1  wrong->right  0  entropy 0.261
+--- even (sets chosen on their thinking), n=24: no-think unablated 66.7%
+  sel64      66.7%  right->wrong  0  wrong->right  0  entropy 0.175
+  act64       4.2%  right->wrong 16  wrong->right  1  entropy 1.439
+  rnd64_s0   62.5%  right->wrong  1  wrong->right  0  entropy 0.203
+  rnd64_s1   58.3%  right->wrong  3  wrong->right  1  entropy 0.200
+  esel8      70.8%  right->wrong  0  wrong->right  1  entropy 0.178
+  eact8      12.5%  right->wrong 13  wrong->right  0  entropy 0.460
+  ernd8      62.5%  right->wrong  1  wrong->right  0  entropy 0.192

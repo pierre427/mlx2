@@ -1,0 +1,5 @@
+09:46:49 preflight gone
+09:46:49 swap 9738M, starting
+gpuq: acquired Thu Nov 26 09:50:04 EST 2026 lease=ens-donor-20261125-ens-gemma-hard2-20261126 swapouts=319265876
+09:50:05 superseded by run_gemma3b.sh (started directly at orchestrator request)
+gpuq: releasing Thu Nov 26 09:50:05 EST 2026 rc=0 swapouts_delta=0
