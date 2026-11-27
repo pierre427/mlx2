@@ -365,12 +365,15 @@ def test_ling_prefetch_declines_shared_or_mixed_offsets(monkeypatch):
             assert getattr(bh._offset_table, "table", None) is None
 
 
-def test_ling_prefetch_is_default_off(monkeypatch):
+def test_ling_prefetch_is_default_on(monkeypatch):
     from mlx2.runtime.models import bailing_hybrid as bh
 
-    monkeypatch.delenv("MLX2_LING_PREFETCH_CACHE_OFFSETS", raising=False)
     layers = [SimpleNamespace(is_global=True)] * 2
     caches = [SimpleNamespace(offset=mx.array([4])), SimpleNamespace(offset=mx.array([6]))]
+    monkeypatch.delenv("MLX2_LING_PREFETCH_CACHE_OFFSETS", raising=False)
+    with bh._prefetched_cache_offsets(layers, caches):
+        assert getattr(bh._offset_table, "table", None) is not None
+    monkeypatch.setenv("MLX2_LING_PREFETCH_CACHE_OFFSETS", "0")
     with bh._prefetched_cache_offsets(layers, caches):
         assert getattr(bh._offset_table, "table", None) is None
 

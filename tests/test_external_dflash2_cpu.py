@@ -1964,16 +1964,27 @@ def test_unstructured_selector_skips_dense_host_rows_and_matches_noop_processor(
     monkeypatch.setattr(np,"asarray",observe)
     plain=d.draft_distributions([4],h,d.make_cache(),2,[RequestRNG(19)],[.8])
     assert (1,d.config.vocab_size) not in host_shapes
-    host_shapes.clear()
-    guarded=d.draft_distributions(
-        [4],h,d.make_cache(),2,[RequestRNG(19)],[.8],
-        logits_processors=[[lambda tokens,value:value]],
-        processor_histories=[[1,2,3]],
-    )
+    def run_guarded(batched):
+        monkeypatch.setenv("MLX2_DFLASH2_BATCHED_SELECTOR_READS","1" if batched else "0")
+        host_shapes.clear()
+        return d.draft_distributions(
+            [4],h,d.make_cache(),2,[RequestRNG(19)],[.8],
+            logits_processors=[[lambda tokens,value:value]],
+            processor_histories=[[1,2,3]],
+        )
+    # Reference path (=0): processor rows read the dense row on the host.
+    guarded=run_guarded(False)
     assert (1,d.config.vocab_size) in host_shapes
-    assert plain[0]==guarded[0]
-    for a,b in zip(plain[1][0],guarded[1][0]):
-        np.testing.assert_allclose(a,b,rtol=1e-6,atol=1e-8)
+    # Default batched selector reads keep the dense row on the device.
+    batched=run_guarded(True)
+    assert (1,d.config.vocab_size) not in host_shapes
+    for other in (guarded,batched):
+        assert plain[0]==other[0]
+        for a,b in zip(plain[1][0],other[1][0]):
+            np.testing.assert_allclose(a,b,rtol=1e-6,atol=1e-8)
+    assert guarded[0]==batched[0]
+    for a,b in zip(guarded[1][0],batched[1][0]):
+        np.testing.assert_array_equal(a,b)
 
 
 @pytest.mark.parametrize("ordinary",[False,True])

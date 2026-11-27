@@ -531,8 +531,8 @@ def _draft_distributions(
     predecessor_values = list(anchor_values)
     active = [True] * batch
     tokens = [[] for _ in range(batch)]; laws = [[] for _ in range(batch)]
-    # MLX2_DFLASH2_BATCHED_SELECTOR_READS=1 (default off; Pierre 2026-11-26:
-    # exact, A/B before any default).  Off reads edges, scores, the dense
+    # MLX2_DFLASH2_BATCHED_SELECTOR_READS (default on, Pierre 2026-11-27
+    # after the A/B below; =0 restores the per-read reference path).  Off reads edges, scores, the dense
     # row, the candidate ids and each processed row separately at every
     # position (Phase 0: five host reads per Raon round per position).  On
     # reads every position's candidate ids once, keeps the dense row on the
@@ -546,7 +546,7 @@ def _draft_distributions(
     # quiet 1K/13K 50.1/37.1 vs 43.7/36.3 tok/s, GSM8K decode median 88.4 vs
     # 84.6 (qualification/runs/specround-hostsync-20261126/raon).
     batched_reads = (
-        os.environ.get("MLX2_DFLASH2_BATCHED_SELECTOR_READS", "0") == "1"
+        os.environ.get("MLX2_DFLASH2_BATCHED_SELECTOR_READS", "1") != "0"
         and proposal_length > 0
     )
     all_ids = np.asarray(candidates) if batched_reads else None

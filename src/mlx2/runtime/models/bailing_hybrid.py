@@ -122,8 +122,8 @@ class ClampedSwiGLU(nn.Module):
         return clamped_swiglu(gate, x, self.swiglu_limit)
 
 
-# MLX2_LING_PREFETCH_CACHE_OFFSETS=1 (default off; Pierre 2026-11-26: exact,
-# A/B before any default).  Off, every MLA layer visit reads its size-1
+# MLX2_LING_PREFETCH_CACHE_OFFSETS (default on, Pierre 2026-11-27 after the
+# A/B below; =0 restores the per-visit reference reads).  Off, every MLA layer visit reads its size-1
 # ``cache.offset`` with ``.item()`` (Phase 0: 8.8 host reads per Ling MTP d2
 # round).  On, a trunk forward reads every global layer's size-1 integer
 # offset in one ``tolist()`` at its start and each layer's first visit takes
@@ -156,7 +156,7 @@ def _prefetchable_offset(cache):
 def _prefetched_cache_offsets(layers, cache):
     """Read the global layers' size-1 cache offsets of one forward at once."""
     if (
-        os.environ.get(_PREFETCH_OFFSETS_ENV, "0") != "1"
+        os.environ.get(_PREFETCH_OFFSETS_ENV, "1") == "0"
         or cache is None
         or getattr(_offset_table, "table", None) is not None
     ):
