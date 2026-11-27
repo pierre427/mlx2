@@ -447,7 +447,8 @@ def test_hq_mixed_affine_recipe_end_to_end_on_tiny_model(monkeypatch):
     hessians, rows, counts = HQ.calibrate(model, seqs, log=lambda *_: None)
     assert rows["1.moe_in"] == 6 * 24 and int(counts["1.moe_in"].sum()) == 6 * 24 * 2
     assert type(model.layers[1].moe.gate).__name__ == "Router"  # recorders removed
-    settings = HQ.HQSettings(formats=("a4g32", "a8g32"), budget_bpw=7.0, dense_bits=8, dense_group=32)
+    settings = HQ.HQSettings(formats=("a4g32", "a8g32"), budget_bpw=7.0, dense_bits=8, dense_group=32,
+                             scorer="hessian")
     planes, quant, receipt = HQ.plan_and_quantize(model, hessians, counts, settings, log=lambda *_: None)
     assert receipt["moe_mean_bpw"] <= 7.0 and set(receipt["schedule"].values()) <= {"a4g32", "a8g32"}
     # Knapsack: an 8-bit layer is the most-distorted-at-4-bit one.
@@ -467,6 +468,123 @@ def test_hq_mixed_affine_recipe_end_to_end_on_tiny_model(monkeypatch):
     assert not any(k.endswith(".conv.weight") for k in tensors)
 
 
+def test_hq_kl_scorer_probes_each_layer_restores_exactly_and_drives_the_schedule(tmp_path, monkeypatch):
+    from mlx2.adapters import raon1_mini as A
+    from mlx2.conversion import raon1_mini_hq as HQ
+
+    monkeypatch.setattr(HQ, "FORMATS", {"a4g32": (4, 32, 5.0), "a8g32": (8, 32, 9.0)})
+    model = _model(seed=3, scale=0.2)
+    model.configure(A.parse_policy({"merged_projections": False, "mhc": "ops"}))
+    mx.random.seed(7)
+    seqs = [mx.random.randint(1, 96, (24,)).tolist() for _ in range(8)]
+    calib, probe = seqs[:6], seqs[6:]
+    hessians, _rows, counts = HQ.calibrate(model, calib, log=lambda *_: None)
+    settings = HQ.HQSettings(formats=("a4g32", "a8g32"), budget_bpw=7.0, dense_bits=8, dense_group=32,
+                             seq=24, kl_rows=2, kl_skip=8)
+    assert settings.scorer == "kl" and settings.recipe == "raon1-mini-affine-mix-v3"
+    before = model(mx.array([probe[0]]))
+    banks = [type(l.moe.switch_mlp.gate_proj) for l in model.layers if l.is_moe]
+    costs, receipt = HQ.kl_costs(model, hessians, probe, settings, tmp_path, checkpoint="tiny@0",
+                                 log=lambda *_: None)
+    moe = [i for i, l in enumerate(model.layers) if l.is_moe]
+    assert sorted(costs) == moe and all(set(c) == {"a4g32", "a8g32"} for c in costs.values())
+    assert all(v >= 0 for c in costs.values() for v in c.values())
+    # 8-bit experts are closer to the source than 4-bit ones, summed over layers.
+    assert sum(c["a8g32"] for c in costs.values()) < sum(c["a4g32"] for c in costs.values())
+    assert receipt["restore_check"] == "bit-equal" and receipt["positions"] == 2 * (24 - 8)
+    # The model is exactly what it was: same modules, same logits.
+    assert [type(l.moe.switch_mlp.gate_proj) for l in model.layers if l.is_moe] == banks
+    assert mx.array_equal(model(mx.array([probe[0]])), before).item()
+    with pytest.raises(ValueError, match="needs the probe costs"):
+        HQ.plan_and_quantize(model, hessians, counts, settings, log=lambda *_: None)
+    planes, quant, plan = HQ.plan_and_quantize(model, hessians, counts, settings, log=lambda *_: None,
+                                               costs=costs)
+    assert plan["scorer"] == "kl" and plan["kl_costs"] == {str(k): v for k, v in costs.items()}
+    assert {int(k): v for k, v in plan["schedule"].items()} == HQ.knapsack(costs, 7.0, ("a4g32", "a8g32"))
+    assert "distortion" in plan  # the Hessian error is still recorded for comparison
+    with pytest.raises(ValueError, match="scorer must be"):
+        HQ.HQSettings(scorer="mse")
+
+
+def test_hq_kl_probe_on_mxfp8_banks_restores_in_place_and_survives_a_failing_score(tmp_path, monkeypatch):
+    """The production source keeps routed experts as mxfp8 QuantizedSwitchLinear banks (no biases
+    key, ``biases = None`` attribute): the probe swaps them to affine planes in place and must give
+    back exactly that, also when scoring raises mid-probe."""
+    from mlx2 import layer_kl
+    from mlx2.adapters import raon1_mini as A
+    from mlx2.conversion import raon1_mini_hq as HQ
+
+    monkeypatch.setattr(HQ, "FORMATS", {"a4g32": (4, 32, 5.0), "a8g32": (8, 32, 9.0)})
+    model = _model(seed=3, scale=0.2)
+    model.configure(A.parse_policy({"merged_projections": False, "mhc": "ops"}))
+    for layer in model.layers:
+        if layer.is_moe:
+            glu = layer.moe.switch_mlp
+            for name in ("gate_proj", "up_proj", "down_proj"):
+                setattr(glu, name, glu[name].to_quantized(group_size=32, bits=8, mode="mxfp8"))
+    mx.random.seed(7)
+    seqs = [mx.random.randint(1, 96, (24,)).tolist() for _ in range(8)]
+    hessians, _rows, _counts = HQ.calibrate(model, seqs[:6], log=lambda *_: None)
+    settings = HQ.HQSettings(formats=("a4g32", "a8g32"), budget_bpw=7.0, dense_group=32, seq=24,
+                             kl_rows=2, kl_skip=8)
+
+    def state():
+        out = []
+        for layer in model.layers:
+            if layer.is_moe:
+                for name in ("gate_proj", "up_proj", "down_proj"):
+                    m = layer.moe.switch_mlp[name]
+                    out.append((id(m), m.mode, m.bits, m.group_size, "biases" in m,
+                                m.__dict__.get("biases", "absent"), id(m["weight"]), id(m["scales"])))
+        return out
+
+    before, logits = state(), model(mx.array([seqs[6]]))
+    assert all(row[1] == "mxfp8" and row[4] is False and row[5] is None for row in before)
+    costs, receipt = HQ.kl_costs(model, hessians, seqs[6:], settings, tmp_path / "a", checkpoint="tiny@0",
+                                 log=lambda *_: None)
+    assert receipt["restore_check"] == "bit-equal" and state() == before
+    assert mx.array_equal(model(mx.array([seqs[6]])), logits).item()
+    # While substituted, the affine biases are what ``.biases`` reads (no stale None attribute).
+    index, layer = next((i, l) for i, l in enumerate(model.layers) if l.is_moe)
+    saved = HQ.apply_expert_format(layer, index, hessians, 4, 32, damp=0.01)
+    bank = layer.moe.switch_mlp.gate_proj
+    assert bank.mode == "affine" and bank.biases is not None and bank.biases is bank.get("biases")
+    HQ.restore_experts(saved)
+    assert state() == before
+    # A score that raises mid-probe still leaves the model exactly as it was.
+    real, calls = layer_kl.score, {"n": 0}
+
+    def flaky(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 3:
+            raise RuntimeError("boom")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(layer_kl, "score", flaky)
+    with pytest.raises(RuntimeError, match="boom"):
+        HQ.kl_costs(model, hessians, seqs[6:], settings, tmp_path / "b", checkpoint="tiny@0", log=lambda *_: None)
+    assert state() == before
+    assert mx.array_equal(model(mx.array([seqs[6]])), logits).item()
+
+
+def test_hq_probe_rows_follow_the_calibration_rows_unchanged(monkeypatch):
+    """The probe rows are taken after the calibration rows: asking for more rows must not change
+    the first ones (GPTQ sees the same calibration text with or without the probe)."""
+    from mlx2.conversion import raon1_mini_hq as HQ
+
+    class Tok:
+        def encode(self, text, add_special_tokens=False):
+            return [ord(c) % 251 for c in text]
+
+        def apply_chat_template(self, msgs, return_dict=True):
+            return {"input_ids": [ord(c) % 251 for m in msgs for c in m["content"]]}
+
+    short = HQ.calibration_sequences(Tok(), 6 * 64, 64)
+    long = HQ.calibration_sequences(Tok(), 9 * 64, 64)
+    assert len(short) == 6 and len(long) == 9 and long[:6] == short
+    assert all(row not in short for row in long[6:])
+
+
 def test_hq_knapsack_respects_budget_and_floors():
     from mlx2.conversion.raon1_mini_hq import knapsack
 
@@ -479,6 +597,20 @@ def test_hq_knapsack_respects_budget_and_floors():
     assert choice == {0: "a4g32", 1: "a4g64", 2: "a4g32"}
     with pytest.raises(ValueError):
         knapsack(d, budget_bpw=4.6, floors={0: "a8g64"})
+    # A floor forbids cheaper formats but still lets the layer go higher.
+    assert knapsack(d, budget_bpw=6.5, floors={1: "a4g32"})[1] in ("a4g32", "a8g64")
+    with pytest.raises(ValueError, match="not in the menu"):
+        knapsack(d, budget_bpw=6.5, floors={1: "a6g64"})
+
+
+def test_hq_knapsack_is_exact_where_greedy_is_not():
+    """Greedy marginal-per-bit takes layer 0's cheap a4g32 step (6/bit) and
+    layer 1's (4/bit) and can then no longer afford layer 0's a8g64 (cost 7).
+    The exact DP spends the whole budget on layer 0's a8g64 (cost 2)."""
+    from mlx2.conversion.raon1_mini_hq import knapsack
+
+    d = {0: {"a4g64": 10.0, "a4g32": 7.0, "a8g64": 0.0}, 1: {"a4g64": 2.0, "a4g32": 0.0, "a8g64": 0.0}}
+    assert knapsack(d, budget_bpw=6.5) == {0: "a8g64", 1: "a4g64"}
 
 
 def test_raon_auto_pairing_adds_no_policy_pins(monkeypatch):
@@ -528,6 +660,12 @@ def test_mixed_affine_recipe_binds_storage_variant_and_declared_mode():
     config["quantization"]["lm_head"] = {"mode": "mxfp8", "bits": 8, "group_size": 32}
     with pytest.raises(ValueError, match="mixed affine"):
         A.validate_config(config)
+    # The 2026-11-25 artifact was written under v1 (greedy schedule) and still binds.
+    del config["quantization"]["lm_head"]
+    config["mlx2_conversion"] = {"recipe": "raon1-mini-affine-mix-v1", "source_revision": A.SOURCE_REVISION}
+    adapter.config = config
+    assert A.validate_config(config) == "mlx2_affine"
+    assert adapter.artifact_variant == "mlx2-affine-mix-ordinary"
 
 
 @pytest.mark.parametrize("name", ["alpha_post", "b_post", "alpha_z"])
@@ -562,3 +700,51 @@ def test_hq_partial_write_can_be_retried(tmp_path, monkeypatch):
     monkeypatch.setattr(HQ, "_write_hq", succeed)
     assert HQ.convert_hq(tmp_path / "source", dest) == {"ok": True}
     assert (dest / "model-00.safetensors").read_bytes() == b"complete"
+
+
+def test_hq_diag_variants_swap_and_mxfp8_roundtrip_is_exact():
+    """scripts/raon1_mini_hq_diag_20261126.py floor variants: every variant runs, the mxfp8
+    round-trip control gives bit-equal logits, and putting the originals back restores the model."""
+    import importlib.util
+    from pathlib import Path
+
+    from mlx2.adapters import raon1_mini as A
+    from mlx2.conversion import raon1_mini_hq as HQ
+
+    root = Path(__file__).resolve().parents[1]
+    spec = importlib.util.spec_from_file_location("diag", root / "scripts/raon1_mini_hq_diag_20261126.py")
+    diag = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(diag)
+    model = _model(seed=3, scale=0.2)
+    model.configure(A.parse_policy({"merged_projections": False, "mhc": "ops"}))
+    for layer in model.layers:
+        if layer.is_moe:
+            glu = layer.moe.switch_mlp
+            for name in ("gate_proj", "up_proj", "down_proj"):
+                setattr(glu, name, glu[name].to_quantized(group_size=32, bits=8, mode="mxfp8"))
+    mx.random.seed(7)
+    seqs = [mx.random.randint(1, 96, (24,)).tolist() for _ in range(4)]
+    hessians, _rows, _counts = HQ.calibrate(model, seqs, log=lambda *_: None)
+    ids = mx.array([seqs[0]])
+    before = model(ids)
+    i, layer = next((i, l) for i, l in enumerate(model.layers) if l.is_moe)
+    glu = layer.moe.switch_mlp
+    originals = {n: glu[n] for n, _ in HQ._BANKS}
+    variants = ("mxfp8_roundtrip", "bf16_dense", "a8g32_rtn", "a8g32_gptq", "a4g32_rtn", "a4g32_gptq")
+    import pytest as _pytest
+    mp = _pytest.MonkeyPatch()
+    mp.setattr(HQ, "FORMATS", {"a4g32": (4, 32, 5.0), "a8g32": (8, 32, 9.0)})
+    try:
+        for variant in variants:
+            for name, key in HQ._BANKS:
+                setattr(glu, name, diag._variant_module(variant, originals[name], hessians[f"{i}.{key}"], damp=0.01))
+            got = model(ids)
+            if variant == "mxfp8_roundtrip":
+                assert mx.array_equal(got, before).item()
+            else:
+                assert mx.isfinite(got).all().item()
+            for name, module in originals.items():
+                setattr(glu, name, module)
+    finally:
+        mp.undo()
+    assert mx.array_equal(model(ids), before).item()

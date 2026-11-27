@@ -1,8 +1,8 @@
-"""Calibrated mixed-precision affine conversion for Raon-1-mini (recipe ``raon1-mini-affine-mix-v1``).
+"""Calibrated mixed-precision affine conversion for Raon-1-mini (recipes ``raon1-mini-affine-mix-v2/v3``).
 
 Original mlx2 code following the method of Litke & Lamy, "Crossing the 384 GB
 Cliff: Sub-4-Bit Mixed Trellis-NVFP4 MoE Compaction" (2026): layer-uniform
-precision for the routed experts chosen by a marginal-distortion knapsack under
+precision for the routed experts chosen by a distortion knapsack under
 a byte budget, error-feedback (GPTQ/LDLQ-family) rounding against full-rank
 Hessians calibrated on many more tokens than the hidden size (N_tok >> H, the
 rank-deficiency trap), and the boundary-heavy sensitivity that motivates
@@ -18,12 +18,21 @@ Pipeline (GPU device, the exact mxfp8e artifact as the source of weights):
    the shared expert's gate/up share it: the paper's shared full-rank FC1
    Hessian); shared and routed down inputs (routed rows pooled over experts);
    dense layer gate/up and down.  Expert routing frequencies are counted.
-2. sensitivity: per MoE layer and format, the routing-frequency-weighted
-   Hessian error ``sum_e p_e tr(dW_e H dW_e^T)`` of round-to-nearest planes
-   (gate/up against the FC1 Hessian, down against the pooled down Hessian).
-3. knapsack: every MoE layer starts at the cheapest format; the upgrade with
-   the best distortion drop per added bit is taken while the average expert
-   bits/weight stays within ``budget_bpw``.
+2. sensitivity: per MoE layer and format, a layer cost.  Scorer ``kl``
+   (default, recipe v3): KL(source || variant) on held-out probe rows (after
+   the calibration rows), where the variant is the source with only that
+   layer's routed experts on that format's real GPTQ planes; the source's own
+   fp16 log-probs are the reference.  Scorer ``hessian`` (recipe v2): the
+   routing-frequency-weighted Hessian error ``sum_e p_e tr(dW_e H dW_e^T)``
+   of round-to-nearest planes (gate/up against the FC1 Hessian, down against
+   the pooled down Hessian).  The Hessian error is recorded either way.  On
+   Raon the Hessian error chose a worse schedule than greedy did (v2 vs v1,
+   oracle KL 0.075 vs 0.045), which is why KL is the default.
+3. knapsack: one format per MoE layer minimising the summed layer cost with
+   the average expert bits/weight within ``budget_bpw``, solved exactly by
+   ``mlx2.conversion.knapsack.solve`` (v1 used greedy marginal-per-bit).
+   Costs are assumed additive; at these widths (4-bit and up) the Mellum
+   check found single-layer KL nearly additive.
 4. quantize: expert banks with GPTQ at their layer's format (a bank is one
    ``[E*O, I]`` matrix against its shared Hessian); dense linears and the
    head at ``dense_bits`` / ``head_bits`` (GPTQ where a Hessian exists).
@@ -34,6 +43,7 @@ Pipeline (GPU device, the exact mxfp8e artifact as the source of weights):
 from __future__ import annotations
 
 import json
+import math
 import shutil
 import time
 from dataclasses import dataclass, field
@@ -42,7 +52,12 @@ from pathlib import Path
 
 import mlx.core as mx
 
-RECIPE_ID = "raon1-mini-affine-mix-v1"
+# v1 (2026-11-25): greedy marginal-per-bit schedule over the Hessian-weighted error.
+# v2 (2026-11-26): exact DP schedule over the same error (worse end-to-end than v1: the
+#     proxy error is not a faithful objective; qualification/runs/raon1-mini-20261126/hq-v2-5282c7ca7).
+# v3 (2026-11-26): exact DP schedule over a per-layer end-to-end KL probe (scorer "kl", default).
+RECIPE_IDS = {"hessian": "raon1-mini-affine-mix-v2", "kl": "raon1-mini-affine-mix-v3"}
+RECIPE_ID = RECIPE_IDS["kl"]
 # (name, bits, group_size, bits per weight incl. bf16 scale + bias)
 FORMATS = {"a4g64": (4, 64, 4.5), "a4g32": (4, 32, 5.0), "a8g64": (8, 64, 8.5)}
 
@@ -58,6 +73,22 @@ class HQSettings:
     head_bits: int = 8
     damp: float = 0.01
     min_first_layers_bits: dict = field(default_factory=dict)  # optional floors {layer: format}
+    # Layer cost for the knapsack: "kl" (default) = KL(source || variant) on held-out probe rows
+    # when that layer's routed experts alone take a format's real GPTQ planes; "hessian" = the
+    # routing-weighted Hessian error of RTN planes (recipe v2).
+    scorer: str = "kl"
+    kl_rows: int = 4        # probe rows of ``seq`` tokens, after (disjoint from) the calibration rows
+    kl_skip: int = 1024     # positions scored per row: skip .. seq-1
+
+    def __post_init__(self):
+        if self.scorer not in RECIPE_IDS:
+            raise ValueError(f"scorer must be one of {sorted(RECIPE_IDS)}")
+        if self.scorer == "kl" and (self.kl_rows < 1 or not 0 <= self.kl_skip < self.seq - 1):
+            raise ValueError("kl_rows must be >= 1 and kl_skip within the row length")
+
+    @property
+    def recipe(self) -> str:
+        return RECIPE_IDS[self.scorer]
 
 
 # --------------------------------------------------------------- recording --
@@ -155,35 +186,41 @@ def weighted_error(bank, H, weights, bits, group, *, chunk=16):
 
 
 def knapsack(distortion: dict, budget_bpw: float, formats=("a4g64", "a4g32", "a8g64"), floors=None):
-    """Greedy marginal-distortion-per-bit allocation (the paper's eq. 4 solver).
+    """Exact per-layer format choice (the paper's eq. 4) via ``knapsack.solve``.
 
-    ``distortion[layer][fmt]`` -> chosen ``{layer: fmt}`` with mean bpw <= budget.
+    ``distortion[layer][fmt]`` -> chosen ``{layer: fmt}`` minimising total
+    distortion with mean bpw <= budget.  ``floors[layer]`` is a minimum
+    format: formats with fewer bits/weight are forbidden for that layer.
+    The paper's greedy marginal-per-bit allocation is not optimal for a
+    multiple-choice knapsack (a cheap early upgrade can block a better large
+    one); the DP is exact and costs nothing at these sizes.  Routed-expert
+    banks have the same shape in every MoE layer, so bits/weight is a
+    faithful size unit.
     """
-    order = sorted(formats, key=lambda f: FORMATS[f][2])
-    choice = {layer: (floors or {}).get(layer, order[0]) for layer in distortion}
-    n = len(choice)
+    from fractions import Fraction
 
-    def mean_bpw(c):
-        return sum(FORMATS[f][2] for f in c.values()) / n
+    from mlx2.conversion.knapsack import solve
 
-    if mean_bpw(choice) > budget_bpw + 1e-9:
-        raise ValueError(f"floors alone exceed the {budget_bpw} bpw budget")
-    while True:
-        best = None
-        for layer, fmt in choice.items():
-            rank = order.index(fmt)
-            for up in order[rank + 1:]:
-                gain = distortion[layer][fmt] - distortion[layer][up]
-                cost = FORMATS[up][2] - FORMATS[fmt][2]
-                trial = {**choice, layer: up}
-                if gain <= 0 or mean_bpw(trial) > budget_bpw + 1e-9:
-                    continue
-                score = gain / cost
-                if best is None or score > best[0]:
-                    best = (score, layer, up)
-        if best is None:
-            return choice
-        choice[best[1]] = best[2]
+    floors = floors or {}
+    for layer, fmt in floors.items():
+        if fmt not in formats:
+            raise ValueError(f"floor {fmt!r} for layer {layer} is not in the menu {list(formats)}")
+    bpw = {f: Fraction(FORMATS[f][2]).limit_denominator(1000) for f in formats}
+    den = math.lcm(*(b.denominator for b in bpw.values()))
+    unit = {f: int(b * den) for f, b in bpw.items()}         # integer size per layer
+    layers = list(distortion)
+    budget = math.floor(Fraction(budget_bpw).limit_denominator(10**6) * len(layers) * den)
+    costs, sizes = [], []
+    for layer in layers:
+        lo = bpw[floors[layer]] if layer in floors else min(bpw.values())
+        ok = [bpw[f] >= lo for f in formats]
+        costs.append([float(distortion[layer][f]) if a else None for f, a in zip(formats, ok)])
+        sizes.append([unit[f] if a else None for f, a in zip(formats, ok)])
+    try:
+        sol = solve(costs, sizes, budget, resolution=1)
+    except ValueError as exc:
+        raise ValueError(f"no schedule fits the {budget_bpw} bpw budget with these floors") from exc
+    return {layer: formats[j] for layer, j in zip(layers, sol.choice)}
 
 
 # ---------------------------------------------------------------- quantize --
@@ -222,8 +259,123 @@ def _dense_weight(linear):
     return linear.weight
 
 
-def plan_and_quantize(model, hessians, counts, settings: HQSettings, *, log=print):
-    """Sensitivity -> knapsack -> quantized planes ``{tensor name: array}`` and a receipt."""
+_BANKS = (("gate_proj", "moe_in"), ("up_proj", "moe_in"), ("down_proj", "routed_down"))
+_MISSING = object()
+
+
+def _expert_identity(layer):
+    """What a restore must give back exactly: each bank module and its arrays, by identity."""
+    glu = layer.moe.switch_mlp
+    return [(glu[n], tuple(glu[n].get(k) for k in _PLANE_KEYS), glu[n].__dict__.get("biases", _MISSING),
+             tuple(getattr(glu[n], k, None) for k in ("bits", "group_size", "mode"))) for n, _ in _BANKS]
+
+
+def _same_identity(a, b) -> bool:
+    return all(m1 is m2 and all(x is y for x, y in zip(p1, p2)) and b1 is b2 and t1 == t2
+               for (m1, p1, b1, t1), (m2, p2, b2, t2) in zip(a, b))
+_PLANE_KEYS = ("weight", "scales", "biases")
+
+
+def apply_expert_format(layer, index, hessians, bits, group, *, damp):
+    """Put one MoE layer's routed expert banks on GPTQ affine planes in place; returns what
+    :func:`restore_experts` needs.  The planes are the ones the export would write."""
+    glu = layer.moe.switch_mlp
+    saved = []
+    try:
+        for name, key in _BANKS:
+            module = glu[name]
+            (w, sc, bi), _ = gptq_bank(_dense_bank(module), hessians[f"{index}.{key}"], bits, group, damp=damp)
+            mx.eval(w, sc, bi)
+            if "scales" not in module:
+                # A dense bank: swap in a quantized one (its forward reads the planes), put back on restore.
+                replacement = module.to_quantized(group_size=group, bits=bits, mode="affine")
+                replacement["weight"], replacement["scales"], replacement["biases"] = w, sc, bi
+                setattr(glu, name, replacement)
+                saved.append((glu, name, module))
+                continue
+            # An mxfp8 bank keeps ``biases = None`` as a plain attribute, not a parameter key;
+            # record which, so restore puts back exactly that.  ``setattr`` (MLX Module) drops
+            # the shadowing attribute when it stores the array, so ``.biases`` reads the planes.
+            attrs = {k: getattr(module, k) for k in ("bits", "group_size", "mode")}
+            attrs["_biases_attr"] = module.__dict__.get("biases", _MISSING)
+            saved.append((module, {k: module[k] for k in _PLANE_KEYS if k in module}, attrs))
+            module["weight"], module["scales"] = w, sc
+            setattr(module, "biases", bi)
+            module.bits, module.group_size, module.mode = bits, group, "affine"
+    except BaseException:
+        restore_experts(saved)
+        raise
+    return saved
+
+
+def restore_experts(saved) -> None:
+    for entry in reversed(saved):
+        if len(entry) == 3 and isinstance(entry[1], str):
+            parent, name, original = entry
+            setattr(parent, name, original)
+            continue
+        module, arrays, attrs = entry
+        for k in _PLANE_KEYS:
+            if k in arrays:
+                module[k] = arrays[k]
+            elif k in module:
+                del module[k]
+        attrs = dict(attrs)
+        biases_attr = attrs.pop("_biases_attr", _MISSING)
+        if biases_attr is not _MISSING and "biases" not in arrays:
+            setattr(module, "biases", biases_attr)
+        for k, v in attrs.items():
+            setattr(module, k, v)
+    mx.clear_cache()
+
+
+def kl_costs(model, hessians, probe, settings: HQSettings, workdir: Path, *, checkpoint: str, log=print):
+    """``{layer: {format: KL}}``: KL(source || source with only that layer's experts at the format),
+    mean over the scored positions of the probe rows, plus the probe receipt."""
+    from .. import layer_kl
+
+    texts = [{"id": f"probe-{i}", "split": "dev", "ids": list(map(int, ids))} for i, ids in enumerate(probe)]
+    ref = Path(workdir) / "kl-reference"
+    meta = layer_kl.write_reference(ref, texts, layer_kl.reference_from_model(model), skip=settings.kl_skip,
+                                    checkpoint=checkpoint, source={"recipe": settings.recipe}, dtype="float16")
+    base = layer_kl.score(model, ref, meta, texts)
+    log(f"kl probe: {meta['positions']} positions, source vs its fp16 reference KL {base.kl_mean:.3g}")
+    costs, raw, started = {}, {}, time.time()
+    for i, layer in enumerate(model.layers):
+        if not layer.is_moe:
+            continue
+        costs[i], raw[i] = {}, {}
+        identity = _expert_identity(layer)
+        for fmt in settings.formats:
+            bits, group, _ = FORMATS[fmt]
+            saved = apply_expert_format(layer, i, hessians, bits, group, damp=settings.damp)
+            try:
+                got = layer_kl.score(model, ref, meta, texts)
+            finally:
+                restore_experts(saved)
+            if not _same_identity(identity, _expert_identity(layer)):
+                raise RuntimeError(f"kl probe: layer {i} experts not restored after {fmt}")
+            raw[i][fmt] = {"kl_mean": got.kl_mean, "top1_agreement": got.top1}
+            costs[i][fmt] = max(got.kl_mean - base.kl_mean, 0.0)
+        log(f"kl layer {i}: " + ", ".join(f"{f} {costs[i][f]:.4g}" for f in settings.formats)
+            + f" ({time.time() - started:.0f}s)")
+    again = layer_kl.score(model, ref, meta, texts)
+    if again.kl_mean != base.kl_mean or again.top1 != base.top1:
+        raise RuntimeError(f"kl probe restore check failed: baseline {base.kl_mean!r} -> {again.kl_mean!r}")
+    return costs, {"positions": meta["positions"], "rows": len(texts), "skip": settings.kl_skip,
+                   "texts_sha256": meta["texts_sha256"], "baseline_kl": base.kl_mean,
+                   "baseline_top1": base.top1, "per_layer": {str(k): v for k, v in raw.items()},
+                   # fp16 reference: costs are KL minus this floor, clamped at 0; 8-bit costs sit
+                   # near it (ties among them are noise, 4-bit vs 8-bit decisions are not).
+                   "cost_floor": base.kl_mean,
+                   "restore_check": "bit-equal", "seconds": round(time.time() - started, 1)}
+
+
+def plan_and_quantize(model, hessians, counts, settings: HQSettings, *, log=print, costs=None):
+    """Sensitivity -> knapsack -> quantized planes ``{tensor name: array}`` and a receipt.
+
+    ``costs`` (``{layer: {format: cost}}``, e.g. from :func:`kl_costs`) drive the knapsack when
+    given; the Hessian-weighted error is always computed and recorded for comparison."""
     distortion, moe_layers = {}, []
     for i, layer in enumerate(model.layers):
         if not layer.is_moe:
@@ -241,7 +393,10 @@ def plan_and_quantize(model, hessians, counts, settings: HQSettings, *, log=prin
             distortion[i][fmt] = d
         log(f"sensitivity layer {i}: " + ", ".join(f"{f} {distortion[i][f]:.4g}" for f in settings.formats))
     floors = {int(k): v for k, v in (settings.min_first_layers_bits or {}).items()}
-    schedule = knapsack(distortion, settings.budget_bpw, settings.formats, floors)
+    if settings.scorer == "kl" and costs is None:
+        raise ValueError("scorer 'kl' needs the probe costs (kl_costs)")
+    objective = costs if settings.scorer == "kl" else distortion
+    schedule = knapsack(objective, settings.budget_bpw, settings.formats, floors)
     planes, quant, receipts = {}, {}, {}
     for i, layer in enumerate(model.layers):
         p = f"model.layers.{i}."
@@ -288,7 +443,10 @@ def plan_and_quantize(model, hessians, counts, settings: HQSettings, *, log=prin
     moe_bpw = sum(FORMATS[schedule[i]][2] for i in moe_layers) / max(len(moe_layers), 1)
     receipt = {"schedule": {str(k): v for k, v in schedule.items()}, "moe_mean_bpw": round(moe_bpw, 4),
                "budget_bpw": settings.budget_bpw,
-               "distortion": {str(k): v for k, v in distortion.items()}, "gptq": receipts}
+               "scorer": settings.scorer,
+               "distortion": {str(k): v for k, v in distortion.items()},
+               **({"kl_costs": {str(k): v for k, v in costs.items()}} if costs is not None else {}),
+               "gptq": receipts}
     return planes, quant, receipt
 
 
@@ -336,12 +494,23 @@ def _write_hq(source, dest, *, settings, log):
     model.configure(A.parse_policy({"merged_projections": False, "mhc": "ops"}))
     model.set_reasoning_effort(None)
     tok = AutoTokenizer.from_pretrained(str(source), local_files_only=True)
-    sequences = calibration_sequences(tok, settings.tokens, settings.seq)
+    n_calib = -(-settings.tokens // settings.seq)
+    extra = settings.kl_rows * settings.seq if settings.scorer == "kl" else 0
+    rows_all = calibration_sequences(tok, settings.tokens + extra, settings.seq)
+    # Probe rows come after the calibration rows (the generator is sequential, so the
+    # calibration rows are the same as without them): GPTQ never sees the probe text.
+    sequences, probe = rows_all[:n_calib], rows_all[n_calib:]
     hessians, rows, counts = calibrate(model, sequences, log=log)
     hidden = int(model.args.hidden_size)
     ratio = rows[f"{next(i for i, l in enumerate(model.layers) if l.is_moe)}.moe_in"] / hidden
     log(f"calibration rows / hidden = {ratio:.1f}")
-    planes, quant, receipt = plan_and_quantize(model, hessians, counts, settings, log=log)
+    costs, probe_receipt = None, None
+    if settings.scorer == "kl":
+        costs, probe_receipt = kl_costs(model, hessians, probe, settings, Path(dest).parent,
+                                        checkpoint=artifact["checkpoint"], log=log)
+    planes, quant, receipt = plan_and_quantize(model, hessians, counts, settings, log=log, costs=costs)
+    if probe_receipt is not None:
+        receipt["kl_probe"] = probe_receipt
     keep = _untouched(model, planes)
     index, files = {}, []
     tensors = {**keep, **planes}
@@ -359,12 +528,13 @@ def _write_hq(source, dest, *, settings, log):
         files.append(name); index.update({k: name for k in chunk})
     config = dict(artifact["config"])
     config["quantization"] = {"group_size": settings.dense_group, "bits": settings.dense_bits, "mode": "affine", **quant}
-    config["mlx2_conversion"] = {**config["mlx2_conversion"], "recipe": RECIPE_ID,
+    config["mlx2_conversion"] = {**config["mlx2_conversion"], "recipe": settings.recipe,
                                  "experts": "GPTQ affine by layer (quantization module overrides)",
                                  "dense": f"GPTQ affine {settings.dense_bits}-bit g{settings.dense_group} where aligned",
                                  "head": f"affine {settings.head_bits}-bit g64",
                                  "calibrated_from": artifact["checkpoint"],
-                                 "method": "Hessian-weighted layer knapsack + GPTQ (Litke & Lamy 2026 method on MLX affine)"}
+                                 "method": ("per-layer KL-probe knapsack + GPTQ" if settings.scorer == "kl" else
+                                            "Hessian-weighted layer knapsack + GPTQ (Litke & Lamy 2026 method on MLX affine)")}
     (dest / "config.json").write_text(json.dumps(config, indent=2) + "\n")
     (dest / "model.safetensors.index.json").write_text(json.dumps(
         {"metadata": {"format": "mlx"}, "weight_map": dict(sorted(index.items()))}, indent=1) + "\n")
@@ -372,7 +542,7 @@ def _write_hq(source, dest, *, settings, log):
                  "LICENSE", "README.md"):
         if (source / name).is_file():
             shutil.copy2(source / name, dest / name)
-    out = {"schema": "mlx2.raon1-mini-conversion.v1", "recipe": RECIPE_ID, "source": artifact["checkpoint"],
+    out = {"schema": "mlx2.raon1-mini-conversion.v1", "recipe": settings.recipe, "source": artifact["checkpoint"],
            "settings": {k: v for k, v in vars(settings).items()}, "calibration": {
                "sequences": len(sequences), "rows_moe_in": rows, "rows_over_hidden": round(ratio, 2)},
            **receipt, "outputs": files, "seconds": round(time.time() - started, 1)}

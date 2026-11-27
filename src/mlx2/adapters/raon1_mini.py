@@ -36,8 +36,12 @@ PACK_REPOSITORY = "KRAFTON/Raon-1-mini-mlx"
 PACK_REVISION = "3804c11410aa9d3e51d7667d6d6d5de596d3cc41"
 CONVERSION_RECIPE = "raon1-mini-mxfp8e-v1"
 AFFINE_RECIPE = "raon1-mini-affine-a4g64-h8g64-v1"
-MIX_RECIPE = "raon1-mini-affine-mix-v1"
-RECIPE_LAYOUTS = {CONVERSION_RECIPE: "mlx2_mxfp8e", AFFINE_RECIPE: "mlx2_affine", MIX_RECIPE: "mlx2_affine"}
+# v1: greedy schedule over the Hessian error (2026-11-25); v2: exact DP over the Hessian error;
+# v3: exact DP over a per-layer KL probe (2026-11-26).  Same storage layout for all three.
+MIX_RECIPE = "raon1-mini-affine-mix-v3"
+MIX_RECIPES = ("raon1-mini-affine-mix-v1", "raon1-mini-affine-mix-v2", MIX_RECIPE)
+RECIPE_LAYOUTS = {CONVERSION_RECIPE: "mlx2_mxfp8e", AFFINE_RECIPE: "mlx2_affine",
+                  **{recipe: "mlx2_affine" for recipe in MIX_RECIPES}}
 DEFAULT_CONTEXT = 262144
 CACHE_LAYOUT = "raon1-mini-mhc4-rda-fp32-nope-latent-mla-v1"
 EOS_TOKEN_IDS = (259202, 259200)
@@ -561,7 +565,7 @@ class RaonAdapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
 
     @property
     def artifact_variant(self):
-        if (self.config.get("mlx2_conversion") or {}).get("recipe") == MIX_RECIPE:
+        if (self.config.get("mlx2_conversion") or {}).get("recipe") in MIX_RECIPES:
             return "mlx2-affine-mix-ordinary"
         return LAYOUTS[self.artifact_layout]["variant"]
 

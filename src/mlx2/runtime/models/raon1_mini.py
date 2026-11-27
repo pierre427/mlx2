@@ -32,6 +32,7 @@ rounds the normalized row to the activation dtype before the weight product
 from __future__ import annotations
 
 import math
+import re
 from collections import Counter
 from dataclasses import dataclass, field, replace
 from functools import partial
@@ -1209,7 +1210,8 @@ def install_affine(model: Model, config: dict, weight_names) -> dict:
     if counts["linear"] + counts["switch"] != len(expected):
         raise ValueError("Raon affine artifact quantizes modules the model does not expose")
     recipe = (config.get("mlx2_conversion") or {}).get("recipe")
-    storage = "mlx2-" + recipe.removeprefix("raon1-mini-").removesuffix("-v1") if recipe else "mlx2-affine"
+    # Storage label without the recipe version: mix v1 and v2 differ only in the schedule.
+    storage = "mlx2-" + re.sub(r"-v\d+$", "", recipe.removeprefix("raon1-mini-")) if recipe else "mlx2-affine"
     return {"format": storage, "quantized_linears": counts["linear"],
             "expert_banks": counts["switch"]}
 
