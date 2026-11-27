@@ -565,15 +565,21 @@ class FlashNextAdapter:
     adapter_owned_default_policy_keys = frozenset(
         {*_SELECTED_KERNELS, *_NATIVE_MTP_DECODE, *_ORDINARY_DECODE}
     )
+    # Count half of the other processes' inactive anonymous memory as
+    # reclaimable (Pierre, 2026-11-27): a loaded Flash-Next server holds
+    # ~72 GiB, and on the shared 128 GB host the plain Mach estimate left
+    # 2-4 GiB, so every request was refused (HTTP 429) for want of the
+    # 16 + 4 GiB reserve (docs/research/2026-11-27-flash-next-server-memory-admission.md).
+    _HOST_MEMORY_SIGNALS = {"enabled": True, "reclaimable_inactive_fraction": 0.5}
     default_route_execution_policy = {
         "ordinary": {
-            "host_memory_signals": {"enabled": True},
+            "host_memory_signals": dict(_HOST_MEMORY_SIGNALS),
             "decode_first": {"enabled": True, "shared_prefill_budget": False},
             **_SELECTED_KERNELS,
             **_ORDINARY_DECODE,
         },
         "native_mtp": {
-            "host_memory_signals": {"enabled": True},
+            "host_memory_signals": dict(_HOST_MEMORY_SIGNALS),
             # Default since 2026-11-01 (Pierre): a pressure eviction drops a
             # checkpoint a stored later turn covers instead of writing it to
             # disk.  Service A/B on 25c2da42 @ 1e0396613: two long agent

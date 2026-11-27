@@ -546,3 +546,43 @@ def test_enabled_engine_strips_policy_uses_host_signals_and_exports(monkeypatch)
         assert f"mlx2_host_memory_available_bytes {96 * GIB}" in rendered
     finally:
         engine.close()
+
+
+def test_inactive_credit_counts_a_share_of_the_anonymous_floor():
+    from mlx2.runtime.os_memory import HostMemorySnapshot
+
+    g = 1 << 30
+    page = 16384
+    pages = lambda gib: int(gib * g // page)
+    snap = HostMemorySnapshot(page_size=page, physical_bytes=128 * g, free=pages(0.3), active=pages(87),
+                              inactive=pages(44.4), speculative=pages(0.3), wired=pages(12.2),
+                              compressor=pages(3.9), file_backed=pages(23.1), purgeable=pages(0.4))
+    floor = snap.inactive_anonymous_floor_bytes
+    assert abs(floor / g - 21.3) < 0.01
+    assert snap.available_bytes_with_inactive_credit(0.0) == snap.available_bytes
+    half = snap.available_bytes_with_inactive_credit(0.5)
+    assert abs((half - snap.available_bytes) / g - 10.65) < 0.01
+    assert snap.available_bytes_with_inactive_credit(1.0) <= snap.physical_bytes
+    with pytest.raises(ValueError):
+        snap.available_bytes_with_inactive_credit(1.5)
+
+
+def test_reclaimable_inactive_fraction_policy_validation():
+    from mlx2.serving import host_memory_signals_policy
+
+    assert host_memory_signals_policy({"enabled": True, "reclaimable_inactive_fraction": 0.5}) == {
+        "enabled": True, "fall_after_seconds": 5.0, "reclaimable_inactive_fraction": 0.5}
+    assert "reclaimable_inactive_fraction" not in host_memory_signals_policy({"enabled": True})
+    for bad in (-0.1, 1.5, True, "0.5", float("nan")):
+        with pytest.raises(ValueError):
+            host_memory_signals_policy({"enabled": True, "reclaimable_inactive_fraction": bad})
+    with pytest.raises(ValueError, match="requires enabled"):
+        host_memory_signals_policy({"enabled": False, "reclaimable_inactive_fraction": 0.5})
+
+
+def test_flash_next_defaults_count_half_the_inactive_memory():
+    from mlx2.adapters.flash_next import FlashNextAdapter
+
+    for route in ("ordinary", "native_mtp"):
+        policy = FlashNextAdapter.default_route_execution_policy[route]["host_memory_signals"]
+        assert policy == {"enabled": True, "reclaimable_inactive_fraction": 0.5}

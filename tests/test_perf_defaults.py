@@ -252,7 +252,7 @@ def test_flash_next_native_mtp_defaults_match_gated_copy_drafts():
     resolution = _resolution(FlashNextAdapter, QWEN4_FLASH_NEXT)
     policy = resolve_execution_policy_defaults(None, MTP, resolution)
     assert policy["apc_interior_checkpoints"] == "auto"
-    assert policy["host_memory_signals"] == {"enabled": True}
+    assert policy["host_memory_signals"] == {"enabled": True, "reclaimable_inactive_fraction": 0.5}
     parsed = CopyDraftPolicy.from_value(policy["self_mtp_copy_draft"])
     assert parsed.enabled and parsed.batched_max_span == 0
     # The measured policy: fused-verify width, match gate, strong spans.
@@ -261,7 +261,7 @@ def test_flash_next_native_mtp_defaults_match_gated_copy_drafts():
     ServingEngine.validate_arguments("unused", execution_policy=policy)
     ordinary = resolve_execution_policy_defaults(None, ORDINARY, resolution) or {}
     assert "self_mtp_copy_draft" not in ordinary
-    assert ordinary["host_memory_signals"] == {"enabled": True}
+    assert ordinary["host_memory_signals"] == {"enabled": True, "reclaimable_inactive_fraction": 0.5}
     assert "host_memory_signals" not in resolve_execution_policy_defaults(
         None, MTP, _resolution(Qwen3827BAdapter, QWEN38_27B)
     )

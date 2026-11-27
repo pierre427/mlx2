@@ -795,7 +795,7 @@ def host_memory_signals_policy(value) -> dict:
         return defaults
     if not isinstance(value, dict):
         raise ValueError("host_memory_signals must be an object")
-    unknown = set(value) - set(defaults) - {"minimum_host_available_gib"}
+    unknown = set(value) - set(defaults) - {"minimum_host_available_gib", "reclaimable_inactive_fraction"}
     if unknown:
         raise ValueError(f"unknown host memory signal settings: {sorted(unknown)}")
     policy = {**defaults, **value}
@@ -811,6 +811,16 @@ def host_memory_signals_policy(value) -> dict:
         raise ValueError(
             "host_memory_signals.minimum_host_available_gib requires enabled=true"
         )
+    fraction = policy.get("reclaimable_inactive_fraction", 0.0)
+    if (isinstance(fraction, bool) or not isinstance(fraction, (int, float))
+            or not math.isfinite(fraction) or not 0 <= fraction <= 1):
+        raise ValueError(
+            "host_memory_signals.reclaimable_inactive_fraction must be a number from 0 to 1"
+        )
+    if fraction and not policy["enabled"]:
+        raise ValueError(
+            "host_memory_signals.reclaimable_inactive_fraction requires enabled=true"
+        )
     fall = policy["fall_after_seconds"]
     if (
         isinstance(fall, bool)
@@ -824,6 +834,8 @@ def host_memory_signals_policy(value) -> dict:
     result = {"enabled": policy["enabled"], "fall_after_seconds": float(fall)}
     if floor:
         result["minimum_host_available_gib"] = float(floor)
+    if fraction:
+        result["reclaimable_inactive_fraction"] = float(fraction)
     return result
 
 
@@ -9957,6 +9969,8 @@ class ServingEngine(KernelReloadMixin):
         measure = partial(
             execution_headroom,
             host_signals=True,
+            **({"inactive_credit": float(policy["reclaimable_inactive_fraction"])}
+               if policy.get("reclaimable_inactive_fraction") else {}),
             **({"minimum_host_available_bytes": int(floor_gib * (1 << 30))}
                if floor_gib else {}),
         ) if policy.get("enabled") else execution_headroom
@@ -10646,7 +10660,11 @@ class ServingEngine(KernelReloadMixin):
                 from .memory import execution_headroom_terms
 
                 policy = getattr(self, "host_memory_signals_policy", None) or {}
-                terms = execution_headroom_terms(host_signals=bool(policy.get("enabled")))
+                terms = execution_headroom_terms(
+                    host_signals=bool(policy.get("enabled")),
+                    **({"inactive_credit": float(policy["reclaimable_inactive_fraction"])}
+                       if policy.get("reclaimable_inactive_fraction") else {}),
+                )
                 if not terms.get("recommended"):
                     terms = None
             except Exception:  # noqa: BLE001 - readings are optional context

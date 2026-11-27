@@ -60,19 +60,24 @@ def host_term_reserve_credit_bytes(physical_bytes, recommended_bytes):
     return int(max(0.0, service - C.MIN_SERVICE_RESERVE_GIB) * gib)
 
 
-def host_available_bytes(host_signals=False):
+def host_available_bytes(host_signals=False, inactive_credit=0.0):
     """Host-wide available memory for the admission ``available`` term.
 
     Default: psutil's figure.  With the server-owned ``host_memory_signals``
     policy the Mach-statistics estimate replaces it, which also counts
     file-backed and purgeable pages; psutil remains the fallback when the
-    probe is unavailable.
+    probe is unavailable.  ``inactive_credit`` (0..1, policy
+    ``host_memory_signals.reclaimable_inactive_fraction``) also counts that
+    share of the other processes' inactive anonymous pages as available
+    (Mach estimate only; see ``HostMemorySnapshot``).
     """
     if host_signals:
         from .runtime.os_memory import host_memory_snapshot
 
         snapshot = host_memory_snapshot()
         if snapshot is not None:
+            if inactive_credit:
+                return snapshot.available_bytes_with_inactive_credit(inactive_credit)
             return snapshot.available_bytes
     import psutil
 
@@ -130,7 +135,7 @@ def host_memory_gib():
     return total / float(1 << 30)
 
 
-def execution_headroom(host_signals=False, minimum_host_available_bytes=0):
+def execution_headroom(host_signals=False, minimum_host_available_bytes=0, inactive_credit=0.0):
     """Measured lane headroom after an optional host-wide free-memory floor.
 
     The floor caps the final headroom after the service-reserve credit, so that
@@ -146,7 +151,8 @@ def execution_headroom(host_signals=False, minimum_host_available_bytes=0):
         raise ValueError("minimum_host_available_bytes must be a nonnegative integer")
     info = mx.device_info()
     recommended = info.get("max_recommended_working_set_size", 0)
-    available = host_available_bytes(host_signals)
+    available = (host_available_bytes(host_signals, inactive_credit) if inactive_credit
+                 else host_available_bytes(host_signals))
     headroom = available_execution_bytes(
         available=available,
         recommended=recommended,
@@ -162,7 +168,7 @@ def execution_headroom(host_signals=False, minimum_host_available_bytes=0):
     return headroom
 
 
-def execution_headroom_terms(host_signals=False):
+def execution_headroom_terms(host_signals=False, inactive_credit=0.0):
     """The readings behind ``execution_headroom``, for refusal diagnostics.
 
     Host-side reads only (no device sync); never used to decide admission.
@@ -172,7 +178,8 @@ def execution_headroom_terms(host_signals=False):
 
     info = mx.device_info()
     recommended = int(info.get("max_recommended_working_set_size", 0))
-    available = host_available_bytes(host_signals)
+    available = (host_available_bytes(host_signals, inactive_credit) if inactive_credit
+                 else host_available_bytes(host_signals))
     active, cached = int(mx.get_active_memory()), int(mx.get_cache_memory())
     footprint = physical_footprint_bytes()
     credit = host_term_reserve_credit_bytes(info.get("memory_size", 0), recommended)

@@ -278,6 +278,29 @@ class HostMemorySnapshot:
         )
 
     @property
+    def inactive_anonymous_floor_bytes(self) -> int:
+        """A lower bound on inactive *anonymous* pages, in bytes.
+
+        Mach reports inactive pages and file-backed pages without the split
+        between them, so ``inactive - file_backed`` (as if every file-backed
+        page were inactive) bounds the anonymous share from below.
+        """
+        return max(0, self.inactive - self.file_backed) * self.page_size
+
+    def available_bytes_with_inactive_credit(self, fraction: float) -> int:
+        """``available_bytes`` plus ``fraction`` of the inactive anonymous floor.
+
+        Inactive anonymous pages belong to idle processes; the kernel can
+        compress or swap them to make room, at a cost the plain estimate never
+        takes.  ``fraction`` (0..1, a server policy choice) is the share of the
+        floor admission may count as reclaimable.  Never above physical RAM.
+        """
+        if not 0.0 <= float(fraction) <= 1.0:
+            raise ValueError("inactive credit fraction must be within 0..1")
+        credit = int(float(fraction) * self.inactive_anonymous_floor_bytes)
+        return min(self.physical_bytes, self.available_bytes + credit)
+
+    @property
     def reclaimable_bytes(self) -> int:
         """``vm_stat`` free + inactive + speculative, in bytes.
 
