@@ -195,7 +195,13 @@ DEVICE_COMMIT_COUNTERS = (
 DEVICE_COMMIT_SKIPS = "external_device_round_device_commit_skips"
 # Installed only when ``fixed_shape`` is on.
 FIXED_SHAPE_COUNTERS = ("external_device_round_fixed_shape_rounds",
-                        "external_device_round_fixed_shape_padded_drafts")
+                        "external_device_round_fixed_shape_padded_drafts",
+                        # Fixed-shape presence state (DeviceHistory store): a full
+                        # rebuild of the seen map, and an update wider than one round.
+                        "external_device_round_presence_seen_rebuilds",
+                        "external_device_round_presence_seen_multi_chunk",
+                        # Device-mode K/V buffer growths left after the entry reserve.
+                        "external_device_round_kv_capacity_growths")
 FIXED_SHAPE_SKIPS = "external_device_round_fixed_shape_skips"
 
 
@@ -785,7 +791,8 @@ class DeviceRound:
                         # The lane's committed target cache, as ``_propose``
                         # passes it (admitted by ``draft_lazy_target_caches``).
                         extra["target_caches"] = [lane.cache]
-                    from .speculative_device_presence import DeviceHistory, presence_contracts
+                    from .speculative_device_presence import (DeviceHistory, presence_contracts,
+                                                              presence_store)
 
                     pad = self._pad_depth(owner, lane, draft_depth)
                     device_history = None
@@ -794,7 +801,9 @@ class DeviceRound:
                         # (``DeviceHistory.first``), so a serial fixed-shape round
                         # builds the same graph as a pipelined one.
                         device_history = DeviceHistory.first(mx, lane.history, lane.anchor,
-                                                             owner.num_draft)
+                                                             owner.num_draft,
+                                                             store=presence_store(lane),
+                                                             stats=owner.scheduler_stats)
                     if lane.processors:
                         # Admitted by ``_lane_reason``/``run`` (``processors``).
                         extra.update(logits_processors=lane.processors,

@@ -133,6 +133,12 @@ def lane_reason(owner, lane):
     return None
 
 
+# Rows a fixed-shape entry reserves at most per K/V cache (``enter``), and the
+# step a reserved cache grows by afterwards: one whole-K/V copy per 4,096 rows
+# (Inkling 2's CAPACITY_STEP), at most 4,096 spare rows per layer per lane.
+KV_RESERVE_CAP = 4096
+
+
 def enter(owner, lane):
     """Convert the lane's caches to device form (no copy of target K/V)."""
     import mlx.core as mx
@@ -176,6 +182,16 @@ def enter(owner, lane):
         for ring in rings:
             ring.pending_count = count
     if fixed:
+        # In-place K/V (slice 1a-5): reserve the request's remaining rows plus two
+        # rounds of slack now, so no device round grows (concatenates) the K/V.
+        # Capped: a longer request grows past the cap, counted at leave.
+        remaining = max(0, int(lane.maximum) - int(getattr(lane, "generated", 0) or 0))
+        reserve = min(remaining + 2 * width, KV_RESERVE_CAP)
+        for entry in cache:
+            if type(entry) is DeviceOffsetKVCache:
+                entry.device_growths = 0
+                if reserve > 0:
+                    entry.reserve_rows(reserve, KV_RESERVE_CAP)
         # The conversion runs here, once per entry, not inside the first device
         # round: that round then builds the same graph as every later one.
         from .models.cache import ArraysCache
@@ -220,10 +236,18 @@ def leave(owner, lane):
     rows = getattr(lane, "device_commit_tail_rows", None)
     if rows is None or not 0 <= int(rows) <= int(lane.tail.shape[1]):
         raise RuntimeError("a device-commit lane lost its committed tail length")
+    growths = sum(int(entry.device_growths) for entry in lane.cache
+                  if type(entry) is DeviceOffsetKVCache)
     cache = [
         entry.to_host_kv() if type(entry) is DeviceOffsetKVCache else entry
         for entry in lane.cache
     ]
+    stats = getattr(owner, "scheduler_stats", None)
+    if growths and stats is not None and getattr(getattr(owner, "device_round", None),
+                                                 "fixed_shape", False):
+        # Counted once the conversion succeeded (a refused leave is retried).
+        key = "external_device_round_kv_capacity_growths"
+        stats[key] = stats.get(key, 0) + growths
     draft_cache = [
         entry.to_host() if type(entry) is DeviceRingKVCache else entry
         for entry in lane.draft_cache

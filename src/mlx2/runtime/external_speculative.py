@@ -4677,6 +4677,12 @@ class ExternalDraftBatchGenerator:
         fields = vars(lane)
         # Processors that re-sync from the next call's history stay shared.
         shared = rollback_shared_memo(fields.get("processors"))
+        store = fields.get("device_presence_store")
+        if store is not None:
+            # Fixed-shape presence state (``speculative_device_presence``) holds a
+            # history copy and a [vocab] map: shared, never copied per round. It
+            # validates its covered prefix against the history on every use.
+            shared[id(store)] = store
         if getattr(self, "ast_tree_tile_rows", 0):
             shared.update(
                 (id(fields[name]), fields[name])

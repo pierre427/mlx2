@@ -77,6 +77,12 @@ class DeviceOffsetKVCache(KVCache):
     # The plane a device-mode request-private recovery clone is filed under
     # (``cow_cache``); committed, publishable captures still refuse device mode.
     _RECOVERY_PLANE = "attention_kv"
+    # Device mode: buffer growths (a whole-K/V concatenate each) since entry;
+    # ``reserve`` at entry keeps a fixed-shape lane at zero (slice 1a-5).
+    device_growths = 0
+    # ``reserve_rows``: the growth step of a reserved cache (rows), or 0 (``step``).
+    # Its host form marks the spare rows as capacity (``_fixed_capacity_step``).
+    reserve_step = 0
 
     def __init__(self):
         super().__init__()
@@ -103,6 +109,10 @@ class DeviceOffsetKVCache(KVCache):
         host = KVCache()
         host.keys, host.values = self.keys, self.values
         host.offset = int(self.bound if self.device_mode else self.offset)
+        if self.reserve_step and self.keys is not None and host.offset < int(self.keys.shape[2]):
+            # The reserve's spare rows are capacity, not state (``KVCache.state``,
+            # the capsule capture and batch merges expose only committed rows).
+            host._fixed_capacity_step = int(self.reserve_step)
         return host
 
     @property
@@ -199,10 +209,52 @@ class DeviceOffsetKVCache(KVCache):
         self.read_base = None if base is None else int(base)
         return self
 
+    def reserve_rows(self, rows: int, step: int):
+        """Grow the buffers once so ``rows`` more fit past the bound (slice 1a-5).
+
+        ``device_round.fixed_shape`` reserves a request's remaining rows (up to
+        ``step``) at device-commit entry, so no device-mode round grows (and
+        copies) the whole K/V for the next ``step`` rows; a later growth takes
+        ``step`` rows at once. Not ``KVCache.reserve`` (a planned total that
+        batch merges carry). Capacity changes allocation only: every read
+        slices ``[:base + rows]``. Returns whether it grew."""
+        rows, step = int(rows), int(step)
+        if step < 1:
+            raise ValueError("a K/V reserve needs a positive growth step")
+        self.reserve_step = step
+        if self.keys is None or rows <= 0:
+            return False
+        need = self.bound + rows
+        have = int(self.keys.shape[2])
+        if need <= have:
+            return False
+        capacity = ((need + self.step - 1) // self.step) * self.step
+        b, heads, _, k_dim = self.keys.shape
+        v_dim = self.values.shape[3]
+        self.keys = mx.concatenate(
+            [self.keys, mx.zeros((b, heads, capacity - have, k_dim), self.keys.dtype)], axis=2)
+        self.values = mx.concatenate(
+            [self.values, mx.zeros((b, heads, capacity - have, v_dim), self.values.dtype)], axis=2)
+        return True
+
     def _ensure_capacity(self, keys, values, rows: int):
         need = self._base() + rows
         if self.keys is not None and need <= self.keys.shape[2]:
             return
+        if self.device_mode and self.keys is not None:
+            self.device_growths = int(self.device_growths) + 1
+            if self.reserve_step:
+                # A reserved cache grows a whole reserve step at once (one copy
+                # per ``reserve_step`` rows, not per ``step``).
+                b, heads, _, k_dim = self.keys.shape
+                have = int(self.keys.shape[2])
+                extra = max(need - have, self.reserve_step)
+                self.keys = mx.concatenate(
+                    [self.keys, mx.zeros((b, heads, extra, k_dim), self.keys.dtype)], axis=2)
+                self.values = mx.concatenate(
+                    [self.values, mx.zeros((b, heads, extra, values.shape[3]), self.values.dtype)],
+                    axis=2)
+                return
         (b, heads, _, k_dim) = keys.shape
         v_dim = values.shape[3]
         have = 0 if self.keys is None else self.keys.shape[2]

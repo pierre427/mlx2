@@ -322,23 +322,33 @@ def dispatch(device_round, owner, lane, depth, anchor=None, inflight_rows=None, 
     composition_before = dict(owner.draft.composition_stats) if composed else None
     try:
         input_vocab = owner._target_token_vocab_size
-        anchor_array = (mx.array([int(lane.anchor)], dtype=mx.int32) if anchor is None
-                        else mx.clip(anchor.reshape(1).astype(mx.int32), 0, input_vocab - 1))
+        if anchor is not None:
+            anchor_array = mx.clip(anchor.reshape(1).astype(mx.int32), 0, input_vocab - 1)
+        elif getattr(device_round, "fixed_shape", False):
+            # The same ops as a device anchor (a no-op on a booked token): one
+            # graph whether or not a round is in flight ahead of this one.
+            anchor_array = mx.clip(mx.array([int(lane.anchor)], dtype=mx.int32), 0, input_vocab - 1)
+        else:
+            anchor_array = mx.array([int(lane.anchor)], dtype=mx.int32)
         history = extra = None
         pad_block = (getattr(device_round, "fixed_shape", False) and depth <= int(owner.num_draft)
                      and getattr(owner.draft, "draft_lazy_pad", False))
         if lane.processors:
-            from .speculative_device_presence import DeviceHistory, presence_contracts
+            from .speculative_device_presence import DeviceHistory, presence_contracts, presence_store
 
+            # ``fixed_shape``: the window's host part has one shape every round.
+            store = presence_store(lane) if getattr(device_round, "fixed_shape", False) else None
             if previous is not None:
                 history = DeviceHistory(mx, lane.history, lane.anchor,
                                         previous.plan.row.drafts, previous.commit - 1,
-                                        previous.plan.last)
+                                        previous.plan.last, store=store,
+                                        stats=owner.scheduler_stats)
             elif pad_block and presence_contracts(lane.processors):
                 # A round with nothing in flight ahead of it (the first after
                 # entry, one near a budget end) builds the following round's
                 # graph (slice 1a-5, one round kind).
-                history = DeviceHistory.first(mx, lane.history, lane.anchor, owner.num_draft)
+                history = DeviceHistory.first(mx, lane.history, lane.anchor, owner.num_draft,
+                                              store=store, stats=owner.scheduler_stats)
             else:
                 history = list(lane.history)
             extra = {"logits_processors": lane.processors, "processor_history": history}
