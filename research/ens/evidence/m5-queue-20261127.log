@@ -1,0 +1,53 @@
+queue start Fri Nov 27 02:08:52 EST 2026 file research/ens/m5_queue_20261126h57.txt
+skip ens-h57-eval-c1 (already ran)
+skip ens-h57-eval-c2 (already ran)
+launch ens-h57-eval-c3 Fri Nov 27 02:08:52 EST 2026
+finished ens-h57-eval-c3 rc=0 Fri Nov 27 02:30:04 EST 2026
+chunk stopped rc=3 Fri Nov 27 02:30:04 EST 2026
+attempt 1 ran Fri Nov 27 02:30:04 EST 2026
+launch ens-h57-eval-c4 Fri Nov 27 02:32:04 EST 2026
+finished ens-h57-eval-c4 rc=0 Fri Nov 27 02:51:25 EST 2026
+chunk stopped rc=3 Fri Nov 27 02:51:24 EST 2026
+attempt 1 ran Fri Nov 27 02:51:25 EST 2026
+launch ens-h57-eval-c5 Fri Nov 27 02:53:25 EST 2026
+finished ens-h57-eval-c5 rc=0 Fri Nov 27 03:12:05 EST 2026
+chunk stopped rc=3 Fri Nov 27 03:12:05 EST 2026
+attempt 1 ran Fri Nov 27 03:12:05 EST 2026
+launch ens-h57-eval-c6 Fri Nov 27 03:14:05 EST 2026
+finished ens-h57-eval-c6 rc=0 Fri Nov 27 03:33:18 EST 2026
+chunk stopped rc=3 Fri Nov 27 03:33:17 EST 2026
+attempt 1 ran Fri Nov 27 03:33:18 EST 2026
+launch ens-h57-eval-c7 Fri Nov 27 03:35:18 EST 2026
+finished ens-h57-eval-c7 rc=0 Fri Nov 27 03:54:48 EST 2026
+chunk stopped rc=3 Fri Nov 27 03:54:46 EST 2026
+attempt 1 ran Fri Nov 27 03:54:48 EST 2026
+launch ens-h57-eval-c8 Fri Nov 27 03:56:48 EST 2026
+finished ens-h57-eval-c8 rc=0 Fri Nov 27 04:15:26 EST 2026
+chunk stopped rc=3 Fri Nov 27 04:15:25 EST 2026
+attempt 1 ran Fri Nov 27 04:15:26 EST 2026
+launch ens-h57-eval-c9 Fri Nov 27 04:17:26 EST 2026
+finished ens-h57-eval-c9 rc=0 Fri Nov 27 04:35:51 EST 2026
+chunk stopped rc=3 Fri Nov 27 04:35:51 EST 2026
+attempt 1 ran Fri Nov 27 04:35:51 EST 2026
+launch ens-h57-eval-c10 Fri Nov 27 04:37:51 EST 2026
+finished ens-h57-eval-c10 rc=0 Fri Nov 27 04:55:39 EST 2026
+chunk stopped rc=3 Fri Nov 27 04:55:38 EST 2026
+attempt 1 ran Fri Nov 27 04:55:39 EST 2026
+launch ens-h57-eval-c11 Fri Nov 27 04:57:39 EST 2026
+finished ens-h57-eval-c11 rc=0 Fri Nov 27 05:16:01 EST 2026
+chunk stopped rc=3 Fri Nov 27 05:16:00 EST 2026
+attempt 1 ran Fri Nov 27 05:16:01 EST 2026
+launch ens-h57-eval-c12 Fri Nov 27 05:18:01 EST 2026
+finished ens-h57-eval-c12 rc=0 Fri Nov 27 05:23:44 EST 2026
+chunk done Fri Nov 27 05:23:44 EST 2026
+attempt 1 ran Fri Nov 27 05:23:44 EST 2026
+launch ens-h57-eval-c13 Fri Nov 27 05:25:44 EST 2026
+finished ens-h57-eval-c13 rc=0 Fri Nov 27 05:26:47 EST 2026
+chunk done Fri Nov 27 05:26:46 EST 2026
+attempt 1 ran Fri Nov 27 05:26:47 EST 2026
+launch ens-h57-eval-c14 Fri Nov 27 05:28:47 EST 2026
+finished ens-h57-eval-c14 rc=0 Fri Nov 27 05:29:39 EST 2026
+chunk done Fri Nov 27 05:29:39 EST 2026
+attempt 1 ran Fri Nov 27 05:29:39 EST 2026
+stop: ens-h57-eval-c15 would start after 05:30 or run past 06:45 (Fri Nov 27 05:31:40 EST 2026)
+queue end Fri Nov 27 05:31:40 EST 2026

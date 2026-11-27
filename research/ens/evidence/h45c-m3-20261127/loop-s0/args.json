@@ -1,0 +1,16 @@
+{
+ "accum": 4,
+ "arm": "loop",
+ "batch": 256,
+ "chunk_tag": null,
+ "log_every": 250,
+ "lr": 0.001,
+ "max_seconds": null,
+ "out": "evidence/h45c-m3-20261127/loop-s0",
+ "p_ordinary": 0.25,
+ "save_every": 2000,
+ "seed": 0,
+ "steps": 48000,
+ "stop_after": null,
+ "warmup": 500
+}
