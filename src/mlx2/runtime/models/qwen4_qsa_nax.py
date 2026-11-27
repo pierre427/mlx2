@@ -249,10 +249,13 @@ _SOURCE_V2_HEAD = r"""
         }
 
         for (short t = 0; t < NNT; t++) {
+            // LAZY_RESCALE: skip rows whose running max did not move
+            // (alpha 1.0f; x * 1.0f == x bit for bit). Per thread registers.
             for (short f = 0; f < 2; f++)
                 for (short rr = 0; rr < 2; rr++)
-                    for (short co = 0; co < 4; co++)
-                        of[t][f * 8 + rr * 4 + co] *= alpha[rr];
+                    if (!LAZY_RESCALE || alpha[rr] != 1.0f)
+                        for (short co = 0; co < 4; co++)
+                            of[t][f * 8 + rr * 4 + co] *= alpha[rr];
             mpp::tensor_ops::matmul2d<desc_pv, metal::execution_simdgroup> op;
 """
 
@@ -352,6 +355,31 @@ LAWS = {
     "v2_hilo": "qsa-nax-v2-hilop",
 }
 _LAW_KERNELS = {"v1": _KERNEL}
+# Lazy O rescale for the v2 laws (default off; idea gufo-org/gufo#1420, as
+# inkling2_prefill_lazy_rescale): skip the accumulator multiply for rows whose
+# running max did not move. Bitwise identical in practice (only a subnormal
+# accumulator under fast-math flushing could differ). Research switch;
+# ``set_lazy_rescale`` or MLX_QWEN4_QSA_NAX_LAZY_RESCALE=1.
+# LEFT OFF: not helpful here. Operator ABBA at 216dbd714 (M5, MLX 0.32.5,
+# Flash-Next geometry D256/24H/2KV, top-512 blocks, 2048 rows; probe
+# scripts/research/qsa_nax_lazy_rescale_probe.py, evidence
+# qualification/runs/qsa-nax-lazy-rescale-20261127/): bitwise at 16K/32K/128K
+# for v2 and v2_hilo, no time difference (v2 128K 12.1 vs 12.0 ms, arms
+# overlap everywhere). Unlike the Inkling 2 tiled kernel, ``of`` is copied
+# into a fresh cooperative tensor every step, so the skipped multiply was not
+# on the critical path.
+LAZY_RESCALE_ENV = "MLX_QWEN4_QSA_NAX_LAZY_RESCALE"
+_LAZY_RESCALE = os.environ.get(LAZY_RESCALE_ENV, "0").strip().lower() in {"1", "true", "on", "yes"}
+
+
+def set_lazy_rescale(enabled):
+    """Switch the v2 laws' lazy O rescale process-wide (bitwise-neutral)."""
+    global _LAZY_RESCALE
+    _LAZY_RESCALE = bool(enabled)
+
+
+def qsa_nax_lazy_rescale():
+    return _LAZY_RESCALE
 _LAW_SOURCES = {"v2": SOURCE_V2_BF16, "v2_hilo": SOURCE_V2_HILO}
 
 
@@ -594,6 +622,7 @@ def nax_qsa_attention(
             ("NKVH", n_kv_heads),
             ("GQA", gqa),
             ("BS", BLOCK),
+            *([] if law == "v1" else [("LAZY_RESCALE", int(_LAZY_RESCALE))]),
         ],
         grid=(128, length, batch * n_kv_heads),
         threadgroup=(128, 1, 1),

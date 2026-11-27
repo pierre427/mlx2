@@ -397,3 +397,19 @@ def test_misaligned_bases_alone_are_bit_identical(law):
     assert np.array_equal(np.array(got_kv), want)
     got_q = _run(c, law, q=_offset_view(c["q"]))
     assert np.array_equal(np.array(got_q), want)
+
+
+@pytest.mark.parametrize("law", ["v2", "v2_hilo"])
+@pytest.mark.parametrize("seed", [0, 5])
+def test_lazy_rescale_is_bitwise_neutral(law, seed):
+    """The v2 laws' lazy O rescale only skips multiplies by exactly 1."""
+    _gpu()
+    c = _case(length=64, total=2048, topk=96, seed=seed)
+    try:
+        nax.set_lazy_rescale(False)
+        eager = np.array(_run(c, law)).view(np.uint32)
+        nax.set_lazy_rescale(True)
+        lazy = np.array(_run(c, law)).view(np.uint32)
+    finally:
+        nax.set_lazy_rescale(False)
+    assert np.array_equal(eager, lazy)
