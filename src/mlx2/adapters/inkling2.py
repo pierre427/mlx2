@@ -1635,15 +1635,24 @@ class Inkling2Adapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
     def _route_execution_config(self, *, max_lanes, prefill_step):
         self.bind_prefill_step(prefill_step)
         if getattr(self, "draft_model", None) is not None:
-            if max_lanes != 1 and not getattr(self, "dflash2_route", False):
-                # DSpark drafts one lane at a time (lazy drafts, pre-drafts);
-                # fail at startup, not mid-round. The DFlash2 route verifies
-                # several lanes in one batched round: HybridVerifyRows
-                # ``batched_rings`` with the model's per-lane attention
-                # (Attention._segmented_lanes, supports_batched_ring_verify).
-                # Multi-lane DFlash2 is implemented, not qualified; the
-                # best-route default still selects it only at one lane.
-                raise ValueError("Inkling 2 DSpark serving is B1 only: start with --max-lanes 1")
+            # Both drafters verify several lanes in one batched round:
+            # HybridVerifyRows ``batched_rings`` with the model's per-lane
+            # attention (Attention._segmented_lanes, supports_batched_ring_verify).
+            # DSpark drafts each lane in turn on its own draft KV
+            # (Inkling2DSparkExternal.draft_distributions -> draft_cached);
+            # pre-drafts run per lane.  Known limits above one lane: a lane
+            # with no committed feature (trimmed, no new context) sends its
+            # whole cohort to ordinary decode (DraftUnavailable without
+            # failed_rows: a partial retry would re-commit the healthy lanes'
+            # context), inkling2_dspark_cost_depth is a cohort_size-1 policy
+            # and keeps full depth at wider cohorts, and a pre-draft sized
+            # from one lane's budget is discarded when the cohort's depth is
+            # shorter.  The B1-only refusal of 2026-11-21
+            # predates batched ring verify and was lifted 2026-11-27 (Pierre)
+            # after CPU checks: 2-4 lanes greedy == ordinary, sampled B1 == B4
+            # (tests/test_inkling2_dspark_multilane_cpu.py).  Multi-lane is
+            # implemented, not qualified; the best-route default still
+            # selects DFlash2 at one lane only.
             return self._external_execution_config(max_lanes=max_lanes, prefill_step=prefill_step)
         return {
             "persistent": True,
@@ -1684,9 +1693,10 @@ class Inkling2Adapter(ExternalDraftAdapterMixin, OrdinaryTextAdapter):
             kwargs.setdefault("predraft", True)
         if getattr(self, "dspark_cost_depth", None) is not None:
             kwargs.setdefault("adaptive_verification", self.dspark_cost_depth)
-        if getattr(self, "dflash2_route", False) and int(kwargs.get("completion_batch_size") or 1) > 1:
-            # Multi-lane DFlash2: emit a verify's accepted tokens at once so
-            # lanes verify together (inkling2_dflash2.READY_DRAIN_OPTION).
+        if int(kwargs.get("completion_batch_size") or 1) > 1:
+            # Multi-lane DFlash2 or DSpark: emit a verify's accepted tokens at
+            # once so lanes verify together (inkling2_dflash2.READY_DRAIN_OPTION;
+            # the committed tokens are the same).
             from . import inkling2_dflash2
 
             kwargs.setdefault("ready_drain", getattr(self, "dflash2_ready_drain", None)
@@ -1942,6 +1952,8 @@ def _dspark_receipt(self):
         "predraft": bool(getattr(self, "dspark_predraft", False)),
         "options": _drafter_options(getattr(self, "draft_model", None)),
         "cost_depth": getattr(self, "dspark_cost_depth", None),
+        # Applied above one lane (create_external_batch); one lane never splits.
+        "ready_drain_multilane": "all",
     }
 
 

@@ -463,6 +463,18 @@ def run_questions(client, model_name, prefix, items, *, chat, max_tokens, log=No
                # (null when the server loaded no deterministic tiles).
                "markers": text.count("<<"), "reasoning_markers": reasoning.count("<<"),
                "det_tiles": (find(result, "amoeba_det_tiles_request") or {}).get("calculator")}
+        if request_extra.get("logprobs") is True:
+            # Per-token {id: logprob} windows (the selected token included) for
+            # first-divergence near-tie classification
+            # (scripts/classify_b1b4_divergence.py).  Opt-in per arm.
+            windows = []
+            for item in ((choice.get("logprobs") or {}).get("content") or []):
+                window = {int(t["id"]): float(t["logprob"])
+                          for t in item.get("top_logprobs") or () if "id" in t}
+                if "id" in item and "logprob" in item:
+                    window.setdefault(int(item["id"]), float(item["logprob"]))
+                windows.append([int(item["id"]) if "id" in item else None, window])
+            row["logprob_windows"] = windows
         if request_extra.get("return_token_trace") is True:
             from mlx2.generation_trace import read_token_trace
             row["token_ids"] = read_token_trace(extra, expected_tokens=completion)["token_ids"]
@@ -532,7 +544,7 @@ def compact(row):
     # Which verifier decided (e.g. "exact_block") and its round count.
     keep["verification"] = spec.get("verification")
     keep["block_verified_rounds"] = (spec.get("exact_verification") or {}).get("block_verified_rounds")
-    for name in ("effective_sampling", "sampling_filter", "token_ids"):
+    for name in ("effective_sampling", "sampling_filter", "token_ids", "logprob_windows"):
         if name in row:
             keep[name] = row[name]
     return keep

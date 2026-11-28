@@ -947,7 +947,7 @@ def test_tiny_inkling2_engine_serves_several_lanes_greedy_exact(lengths, stagger
 
 
 @pytest.mark.parametrize("lanes", [2, 16])
-def test_dflash2_route_accepts_more_than_one_lane_and_dspark_still_refuses(lanes, monkeypatch):
+def test_dflash2_and_dspark_routes_accept_more_than_one_lane(lanes, monkeypatch):
     from mlx2.adapters.inkling2 import Inkling2Adapter
 
     adapter = object.__new__(Inkling2Adapter)
@@ -960,9 +960,9 @@ def test_dflash2_route_accepts_more_than_one_lane_and_dspark_still_refuses(lanes
     config = adapter.execution_config(max_lanes=lanes, prefill_step=512)
     assert config["backend"] == "external_draft" and config["segment_aware_cohort_size"] == lanes
     assert "max_lanes" not in adapter.__dict__.get("dflash2_refusals", {})
-    adapter.dflash2_route = False  # the DSpark route drafts one lane at a time
-    with pytest.raises(ValueError, match="B1 only"):
-        adapter.execution_config(max_lanes=lanes, prefill_step=512)
+    adapter.dflash2_route = False  # DSpark: B1-only refusal lifted 2026-11-27 (Pierre)
+    config = adapter.execution_config(max_lanes=lanes, prefill_step=512)
+    assert config["backend"] == "external_draft" and config["segment_aware_cohort_size"] == lanes
 
 
 class _LaneKey:
