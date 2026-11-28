@@ -138,6 +138,13 @@ class Qwen38TargetTreeExecutor:
     ast_fast_route: object = None
     ast_cohort_probe: bool = False
     ast_cohort_domain: tuple = ()
+    # ``forward`` takes a device int32 token row as ``inputs`` as well as a
+    # host list (``speculative_device_tree``, device_round ``tree_lazy``):
+    # runtime/qwen38_tensorfold.py embeds the row on the device in place of
+    # the vendored forward's host-id embedding.  ``forward_many`` (cohorts)
+    # still takes host lists; the device tree round is width one.
+    # Unannotated: a class constant, not a dataclass field.
+    device_tree_inputs = True
 
     @classmethod
     def create(cls, *, ast_chain=False, ast_fast_tree=False, ast_cohort_probe=False):
@@ -691,4 +698,6 @@ class Qwen38TargetTreeExecutor:
             "gdn_backend": gdn_backend_stats(),
             "glue_backend": glue_backend_stats(),
             "tree_law": tree_law(),
+            # Same law as a host list: one embedding of the same ids.
+            "device_tree_inputs": "b1_forward_device_row_embedding_v1",
         }

@@ -232,7 +232,7 @@ def test_successful_verify_records_exact_rollback_and_commits_once(monkeypatch):
     monkeypatch.setattr(route.verify_kernels, 'qwen4_fused_gdn_verify',
                         lambda *a, **kw: (z, conv, state, state_snaps, conv_snaps))
     monkeypatch.setattr(c, 'record_rollback',
-                        lambda steps, fn, snapshot: recorded.append((steps, fn, snapshot)))
+                        lambda steps, fn, snapshot, **_staged: recorded.append((steps, fn, snapshot)))
     output = obj._try_fused_decode(qkv, z, b, a, None, c)
     assert output.shape == (1, 3, 16)
     assert c[0] is conv and c[1] is state and recorded[0][0] == 3
@@ -276,7 +276,7 @@ def test_row_exact_canary_success_and_rollback_do_not_publish_counters(monkeypat
     )
     monkeypatch.setattr(
         c, 'record_rollback',
-        lambda steps, fn, snapshot: recorded.append((steps, fn, snapshot)),
+        lambda steps, fn, snapshot, **_staged: recorded.append((steps, fn, snapshot)),
     )
     output = obj.row_exact_probe_fused_decode(qkv, z, b, a, None, c)
     assert output.shape == (1, 3, 16)

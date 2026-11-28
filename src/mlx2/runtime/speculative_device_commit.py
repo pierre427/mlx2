@@ -10,8 +10,8 @@ the device, with no host trim:
 
 * target global layers: the exact ``KVCache`` is adopted, buffers and all,
   by a device-mode ``DeviceOffsetKVCache`` (DC-1);
-* target recurrent layers (Kimi/Raon RDA ``ArraysCache``): unchanged objects,
-  rolled back by ``device_rollback`` (DC-2);
+* target recurrent layers (Kimi/Raon RDA, Qwen3.8 GDN ``ArraysCache``):
+  unchanged objects, rolled back by ``device_rollback`` (DC-2);
 * drafter sliding context: each ``RotatingKVCache(max_size=window)`` becomes
   a ``DeviceRingKVCache`` (DC-3) of slack ``num_draft + 1``; the ring takes
   every verify feature row and keeps the committed count (``pending_count``).
@@ -88,9 +88,9 @@ def lane_reason(owner, lane):
     if any(type(cache) is ArraysCache for cache in lane.cache) and getattr(
             getattr(owner, "model", None), "device_commit_recurrent_rollback", False) is not True:
         # Only a target whose recurrent layers stage a device rollback (Kimi
-        # Linear's KDA, Raon's RDA) can commit them by a device count; any
-        # other (e.g. Qwen3.8's gated delta) keeps the host commit instead of
-        # failing at ``device_rollback``.
+        # Linear's KDA, Raon's RDA, Qwen3.8's gated delta unless compact
+        # replay is on) can commit them by a device count; any other keeps
+        # the host commit instead of failing at ``device_rollback``.
         return "recurrent_rollback"
     for cache in lane.cache:
         kind = type(cache)

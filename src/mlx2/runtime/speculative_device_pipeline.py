@@ -247,10 +247,14 @@ def skip_reason(owner, cohort):
             return "composition"
     if getattr(owner, "round_timing", False):
         return "round_timing"
-    if getattr(owner.model, "device_commit_kv_position_free", False) is not True:
+    if (getattr(owner.model, "device_commit_kv_position_free", False) is not True
+            and getattr(owner.model, "device_commit_kv_device_position", False) is not True):
         # A following round is verified while its KV bound still has slack,
         # and ``DeviceOffsetKVCache.offset`` is that bound: a layer that takes
         # its RoPE position from ``offset`` would rotate at the wrong position.
+        # A target declares either no positional encoding over its device KV
+        # (Raon's NoPE latent) or that every RoPE layer reads the device fill
+        # (``DeviceOffsetKVCache.rope_offset``: Qwen3.8's full attention).
         return "position_encoding"
     if float(lane.sampling.get("sampling_temp", 0)) != 0.0:
         return "sampled"

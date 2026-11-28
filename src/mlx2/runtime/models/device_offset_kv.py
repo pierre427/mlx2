@@ -28,7 +28,10 @@ cache by an accepted count that stays on the device:
 ``offset`` is the host *bound* in device mode, not the fill: it is only safe
 for caches whose layer encodes no position from ``offset`` (Raon's NoPE MLA
 latent).  Any position-encoding (RoPE) layer must take its position from
-``pos``.  State and offset setters, serialization, quantization and merging refuse in
+``pos``: ``rope_offset`` is that position (the host ``offset`` while the bound
+is exact, the device ``pos`` while it carries slack), and a target whose every
+RoPE layer reads it declares ``device_commit_kv_device_position`` (Qwen3.8,
+DC-5).  State and offset setters, serialization, quantization and merging refuse in
 device mode instead of copying the slack rows as if they were filled.
 
 Attention over the bounded width is equal to the exact-length attention only
@@ -114,6 +117,24 @@ class DeviceOffsetKVCache(KVCache):
             # the capsule capture and batch merges expose only committed rows).
             host._fixed_capacity_step = int(self.reserve_step)
         return host
+
+    @property
+    def rope_offset(self):
+        """The RoPE position of the next forward's first row (spec-round DC-5).
+
+        Host mode, or device mode with an exact bound (nothing but committed
+        rows below it: serial DC-4 rounds observe after every commit): the host
+        ``offset``, which then equals the fill, so those forwards are unchanged.
+        Device mode with slack (a pipelined round verified while the round
+        ahead of it is still in flight; ``settle(length, pending)``): the
+        device fill ``pos``, an int32 ``[1]`` array that ``mx.fast.rope``
+        takes as its ``offset`` with no host read. ``_exact`` implies
+        ``pos == bound == offset`` (every setter keeps them together), so both
+        branches are the same position.
+        """
+        if not self.device_mode or self._exact:
+            return self.offset
+        return self.pos
 
     @property
     def recovery_fill(self):

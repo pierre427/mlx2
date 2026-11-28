@@ -1390,6 +1390,66 @@ DFlash2DraftModel.tree_codebooks = tree_codebooks
 DFlash2DraftModel.supports_tree_calibration = True
 
 
+def _draft_tree_lazy(self, anchor, hidden, cache, max_nodes, *, codebooks=None, mark=None,
+                     lattice_positions=16):
+    """One lane's ``propose_tree`` for ``speculative_device_tree`` (device_round
+    ``tree_lazy``, default off, unqualified).  Original mlx2 (no mined code).
+
+    The DFlash2 tree is a data-dependent search: ``best_first_tree`` pops a
+    float64 heap over the lattice (``candidates``, ``unary``, ``projected``
+    and the selector codebooks), so its parents depend on the drafted values.
+    The device tree round needs static parents before it can build the verify
+    forward, and a float32 device search could pick a different tree at a
+    near tie, so it would not be the host tree.  This hook therefore runs the
+    host operations unchanged (``_start_tree`` then ``_finish_tree`` on the
+    same one-row batch cache, the same codebooks and lattice width) and lifts
+    the tokens into a device int32 row: the tree (tokens, parents, node order)
+    and the draft cache are the host ``propose_tree``'s exactly, and the round
+    keeps the lattice read as its one draft-side read (``host_search``;
+    counted as ``external_device_tree_host_search_lanes``).  What the device
+    round adds is the device verify input, the per-topology geometry and,
+    with ``tree_decide``, the device path selection.
+
+    Because the tree is a host tree, a lattice prelaunched by the tree draft
+    pipeline (``pipeline_draft``) and adopted by the next round is the same
+    contract, so this drafter declares ``draft_tree_lazy_pipelines``
+    (adoptions counted as ``external_device_tree_adopted_lanes``).
+
+    The tree does not depend on the lane's sampling (no temperature or
+    uniform enters the lattice or the search), so sampled lanes get the
+    same tree and keep the host decision (``draft_tree_lazy_greedy_only``
+    is false).  Tree rounds are outside the ``fixed_shape`` menu: the
+    lattice is drafted at ``min(lattice_positions, max_nodes + 1)`` as on
+    the host, because padding it would change the drafts (the drafter attends
+    over its whole block).
+    """
+    from ..speculative_device_tree import LazyTreeProposal
+
+    if hidden.shape[0] != 1:
+        raise ValueError("DFlash2 lazy trees run one lane at a time")
+    state = _start_tree(self, [int(anchor)], hidden, cache, max_nodes,
+                        lattice_positions=lattice_positions, codebooks=codebooks)
+    if mark is not None:
+        mark("tree_draft_build")
+    tokens, parents = _finish_tree(self, state, mark=mark)[0]
+    return LazyTreeProposal(mx.array([int(token) for token in tokens], dtype=mx.int32),
+                            tuple(int(parent) for parent in parents), host_search=True)
+
+
+DFlash2DraftModel.draft_tree_lazy = _draft_tree_lazy
+# Options ``speculative_device_tree.DeviceTree.propose`` may forward from the
+# engine's ``_tree_options`` (anything else declines, counted).
+DFlash2DraftModel.draft_tree_lazy_options = frozenset({"codebooks", "mark", "lattice_positions"})
+# The host methods the lazy tree runs: a subclass overriding any of them
+# without its own ``draft_tree_lazy`` keeps the host tree round.
+DFlash2DraftModel.draft_tree_lazy_host_twins = ("propose_tree", "start_tree", "finish_tree")
+DFlash2DraftModel.draft_tree_lazy_pipelines = True
+DFlash2DraftModel.draft_tree_lazy_greedy_only = False
+# ``_lattice_candidates`` counts reduced/full head rounds here; a declined
+# device round restores them with ``stats``.
+DFlash2DraftModel.draft_tree_lazy_counter_maps = ("_draft_vocab",)
+
+
 # Drafter projection kernels (original mlx2).  The drafter only proposes; the
 # target's verification law decides every committed token, so the drafter's
 # arithmetic may change as long as its identity (bound into route and APCv2

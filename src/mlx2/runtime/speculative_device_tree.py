@@ -32,13 +32,49 @@ Switches (``device_round`` policy object):
     verifier the host would run (``batched_laws`` gate), so the commit and
     the responses are unchanged.  Sampled lanes keep the host decision
     (counted under ``external_device_tree_decide_skips``).
+``tree_fused`` (needs ``tree_decide``; ``speculative_device_tree_fused``)
+    The verify input is one Metal kernel reading the drafter's branch grid
+    (``LazyTreeProposal.grid``/``index``; any other lazy or adopted tree
+    reads its token row), and a greedy lane's decision is one Metal kernel
+    over the row law (argmax and finiteness); the host walks the path from
+    the read argmaxes.  About 35 small device operations per round become 3
+    (``scripts/count_device_tree_ops.py``); tokens, RNG draws and response
+    rows are the ``tree_decide`` round's.  Counted under
+    ``external_device_tree_fused_lanes``.
 
-What a round cannot serve (width above one, processors, tree calibration,
-draft pipelining, a verify trace, a provider without device inputs, a drafter
-without ``draft_tree_lazy``) runs the host tree round, counted under
-``external_device_tree_decline_reasons``.  A drafter that cannot draft a
-given round lazily raises ``LazyDecline``; the round is restored and redone on
-the host (counted under the drafter's reason).
+Host-searched lazy trees (DFlash2, ``drafters/dflash2.py``): a drafter whose
+tree topology is a data-dependent host search returns ``LazyTreeProposal``
+with ``host_search=True``: the tokens are the host search's, lifted to the
+device, so the round keeps that one draft-side read (counted under
+``external_device_tree_host_search_lanes``).  Such a drafter may declare
+``draft_tree_lazy_pipelines``: its pipelined lattices (``pipeline_draft``,
+adopted by the next round as host trees) are then the same contract and are
+served by the device round (``external_device_tree_adopted_lanes``) instead
+of declining.  ``MLX2_TREE_PIPELINE_DRAFT=0`` is the serial control arm.  A
+drafter declaring ``draft_tree_lazy_greedy_only`` declines sampled lanes
+(``sampled_lane``).
+
+``processors`` (the chain round's switch, admitted here with ``tree_lazy``)
+    Lanes whose logits processors are all stateless and history-pure
+    (``processors_ok``: the presence, frequency and repetition penalties of
+    vendor sampling profiles) keep the device tree round.  Under
+    ``tree_lazy`` alone the host decision applies them after the one read, as
+    before; under ``tree_decide`` each row's law is processed on the device
+    on that row's own history (lane history plus its root-to-node inputs,
+    the host verifier's ``history_suffix``), in whichever form the host
+    verifier would use (``_launch_tree_laws`` batched masks or
+    ``_target_law``'s per-row processor calls).  Forbidden roots are the
+    host's (a nonempty set declines the lazy draft, ``forbidden_root``).
+
+What a round cannot serve (width above one, processors without the
+``processors`` switch or that are not stateless, tree calibration,
+draft pipelining by a drafter that does not declare it, a verify trace, a
+provider without device inputs, a drafter without ``draft_tree_lazy``) runs
+the host tree round, counted under ``external_device_tree_decline_reasons``.
+A drafter that cannot draft a given round lazily raises ``LazyDecline``; the
+round is restored and redone on the host (counted under the drafter's reason).
+The drafter's ``stats`` and the integer counters of each attribute it names in
+``draft_tree_lazy_counter_maps`` are restored with it.
 """
 
 from __future__ import annotations
@@ -52,7 +88,7 @@ import numpy as np
 from .technologies.tree_verify import TopologySpec, TreeTopology
 
 VERSION = "speculative-device-tree-v1"
-SWITCHES = ("tree_lazy", "tree_decide")
+SWITCHES = ("tree_lazy", "tree_decide", "tree_fused")
 COUNTERS = (
     "external_device_tree_rounds",
     "external_device_tree_lazy_lanes",
@@ -60,6 +96,10 @@ COUNTERS = (
     "external_device_tree_decide_lanes",
     "external_device_tree_host_decide_lanes",
     "external_device_tree_declines",
+    # Lazy proposals whose tokens came from a host search (``host_search``),
+    # and pipelined host trees adopted by a device round (see above).
+    "external_device_tree_host_search_lanes",
+    "external_device_tree_adopted_lanes",
 )
 DECLINES = "external_device_tree_decline_reasons"
 # Device tree rounds whose decision stayed on the host under ``tree_decide``.
@@ -77,6 +117,16 @@ class LazyTreeProposal:
 
     tokens: object
     parents: tuple
+    # The topology came from a host search over the drafter's device output
+    # (one draft-side read, e.g. DFlash2's best-first lattice search).
+    host_search: bool = False
+    # Optional (``tree_fused``): the drafter's own token grid and the flat
+    # position of each node in it, so ``tokens`` is ``grid.reshape(-1)[index]``
+    # and the fused verify-row kernel reads the grid directly (native MTP:
+    # the ``[branches, depth]`` branch grid; the drafter's slices,
+    # concatenate and cast are then never evaluated).
+    grid: object = None
+    index: tuple = ()
 
 
 def chain_branch_parents(pattern):
@@ -161,8 +211,9 @@ def engine_reason(owner, cohort):
     if getattr(owner, "tree_calibration", None) is not None:
         # Calibrated trees are reordered on host tokens before the forward.
         return "tree_calibration"
-    if owner._draft_pipelines():
-        # Pipelined lattices are host trees adopted from the previous round.
+    if owner._draft_pipelines() and getattr(draft, "draft_tree_lazy_pipelines", False) is not True:
+        # Pipelined lattices are host trees adopted from the previous round;
+        # only a drafter whose lazy tree is a host tree anyway declares them.
         return "pipeline_draft"
     if _VERIFY_TRACE_PATH is not None:
         return "verify_trace"
@@ -173,10 +224,40 @@ def engine_reason(owner, cohort):
     if getattr(owner, "ast_batch_row_sharing", False):
         return "batch_row_sharing"
     for lane in cohort:
-        if lane.processors:
-            # Forbidden roots and processed drafts change the host tree.
+        if lane.processors and not processors_ok(owner, lane):
+            # Without the ``processors`` switch, or for a processor that is not
+            # stateless and history-pure (a grammar, a verify ledger), the
+            # host tree round applies them.
             return "processors"
+        if getattr(draft, "draft_tree_lazy_greedy_only", False) is True and float(
+                lane.sampling.get("sampling_temp", 0) or 0) != 0.0:
+            return "sampled_lane"
     return None
+
+
+def processors_ok(owner, lane):
+    """``processors`` switch on a tree round: every processor is stateless.
+
+    A stateless processor (``sample_utils._probe_safe``: ``history_pure`` and
+    its own ``probe``, e.g. the presence, frequency and repetition penalties)
+    or one declaring the stateless branch contract (``progressive_branch_safe``
+    and ``history_pure``) is a pure function of the history it is given, so
+    the round applies it to each tree row's own root-to-node history (the
+    host tree verifier's ``history_suffix``), with the draft tokens still on
+    the device.  Its forbidden roots stay the host's (``_tree_forbidden``; a
+    nonempty set declines the lazy draft with ``forbidden_root``).  A verify
+    ledger snapshots per-row state through ``VerifyWindow``: declined.
+    """
+    policy = getattr(getattr(owner, "device_round", None), "policy", None)
+    if policy is None or not policy.processors:
+        return False
+    return all(
+        getattr(processor, "history_pure", False) is True
+        and (getattr(processor, "probe", None) is processor
+             or getattr(processor, "progressive_branch_safe", False) is True)
+        and not callable(getattr(processor, "verify_ledger", None))
+        for processor in lane.processors
+    )
 
 
 def _twin_overridden(draft):
@@ -209,6 +290,9 @@ def run(runtime, owner, cohort):
         return owner._tree_round(cohort)
     draft_stats = getattr(owner.draft, "stats", None)
     draft_snapshot = dict(draft_stats) if type(draft_stats) is dict else None
+    counter_maps = _counter_maps(owner.draft)
+    counter_snapshots = [{key: value for key, value in state.items() if type(value) is int}
+                         for state in counter_maps]
     try:
         return owner._tree_round(cohort, device_tree=DeviceTree(runtime))
     except LazyDecline as error:
@@ -216,8 +300,18 @@ def run(runtime, owner, cohort):
         if draft_snapshot is not None:
             owner.draft.stats.clear()
             owner.draft.stats.update(draft_snapshot)
+        for counters, snapshot in zip(counter_maps, counter_snapshots, strict=True):
+            counters.update(snapshot)
         decline(owner, error.reason, len(cohort))
         return owner._tree_round(cohort)
+
+
+def _counter_maps(draft):
+    """The drafter's declared counter maps (e.g. DFlash2's ``_draft_vocab``
+    reduced/full head rounds), restored on a ``LazyDecline`` like ``stats``."""
+    names = getattr(draft, "draft_tree_lazy_counter_maps", ())
+    states = [getattr(draft, "__dict__", {}).get(name) for name in names]
+    return [state for state in states if type(state) is dict]
 
 
 class DeviceTree:
@@ -226,6 +320,11 @@ class DeviceTree:
     def __init__(self, runtime):
         self.runtime = runtime
         self.policy = runtime.policy
+        # ``tree_fused``: the proposal's grid and node index, and the raw
+        # drafts the fused verify row read (the host reads these).
+        self.fused = bool(getattr(self.policy, "tree_fused", False))
+        self._fused_source = None
+        self._fused_raw = None
 
     # -- the proposal (``_propose``'s ``propose_tree`` call) ---------------------
     def propose(self, owner, lanes, arguments, forbidden, options):
@@ -246,7 +345,16 @@ class DeviceTree:
         if tokens.ndim != 1 or int(tokens.shape[0]) != len(parents):
             raise RuntimeError("lazy tree proposal tokens and parents differ")
         geometry(parents)  # validates parent-first order
+        grid = getattr(proposal, "grid", None)
+        if self.fused and grid is not None:
+            index = tuple(int(value) for value in proposal.index)
+            if len(index) != len(parents) or any(
+                    not 0 <= value < int(grid.size) for value in index):
+                raise RuntimeError("lazy tree proposal grid index and parents differ")
+            self._fused_source = (grid, index)
         _bump(owner.scheduler_stats, "external_device_tree_lazy_lanes")
+        if getattr(proposal, "host_search", False):
+            _bump(owner.scheduler_stats, "external_device_tree_host_search_lanes")
         self.runtime._lane_count(lanes[0], "tree_lazy_rounds")
         return [(tokens, list(parents))]
 
@@ -259,11 +367,31 @@ class DeviceTree:
 
         mx = owner.mx
         (lane,), (block,) = cohort, blocks
+        if not isinstance(block.tokens, mx.array):
+            # Only a pipelined lattice (``draft_tree_lazy_pipelines``) reaches
+            # the device round as a host tree.
+            _bump(owner.scheduler_stats, "external_device_tree_adopted_lanes")
+            self.runtime._lane_count(lane, "tree_adopted_rounds")
         geo = geometry(tuple(block.parents))
-        inputs = mx.concatenate([
-            mx.array([int(lane.anchor)], dtype=mx.int32),
-            mx.clip(_device_tokens(mx, block.tokens), 0, owner._target_token_vocab_size - 1),
-        ])
+        if self.fused:
+            # One launch: [anchor] + clip(drafts) and the raw drafts.
+            from . import speculative_device_tree_fused as fused
+
+            source = self._fused_source
+            if source is None or len(source[1]) != len(block.parents) or not isinstance(
+                    block.tokens, mx.array):
+                # No grid, or the block is not the proposal's tree any more
+                # (an adopted host tree): its own token row.
+                count = len(block.parents)
+                source = (_device_tokens(mx, block.tokens), tuple(range(count)))
+            inputs, self._fused_raw = fused.verify_row(
+                mx, source[0], source[1], int(lane.anchor),
+                owner._target_token_vocab_size - 1)
+        else:
+            inputs = mx.concatenate([
+                mx.array([int(lane.anchor)], dtype=mx.int32),
+                mx.clip(_device_tokens(mx, block.tokens), 0, owner._target_token_vocab_size - 1),
+            ])
         if owner.target_execution == "reference":
             logits, features, transaction = self._reference_forward(owner, lane, inputs, geo)
         else:
@@ -322,12 +450,16 @@ class DeviceTree:
             if phase is not None:
                 phase("tree_target_launch")
             owner._presnapshot_draft(cohort)
-        mx.eval(logits, features, *([block.tokens] if lazy else []),
-                *([plan.packet] if plan is not None else []))
+        # ``tree_fused``: the verify row's raw drafts stand for the
+        # drafter's token array (which then never runs).
+        raw = self._fused_raw if lazy else None
+        mx.eval(logits, features, *([block.tokens if raw is None else raw] if lazy else []),
+                *([plan.packet, *getattr(plan, "fence", ())] if plan is not None else []))
         _bump(owner.scheduler_stats, "external_device_tree_host_reads")
         if plan is not None and phase is not None:
             phase("tree_target_wait")
-        tokens = ([int(token) for token in np.asarray(block.tokens).tolist()] if lazy
+        tokens = ([int(token) for token in np.asarray(
+                       block.tokens if raw is None else raw).tolist()] if lazy
                   else [int(token) for token in block.tokens])
         vocab = min(owner._target_token_vocab_size, int(logits.shape[-1]))
         if any(not 0 <= token < vocab for token in tokens):
@@ -345,6 +477,10 @@ class DeviceTree:
                 phase("tree_target_law")
             _bump(owner.scheduler_stats, "external_device_tree_decide_lanes")
             self.runtime._lane_count(lane, "tree_decide_rounds")
+            if plan.fused:
+                from .speculative_device_tree_fused import COUNTER
+
+                _bump(owner.scheduler_stats, COUNTER)
         if any(not 0 <= token < vocab for d in decisions for token in d.emitted):
             raise ValueError("device-tree token outside the vocabulary")
         _bump(owner.scheduler_stats, "external_device_tree_rounds")
@@ -362,10 +498,31 @@ class DeviceTree:
         batched = bool(owner.tree_gates["batched_laws"] and owner._batched_law_contract(lane))
         emit = lane.sampling.get("emit_logprobs", True)
         keep = bool(emit or not owner.tree_gates["logprobs_on_request"])
-        plan = SimpleNamespace(geo=geo, batched=batched, keep=keep, values=None, norms=None)
+        fused = self.fused
+        plan = SimpleNamespace(geo=geo, batched=batched, keep=keep, values=None, norms=None,
+                               fused=fused)
+        processors = getattr(lane, "processors", None) or ()
+        # ``tree_fused``: the fused verify row's raw drafts (same values as
+        # the drafter's token array, which then never runs).
+        drafts = (self._fused_raw if fused and self._fused_raw is not None
+                  else _device_tokens(mx, block.tokens))
+        # Row r's verify input path is [anchor, node tokens...]; its processor
+        # history is the lane history plus those tokens (``history_suffix``).
+        # Clipped like the verify input: an out-of-vocabulary draft declines the
+        # whole round after the read (``draft_outside_vocabulary``), and must
+        # not index outside the logits before it.
+        inputs = mx.concatenate([
+            mx.array([int(lane.anchor)], dtype=int32),
+            mx.clip(drafts, 0, int(logits.shape[-1]) - 1),
+        ]) if processors else None
+        if fused:
+            return self._plan_fused(owner, lane, plan, logits, inputs, processors)
         if batched:
             # ``_launch_tree_laws``' greedy arithmetic.
-            values = logits[0, :rows].astype(f32).astype(f32)
+            values = logits[0, :rows].astype(f32)
+            if processors:
+                values = _batched_processed_rows(mx, lane, geo, inputs, values)
+            values = values.astype(f32)
             selected = mx.argmax(values, axis=-1)
             if keep:
                 norms = mx.logsumexp(values, axis=-1)
@@ -377,8 +534,17 @@ class DeviceTree:
         else:
             # ``_target_law``'s per-row arithmetic.
             values, norms, picks = [], [], []
+            history = mx.array(list(lane.history), dtype=int32) if processors else None
             for row in range(rows):
-                value = logits[0, row][None].astype(f32)[0].astype(f32)
+                value = logits[0, row][None].astype(f32)
+                if processors:
+                    # ``_target_law``: the lane's processors in order on
+                    # ``history + path tokens``, the drafts still lazy.
+                    tokens = mx.concatenate([
+                        history, mx.take(inputs, mx.array(geo.paths[row], dtype=int32))])
+                    for processor in processors:
+                        value = processor(tokens, value)
+                value = value[0].astype(f32)
                 values.append(value)
                 norms.append(mx.logsumexp(value))
                 picks.append(mx.argmax(value))
@@ -386,7 +552,7 @@ class DeviceTree:
             valid = mx.isfinite(mx.stack(norms))
             plan.values, plan.norms = values, norms
         selected = selected.astype(int32)
-        path = self._accepted_path(mx, geo, block.tokens, selected)
+        path = self._accepted_path(mx, geo, drafts, selected)
         plan.packet = mx.concatenate([path, selected, valid.astype(int32)])
         return plan
 
@@ -408,6 +574,49 @@ class DeviceTree:
                         mx.sum(mx.where(at_depth, index[None, :], 0), axis=1),
                         -1).astype(mx.int32)
 
+    @staticmethod
+    def _plan_fused(owner, lane, plan, logits, inputs, processors):
+        """``_plan``'s values with the decision as one ``decide_rows`` launch.
+
+        The row law the kernel reads is the unfused round's (bf16 logits
+        without processors, whose float32 argmax and finiteness are the
+        cast's; the processed float32 rows otherwise).  Response rows keep
+        the unfused lazy ``values - logsumexp`` arrays (only when ``keep``),
+        evaluated when a response reads them."""
+        from . import speculative_device_tree_fused as fused
+
+        mx = owner.mx
+        f32 = mx.float32
+        geo = plan.geo
+        rows = geo.rows
+        raw = logits[0, :rows]
+        if plan.batched:
+            values = raw.astype(f32)
+            if processors:
+                values = _batched_processed_rows(mx, lane, geo, inputs, values).astype(f32)
+            law = values if processors else raw
+            if plan.keep:
+                plan.values, plan.norms = values, mx.logsumexp(values, axis=-1)
+                # In the round's one read, as the unfused packet has them.
+                plan.fence = (plan.norms,)
+        else:
+            values = []
+            history = mx.array(list(lane.history), dtype=mx.int32) if processors else None
+            for row in range(rows):
+                value = logits[0, row][None].astype(f32)
+                if processors:
+                    tokens = mx.concatenate([
+                        history, mx.take(inputs, mx.array(geo.paths[row], dtype=mx.int32))])
+                    for processor in processors:
+                        value = processor(tokens, value)
+                values.append(value[0].astype(f32))
+            law = mx.stack(values) if processors else raw
+            if plan.keep:
+                plan.values, plan.norms = values, [mx.logsumexp(value) for value in values]
+                plan.fence = tuple(plan.norms)
+        plan.packet = fused.decide_rows(mx, law)
+        return plan
+
     def _finish(self, owner, lane, block, plan, logits):
         """The host walk of the packet's path: ``_verify_tree``'s decision."""
         from .external_speculative import (
@@ -419,10 +628,16 @@ class DeviceTree:
 
         geo = plan.geo
         packet = [int(value) for value in np.asarray(plan.packet).tolist()]
-        depth = geo.max_depth + 1
-        path = packet[:depth]
-        selected = packet[depth: depth + geo.rows]
-        valid = packet[depth + geo.rows:]
+        if getattr(plan, "fused", False):
+            from .speculative_device_tree_fused import walk
+
+            selected, valid = packet[:geo.rows], packet[geo.rows:]
+            path = walk(geo.target_parents, [int(token) for token in block.tokens], selected)
+        else:
+            depth = geo.max_depth + 1
+            path = packet[:depth]
+            selected = packet[depth: depth + geo.rows]
+            valid = packet[depth + geo.rows:]
         vocab = int(logits.shape[-1])
         commit_rows, emitted = [], []
         for row in path:
@@ -466,6 +681,58 @@ class DeviceTree:
             target_laws=target_laws, response_logprobs=response, commit_rows=commit_rows,
             verify_window=window,
         )
+
+
+def _batched_processed_rows(mx, lane, geo, inputs, rows):
+    """``_launch_tree_laws``' processor arithmetic with the path tokens on the device.
+
+    The lane's processors in order, each on every row's own history (lane
+    history plus the row's root-to-node inputs): a presence window
+    (``presence_window``) subtracts its penalty on the distinct tokens of
+    ``_history_window(history, path tokens, context, start)``, the history
+    part from host ids and the path part gathered from ``inputs``; a
+    length-only processor masks its forbidden ids per row length.  Only the
+    two kinds ``_batched_law_contract`` admits reach here.  The window bounds
+    are ``external_speculative._history_window``'s."""
+    width, vocab = geo.rows, int(rows.shape[-1])
+    history = list(lane.history)
+    boundary = len(history)
+    lengths = [boundary + len(path) for path in geo.paths]
+    for processor in lane.processors:
+        presence = getattr(processor, "presence_window", None)
+        if presence is not None:
+            penalty, context_size, start = presence
+            host_flat, device_rows, device_columns = [], [], []
+            for row, path in enumerate(geo.paths):
+                length = boundary + len(path)
+                # The window's first index in history + suffix (as
+                # ``_history_window`` slices it).
+                first = slice(start, None).indices(length)[0]
+                first += slice(-context_size, None).indices(length - first)[0]
+                if first < boundary:
+                    host_flat.extend(row * vocab + int(token) for token in set(history[first:]))
+                for position in range(max(0, first - boundary), len(path)):
+                    device_rows.append(row)
+                    device_columns.append(path[position])
+            pieces = []
+            if host_flat:
+                pieces.append(mx.array(host_flat, dtype=mx.int32))
+            if device_rows:
+                pieces.append(mx.array(device_rows, dtype=mx.int32) * vocab
+                              + mx.take(inputs, mx.array(device_columns, dtype=mx.int32)))
+            if pieces:
+                mask = mx.zeros((width * vocab,), dtype=mx.bool_)
+                mask[mx.concatenate(pieces)] = True
+                rows = mx.where(mask.reshape(width, vocab), rows - penalty, rows)
+            continue
+        forbidden = [sorted({int(token) for token in processor.forbidden_token_ids_at_length(length)})
+                     for length in lengths]
+        count = max((len(ids) for ids in forbidden), default=0)
+        if count:
+            table = mx.array([ids + [-1] * (count - len(ids)) for ids in forbidden], dtype=mx.int32)
+            mask = mx.any(mx.arange(vocab)[None, None, :] == table[:, :, None], axis=1)
+            rows = mx.where(mask, -float("inf"), rows)
+    return rows
 
 
 def _device_tokens(mx, tokens):

@@ -22,6 +22,107 @@ DEFAULT_EXTERNAL_PROPOSAL_COMPOSITION = {
     "max_sources": 8,
 }
 
+# GPU-resident speculative rounds on every DFlash2 drafter route, DEFAULT ON
+# (Pierre, 2026-11-27: "make device_round default in general for dflash2").
+# Chain rounds draft lazily and decide on the device (lazy_draft, decide);
+# tree15 rounds draft their tree lazily and select the path on the device
+# (tree_lazy, tree_decide); stateless penalties stay on the device
+# (processors).  Evidence: Qwen3.8-27B-oQ4e-mtp@sha256:fb827b65 r2 at
+# 2765a06b3 (chain +2 % / +4 % at presence 0 / 1.5, tree = host speed, 30/30
+# tokens, zero declines) and a second checkpoint's DFlash2 chain (1.09x, 30/30
+# tokens; docs/research/model-feature-decisions.tsv).  device_commit, lagged_width,
+# pipeline, lagged_composition and fixed_shape stay opt-in (DC-4/DC-5 were
+# slower on the 27B).  A round the device cannot serve runs the host round
+# with a counted decline.  An explicit ``device_round`` in the execution
+# policy (``false`` for the host rounds) always wins; the environment kill
+# switch ``MLX2_DFLASH2_DEVICE_ROUND_DEFAULT=0`` turns the default off.
+DFLASH2_DEVICE_ROUND_DEFAULT = {"lazy_draft": True, "decide": True, "processors": True,
+                                "tree_lazy": True, "tree_decide": True}
+DFLASH2_DEVICE_ROUND_KILL_SWITCH = "MLX2_DFLASH2_DEVICE_ROUND_DEFAULT"
+
+
+def is_dflash2_drafter(draft_model):
+    """True for a DFlash2-family drafter (``DFlash2DraftModel`` and subclasses)."""
+    from ..runtime.drafters.dflash2 import DFlash2DraftModel
+
+    return isinstance(draft_model, DFlash2DraftModel)
+
+
+def effective_device_round(adapter):
+    """``(value, source)`` of the device_round option this adapter's engine gets.
+
+    ``source``: ``"execution_policy"`` (the policy names it, including an
+    adapter's own policy default such as Raon's), ``"dflash2_default"``, or
+    None.  ``adapter._device_round_default_refusal()`` may name a route that
+    keeps the host rounds (e.g. a tree-tile executor without device token rows)."""
+    import os
+
+    policy = getattr(adapter, "external_policy", None) or {}
+    if "device_round" in policy:
+        return policy["device_round"], "execution_policy"
+    if not getattr(adapter, "_external_dflash2_drafter", False):
+        return None, None
+    if os.environ.get(DFLASH2_DEVICE_ROUND_KILL_SWITCH, "1") == "0":
+        return None, None
+    refusal = getattr(adapter, "_device_round_default_refusal", None)
+    if callable(refusal) and refusal() is not None:
+        return None, None
+    return dict(DFLASH2_DEVICE_ROUND_DEFAULT), "dflash2_default"
+
+
+def split_device_round_opt_out(policy):
+    """Take an inert ``device_round`` (the DFlash2 default's opt-out) out of an
+    adapter execution policy before the adapter parses it.
+
+    Several adapters validate their external policy against their own key
+    lists, which name no ``device_round``; the serving engine removes an inert
+    value (``false``, ``{}``, all switches off) here and restores it on the
+    loaded adapter (``restore_device_round_opt_out``), so the opt-out works on
+    every adapter.  Any other value is left for the adapter to accept or refuse.
+    Returns ``(policy, opted_out)``."""
+    from ..runtime.speculative_device_round import DeviceRoundPolicy
+
+    if not isinstance(policy, dict) or "device_round" not in policy:
+        return policy, False
+    try:
+        inert = DeviceRoundPolicy.from_value(policy["device_round"]) is None
+    except ValueError:
+        return policy, False  # the adapter reports the invalid value
+    if not inert:
+        return policy, False
+    return {key: value for key, value in policy.items() if key != "device_round"}, True
+
+
+def restore_device_round_opt_out(adapter):
+    """Record the opt-out on an adapter with a bound external drafter."""
+    policy = getattr(adapter, "external_policy", None)
+    if getattr(adapter, "draft_model", None) is not None and isinstance(policy, dict):
+        policy["device_round"] = False
+
+
+def device_round_receipt(adapter):
+    """Route receipt of the effective device_round option, or None when off.
+
+    Off (an opt-out, the kill switch, a refused route, no DFlash2 head) emits
+    nothing, so those routes keep their earlier settings and identity."""
+    from ..runtime.speculative_device_round import VERSION, DeviceRoundPolicy
+
+    value, source = effective_device_round(adapter)
+    policy = DeviceRoundPolicy.from_value(value)
+    if policy is None:
+        return None
+    return {
+        "version": VERSION,
+        "implemented": True,
+        # Exactness and speed evidence on two checkpoints; not a serving
+        # qualification (AGENTS.md: qualification is per checkpoint).
+        "qualified": False,
+        "selected": True,
+        "selection": source,
+        "policy": policy.as_dict(),
+    }
+
+
 COMPOSITION_DEFAULT_SKIPPED_NO_EXACT_LAW = (
     "composition default skipped: backend lacks exact proposal-law support"
 )
@@ -673,6 +774,9 @@ class ExternalDraftAdapterMixin:
                 self.external_policy.get("progressive_verification_fidelity", "exact"),
             )
         self.draft_model = loader(record, self.model)
+        # Before any wrapper (composition, continuation pool): the DFlash2
+        # device_round default (``effective_device_round``) keys on the head.
+        self._external_dflash2_drafter = is_dflash2_drafter(self.draft_model)
         fold_identity = ""
         fold_value = self.external_policy.get("fold")
         if fold_value is not None and fold_value is not False:
@@ -987,7 +1091,9 @@ class ExternalDraftAdapterMixin:
             if progressive_tile == PROGRESSIVE_VERIFICATION_TILE_AUTO
             else None
         )
+        device_round = device_round_receipt(self)
         return {
+            **({"device_round": device_round} if device_round is not None else {}),
             "persistent": True,
             "num_draft": self._external_num_draft(),
             "backend": "external_draft",
@@ -1090,9 +1196,11 @@ class ExternalDraftAdapterMixin:
                 "cost_per_commit_handoff",
                 self.external_policy["cost_per_commit_handoff"],
             )
-        for key in ("device_round", "prompt_copy_round"):
-            if self.external_policy.get(key) not in (None, False):
-                kwargs.setdefault(key, self.external_policy[key])
+        device_round, _source = effective_device_round(self)
+        if device_round not in (None, False):
+            kwargs.setdefault("device_round", device_round)
+        if self.external_policy.get("prompt_copy_round") not in (None, False):
+            kwargs.setdefault("prompt_copy_round", self.external_policy["prompt_copy_round"])
         if "exact_verification" in self.external_policy:
             # Unset is the engine's auto rule (block for sampled device-round
             # ratio rows, token elsewhere); an explicit "token" opts out.

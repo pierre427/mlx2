@@ -11707,6 +11707,15 @@ class ServingEngine(KernelReloadMixin):
                 if self.execution_policy is not None
                 else None
             )
+            # ``"device_round": false`` (the DFlash2 default's opt-out) must work
+            # on adapters whose own policy key lists do not name device_round.
+            from .adapters.external_draft_policy import (
+                restore_device_round_opt_out,
+                split_device_round_opt_out,
+            )
+
+            adapter_execution_policy, device_round_opted_out = split_device_round_opt_out(
+                adapter_execution_policy)
             if not adapter_execution_policy:
                 adapter_execution_policy = None
             factory_kwargs = {}
@@ -11717,6 +11726,8 @@ class ServingEngine(KernelReloadMixin):
                 # it streams before materializing and owns the manager.
                 factory_kwargs["weight_streaming"] = self._weight_stream_request()
             adapter = self.adapter_factory(self.model_path, **factory_kwargs)
+            if device_round_opted_out:
+                restore_device_round_opt_out(adapter)
             # Defensive teardown of request-keyed entries from a prior
             # adapter.  Epoch-namespaced lookups are the exactness boundary;
             # this also releases storage promptly on a lifecycle change.

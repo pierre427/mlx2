@@ -22,6 +22,7 @@ from . import differentiable as _differentiable
 from . import qwen4_fused_gdn as kernels
 from . import qwen4_fused_gdn_prefill as prefill_kernels
 from . import qwen4_fused_gdn_verify as verify_kernels
+from .cache import ArraysCache
 from .gdn_state import check_state
 from ..technologies import linear_recurrence as _lr
 from .qwen3_5 import GatedDeltaNet as ReferenceGatedDeltaNet
@@ -38,6 +39,7 @@ _COUNTER_NAMES = (
     'batch_verify_calls', 'batch_verify_rows', 'batch_verify_tokens',
     'batch_verify_ragged_calls', 'batch_verify_rollbacks',
     'compact_verify_calls', 'compact_rollback_calls',
+    'device_rollbacks', 'reference_device_rollbacks',
     'compact_tape_bytes', 'compact_snapshot_bytes_avoided',
     'prefill_calls', 'prefill_tokens', 'prefill_batch_calls', 'prefill_batch_rows',
     'prefill_chunk_calls', 'prefill_chunk_tokens', 'prefill_norm_eager',
@@ -428,7 +430,29 @@ class GatedDeltaNet(ReferenceGatedDeltaNet):
                         self.fused_gdn_counters['verify_rollbacks'] += 1
                     return [mx.contiguous(conv[:, m - 1]), state[:, m - 1]]
 
-            record(steps, rollback, [cache[0], cache[1]])
+            device_kw = {}
+            if not compact and type(cache) is ArraysCache:
+                # Spec-round DC-4 (``ArraysCache.device_rollback``, called only
+                # by a device-commit transaction): ``rollback`` for a
+                # device-held count, a pure gather of the kernel's own
+                # snapshots (``select_rollback_rows``: 0 keeps the pre-forward
+                # pair, ``steps`` the final one, clamped), so it is bitwise
+                # the host ``rollback``. Staging builds a closure only.
+                initial_pair = (cache[0], cache[1])
+
+                def device_rollback(m, convs=conv_snapshots, states=state_snapshots,
+                                    before=initial_pair, final=(conv, state)):
+                    if account:
+                        self.fused_gdn_counters['verify_rollbacks'] += 1
+                        self.fused_gdn_counters['device_rollbacks'] += 1
+                    counts = (steps,)
+                    return [
+                        _lr.select_rollback_rows(m, counts, convs, before[0], final[0]),
+                        _lr.select_rollback_rows(m, counts, states, before[1], final[1]),
+                    ]
+
+                device_kw['device_fn'] = device_rollback
+            record(steps, rollback, [cache[0], cache[1]], **device_kw)
         cache[0], cache[1] = conv, state
         cache.advance(steps)
         if account:

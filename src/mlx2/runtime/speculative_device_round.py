@@ -52,8 +52,8 @@ calls into this module.  Switches (``device_round`` policy object):
     a miss.  Without this switch such requests keep the host verifier
     (counted decline).
 
-``processors`` (needs ``lazy_draft`` or ``decide``; device_round v2 slice
-    1a-2, design section 4.7)
+``processors`` (needs ``lazy_draft``, ``decide`` or ``tree_lazy``; device_round
+    v2 slice 1a-2, design section 4.7; tree rounds: ``speculative_device_tree``)
     Lanes whose logits processors all declare the stateless branch contract
     (``speculative_topology.processors_branch_safe``: history-pure, no
     mutable state; e.g. the presence penalty that vendor profiles such as
@@ -116,12 +116,24 @@ calls into this module.  Switches (``device_round`` policy object):
     device-built input; one read of tokens with the verify output, the host
     decision and commit unchanged.  Independent of the chain switches; other
     tree rounds keep the host round (counted under
-    ``external_device_tree_decline_reasons``).
+    ``external_device_tree_decline_reasons``).  DFlash2's tree is a
+    data-dependent host search, so its lazy tree keeps that one draft-side
+    read (``host_search``) and its pipelined lattices are served too
+    (``draft_tree_lazy_pipelines``; ``MLX2_TREE_PIPELINE_DRAFT=0`` is the
+    serial arm).  With ``processors``, lanes whose processors are all
+    stateless and history-pure (presence, frequency and repetition penalties)
+    keep the device tree round; each tree row's law is processed on that
+    row's own root-to-node history, as the host tree verifier does.
 ``tree_decide`` (needs ``tree_lazy``; slice 1b-b)
     A greedy tree round's longest accepted path is selected on the device
     (first-matching child per node, the host walk's tie-break) and read in
     the same single read; the host walks only that path (stops, RNG,
     finiteness) and builds the host verifier's ``RoundDecision``.
+``tree_fused`` (needs ``tree_decide``; default off, unqualified)
+    The greedy device tree round's verify input and decision run as two
+    Metal kernels (``speculative_device_tree_fused``) instead of about 30
+    small operations; the host walks the path from the read ``selected``
+    row argmaxes.  Same tokens, RNG draws and response rows.
 
 KV-sharing drafters (``requires_target_caches``: Hy4 DFly2) take part only
 if they declare ``draft_lazy_target_caches``; the lazy draft then receives
@@ -168,8 +180,12 @@ POLICY_KEY = "device_round"
 _SWITCHES = ("lazy_draft", "decide", "sampled_drafts", "nucleus", "processors", "submit_drafts",
              "device_commit", "lagged_width", "pipeline", "fixed_shape", "lagged_composition",
              # ``tree15`` rounds (slices 1b-*): speculative_device_tree.py.
-             "tree_lazy", "tree_decide")
+             "tree_lazy", "tree_decide", "tree_fused")
 _SEED_SCALE = float(1 << 53)
+# Engine reasons (``DeviceRound._engine_reason``) whose chain rounds keep the
+# host verifier under ``decide``.
+_DECIDE_HOST_ENGINES = frozenset({"continuation_pool", "adaptive_verification", "progressive_tiles",
+                                  "ast", "alternative_branches"})
 
 # Present in ``scheduler_stats`` only when the option is configured.
 COUNTERS = (
@@ -220,6 +236,7 @@ class DeviceRoundPolicy:
     lagged_composition: bool = False
     tree_lazy: bool = False
     tree_decide: bool = False
+    tree_fused: bool = False
 
     @classmethod
     def from_value(cls, value):
@@ -241,8 +258,8 @@ class DeviceRoundPolicy:
             raise ValueError(f"{POLICY_KEY}.nucleus requires decide")
         if policy.submit_drafts and not policy.lazy_draft:
             raise ValueError(f"{POLICY_KEY}.submit_drafts requires lazy_draft")
-        if policy.processors and not (policy.lazy_draft or policy.decide):
-            raise ValueError(f"{POLICY_KEY}.processors requires lazy_draft or decide")
+        if policy.processors and not (policy.lazy_draft or policy.decide or policy.tree_lazy):
+            raise ValueError(f"{POLICY_KEY}.processors requires lazy_draft, decide or tree_lazy")
         if policy.device_commit and not (policy.lazy_draft and policy.decide):
             raise ValueError(f"{POLICY_KEY}.device_commit requires lazy_draft and decide")
         if policy.lagged_width and not policy.device_commit:
@@ -260,6 +277,8 @@ class DeviceRoundPolicy:
             raise ValueError(f"{POLICY_KEY}.fixed_shape requires lazy_draft and decide")
         if policy.tree_decide and not policy.tree_lazy:
             raise ValueError(f"{POLICY_KEY}.tree_decide requires tree_lazy")
+        if policy.tree_fused and not policy.tree_decide:
+            raise ValueError(f"{POLICY_KEY}.tree_fused requires tree_decide")
         if not any(getattr(policy, key) for key in _SWITCHES):
             return None
         return policy
@@ -336,6 +355,10 @@ class DeviceRound:
             stats[tree.DECLINES] = {}
             if self.policy.tree_decide:
                 stats[tree.DECIDE_SKIPS] = {}
+            if self.policy.tree_fused:
+                from . import speculative_device_tree_fused as fused
+
+                stats[fused.COUNTER] = 0
         if self.copy is not None:
             self.copy.install_counters(stats)
 
@@ -1043,6 +1066,15 @@ class DeviceRound:
         from .proposal_providers import PointMassLaw
 
         if self.policy is None or not self.policy.decide:
+            return owner._verify(cohort, blocks, logits)
+        engine = self._engine_reason(owner)
+        if engine in _DECIDE_HOST_ENGINES:
+            # The device decision is validated on plain chain and tree15
+            # engines.  Chain rounds of AST, progressive-tile, continuation-
+            # pool, adaptive or alternative-branch engines keep the host
+            # verifier (counted), now that DFlash2 routes select decide by
+            # default (adapters/external_draft_policy.py).
+            _decline(owner, f"decide_{engine}", len(cohort))
             return owner._verify(cohort, blocks, logits)
         if owner.fly_verification.enabled:
             _decline(owner, "fly_verification", len(cohort))

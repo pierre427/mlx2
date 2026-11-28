@@ -759,15 +759,28 @@ class NativeMTPDraftModel:
         if not pattern or hidden.shape[1] == 0 or min(pattern) < 1:
             # The host proposes an empty tree (an ordinary round) here.
             raise LazyDecline("native_mtp_no_seed")
+        grids = []
         pending = self._lazy_tree_pending([int(anchor)], hidden, cache, pattern,
-                                          context_tokens)[0]
+                                          context_tokens, grids=grids)[0]
         if mark is not None:
             mark("tree_draft_build")
         tokens = mx.concatenate([path.reshape(-1) for path in pending]).astype(mx.int32)
-        return LazyTreeProposal(tokens, chain_branch_parents(pattern))
+        grid = grids[0] if grids else None
+        if grid is None:
+            return LazyTreeProposal(tokens, chain_branch_parents(pattern))
+        # ``device_round.tree_fused`` reads the branch grid directly: node
+        # ``(branch, step)`` sits at ``branch * width + step``.
+        width = int(grid.shape[1])
+        index = tuple(branch * width + step
+                      for branch, depth in enumerate(pattern) for step in range(depth))
+        return LazyTreeProposal(tokens, chain_branch_parents(pattern), grid=grid, index=index)
 
-    def _lazy_tree_pending(self, anchors, hidden, cache, pattern, context_tokens):
-        """``_lazy_tree_paths``' branch token arrays per row, unread."""
+    def _lazy_tree_pending(self, anchors, hidden, cache, pattern, context_tokens, *,
+                           grids=None):
+        """``_lazy_tree_paths``' branch token arrays per row, unread.
+
+        ``grids`` (a list, optional) receives each row's ``[branches, depth]``
+        token grid when its branches advanced together, else ``None``."""
         import mlx.core as mx
 
         if context_tokens is None:
@@ -812,6 +825,8 @@ class NativeMTPDraftModel:
                     self.stats["chain_steps"] += 1
                 grid = mx.concatenate(steps, axis=1)
                 pending.append([grid[branch, :depth] for branch, depth in enumerate(pattern)])
+                if grids is not None:
+                    grids.append(grid)
                 self.stats["batched_tree_calls"] = self.stats.get("batched_tree_calls", 0) + 1
                 continue
             branch_tokens = []
@@ -831,6 +846,8 @@ class NativeMTPDraftModel:
                         end(private)
                 branch_tokens.append(mx.concatenate(path, axis=1))
             pending.append(branch_tokens)
+            if grids is not None:
+                grids.append(None)
         return pending
 
     # -- complete paths for the continuation pool ------------------------------

@@ -710,6 +710,100 @@ NATIVE_MTP_TREE_POLICY_KEYS = frozenset({
 
 PROMPT_LOOKUP_DRAFT_NAMES = frozenset({"prompt_lookup", "pld"})
 
+# Generic GPU-resident round options (runtime/speculative_device_round.py,
+# runtime/prompt_copy_round.py), opt-in and unqualified, on both external
+# routes of the Qwen3.8-27B adapter: the DFlash2 drafter and the native-MTP
+# / prompt-lookup tree tiles.  They stay out of EXTERNAL_POLICY_KEYS and
+# NATIVE_MTP_TREE_POLICY_KEYS, which other families reuse without having
+# been checked with these options.
+DEVICE_ROUND_POLICY_KEYS = ("device_round", "prompt_copy_round")
+
+
+def _split_device_round_policy(adapter, policy):
+    """Pop and validate ``device_round``/``prompt_copy_round`` from ``policy``.
+
+    An inert value (``"device_round": false``, the opt-out of the DFlash2
+    default in ``external_draft_policy.effective_device_round``) is admitted
+    on every class.  Any other value only on an adapter class that declares
+    ``external_device_round`` in its own ``__dict__`` (not inherited by the
+    Qwen3.6/Qwen3.5 subclasses, which get the DFlash2 default but no explicit
+    opt-in to further switches), and only beside an external ``draft_model``.
+    Returns the popped values unchanged, for the bound external policy and
+    its receipt.
+    """
+    from ..runtime.prompt_copy_round import PromptCopyPolicy
+    from ..runtime.speculative_device_round import DeviceRoundPolicy
+
+    selected = {key: policy.pop(key) for key in DEVICE_ROUND_POLICY_KEYS if key in policy}
+    if not selected:
+        return {}
+    inert = (DeviceRoundPolicy.from_value(selected.get("device_round")) is None
+             and PromptCopyPolicy.from_value(selected.get("prompt_copy_round")) is None)
+    if not inert and not vars(type(adapter)).get("external_device_round", False):
+        raise ValueError(
+            f"{type(adapter).__name__} has no checked device_round route; "
+            "device_round and prompt_copy_round are refused"
+        )
+    if "draft_model" not in policy:
+        raise ValueError(
+            "device_round and prompt_copy_round require an external draft_model "
+            "(--external-draft or --ast)"
+        )
+    device = DeviceRoundPolicy.from_value(selected.get("device_round"))
+    copy = PromptCopyPolicy.from_value(selected.get("prompt_copy_round"))
+    if device is not None and device.device_commit and copy is not None:
+        # Refused by the engine at construction (speculative_device_round
+        # .install); refused here so the load fails before tensors load.
+        raise ValueError("device_round.device_commit is refused beside prompt_copy_round")
+    return selected
+
+
+def _device_round_receipt(policy, *, selection="execution_policy"):
+    """The selected device-round options and what this adapter's routes do with them.
+
+    ``selection``: ``"execution_policy"`` or ``"dflash2_default"``
+    (``external_draft_policy.effective_device_round``)."""
+    from ..runtime.prompt_copy_round import PromptCopyPolicy
+    from ..runtime.speculative_device_round import VERSION, DeviceRoundPolicy
+
+    device = DeviceRoundPolicy.from_value(policy.get("device_round"))
+    copy = PromptCopyPolicy.from_value(policy.get("prompt_copy_round"))
+    if device is None and copy is None:
+        return None
+    return {
+        "version": VERSION,
+        "implemented": True,
+        "qualified": False,
+        "selected": True,
+        "selection": selection,
+        "policy": None if device is None else device.as_dict(),
+        "prompt_copy_round": None if copy is None else copy.as_dict(),
+        # Declines are counted per round in scheduler_stats
+        # (external_device_round_decline_reasons,
+        # external_device_tree_decline_reasons,
+        # external_device_round_device_commit_skips) and run on the host.
+        # Whether the tree provider takes device token rows is its own
+        # receipt's ``device_tree_inputs`` (Qwen38TargetTreeExecutor); a
+        # subclass's provider may not, and then declines.
+        **(
+            # GDN layers stage a device rollback (Model.
+            # device_commit_recurrent_rollback; False under compact replay,
+            # which then commits on the host with a counted skip).
+            {"device_commit": "device-gdn-rollback-serial"}
+            if device is not None and device.device_commit else {}
+        ),
+        **(
+            # DC-5: full attention rotates at the device KV position
+            # (Model.device_commit_kv_device_position).  The chain route's
+            # default proposal composition wraps the drafter, so a plain
+            # pipeline skips with "composition" unless lagged_composition is
+            # set or proposal_composition is false.
+            {"pipeline": "device-rope-position"
+                         + ("-lagged-composition" if device.lagged_composition else "")}
+            if device is not None and device.pipeline else {}
+        ),
+    }
+
 
 def _prompt_lookup_record(policy, target_fingerprint):
     """Inspection record for the model-free prompt-lookup tree drafter."""
@@ -1403,6 +1497,11 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
     # adapters/qwen38_external_mtp_head.py).  Read from this class's own
     # __dict__: the Qwen3.6 and Qwen3.5 subclasses do not inherit it.
     external_mtp_head = True
+    # ``device_round`` / ``prompt_copy_round`` on the external routes
+    # (_split_device_round_policy).  Own __dict__ only: the Qwen3.6-27B,
+    # Qwen3.6-35B and Qwen3.5-9B subclasses do not inherit it until their
+    # own checkpoints are checked with it.
+    external_device_round = True
 
     @staticmethod
     def is_external_mtp_head(path) -> bool:
@@ -1787,6 +1886,9 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
             if stream_request is not None:
                 raise ValueError("dense weight streaming does not load an external MTP head")
         graft_prompt_lookup = bool(policy.pop("ast_graft_prompt_lookup", False))
+        # Generic GPU-resident round options, split off before the route's
+        # own allowlist and added back to the bound external policy below.
+        device_round_policy = _split_device_round_policy(self, policy)
         if native_tree_draft:
             if require_mtp:
                 raise ValueError("External draft is not native MTP")
@@ -1814,6 +1916,9 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
             policy = {}
         else:
             policy.pop("varlen_dense_mlp", None)
+        # Receipted as given (an explicit ``false`` included); only a
+        # non-inert value reaches the engine (create_external_batch).
+        self.external_policy.update(device_round_policy)
         _validate_tree_gdn_state_dtype(self.external_policy, gdn_state_dtype)
         if set(policy) - {
             "num_draft",
@@ -2462,6 +2567,15 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
             kwargs.setdefault(
                 "exact_verification", self.external_policy["exact_verification"]
             )
+        # The shared builder's forwarding (ExternalDraftAdapterMixin
+        # .create_external_batch); an inert ``false`` stays off.
+        from .external_draft_policy import effective_device_round
+
+        device_round, _source = effective_device_round(self)
+        if device_round not in (None, False):
+            kwargs.setdefault("device_round", device_round)
+        if self.external_policy.get("prompt_copy_round") not in (None, False):
+            kwargs.setdefault("prompt_copy_round", self.external_policy["prompt_copy_round"])
         oracle_path = self.external_policy.get("ast_target_tree_oracle")
         if self.external_policy.get("ast_topology") is not None:
             kwargs.setdefault("ast_topology", self.external_policy["ast_topology"])
@@ -2664,6 +2778,15 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
             config["minimum_draft_proposals"] = self.external_policy.get(
                 "minimum_draft_proposals", min(3, self._external_num_draft())
             )
+            from .external_draft_policy import effective_device_round
+
+            value, source = effective_device_round(self)
+            device_round = _device_round_receipt(
+                {**self.external_policy, **({"device_round": value} if value is not None else {})},
+                selection=source or "execution_policy",
+            )
+            if device_round is not None:
+                config["device_round"] = device_round
             if self.external_policy.get("external_varlen_prefill", False):
                 from ..runtime.prefill_plan import EXTERNAL_VARLEN_PREFILL_IDENTITY
 

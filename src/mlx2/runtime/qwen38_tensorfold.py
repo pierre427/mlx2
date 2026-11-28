@@ -375,19 +375,95 @@ class _PostNormSink:
         return self.rows[0]
 
 
+class _DeviceRowEmbedding:
+    """The trunk's embedding, fed a device token row instead of host ids.
+
+    ``lane_tree.tree_forward`` (vendored, hash-pinned) embeds the tree's host
+    token list once, ``core.embed_tokens(mx.array([tokens]))``, and reads the
+    ids for nothing else.  A device tree round
+    (``speculative_device_tree``, device_round ``tree_lazy``) has its tokens
+    on the device; reading them to the host would add a synchronization the
+    round exists to avoid.  For the duration of one forward this object
+    shadows ``core.embed_tokens``: the first call, which must be that one
+    ``[1, width]`` embedding, embeds the device row instead; any other call
+    (and every attribute, e.g. a tied head's ``as_linear``) goes to the real
+    embedding.  The pinned source is not edited.
+
+    Not thread-safe: the shadow sits on the shared trunk module, so it
+    assumes (as the scheduler does) that one thread owns this model's
+    forward at a time; a concurrent ``[1, width]`` embedding of the same
+    width would read the device row.  Nesting is refused.
+    """
+
+    def __init__(self, embedding, row):
+        self._embedding = embedding
+        self._row = row
+        self.used = False
+
+    def __call__(self, ids):
+        if not self.used:
+            if tuple(ids.shape) != tuple(self._row.shape):
+                raise RuntimeError(
+                    "TensorFold tree embedding is not the device token row's shape"
+                )
+            self.used = True
+            return self._embedding(self._row)
+        return self._embedding(ids)
+
+    def __getattr__(self, name):
+        return getattr(self._embedding, name)
+
+
+class _device_token_row:
+    """Install ``_DeviceRowEmbedding`` on ``core`` for one tree forward."""
+
+    def __init__(self, core, row):
+        self.core = core
+        self.wrapper = _DeviceRowEmbedding(core.embed_tokens, row)
+
+    def __enter__(self):
+        if "embed_tokens" in vars(self.core):
+            raise RuntimeError("TensorFold trunk embedding is already shadowed")
+        # An instance attribute shadows the registered child module for
+        # attribute reads only; parameters and the module tree are unchanged.
+        object.__setattr__(self.core, "embed_tokens", self.wrapper)
+        return self.wrapper
+
+    def __exit__(self, *_exc):
+        object.__delattr__(self.core, "embed_tokens")
+
+
 def _forward(lane_tree, model, tokens, parents, cache, capture_layers, *, cached):
     capture_layers = tuple(int(index) for index in capture_layers)
     storage = _capture_storage(model, capture_layers, cached)
     start = _offset(cache)
+    device_row = None
+    if isinstance(tokens, mx.array):
+        # device_tree_inputs (Qwen38TargetTreeExecutor): a device int32 row.
+        if tokens.ndim != 1 or int(tokens.shape[0]) != len(parents):
+            raise ValueError("TensorFold device token row and parents differ")
+        device_row = tokens.reshape(1, -1).astype(mx.uint32)
+        # Placeholder ids of the same width: the vendored forward only
+        # embeds them, and the embedding reads the device row instead.
+        host_tokens = [0] * int(tokens.shape[0])
+    else:
+        host_tokens = [int(token) for token in tokens]
     with _PostNormSink(lane_tree, _mtp_seed(model)) as sink:
-        logits, record = lane_tree.tree_forward(
-            model.model,
-            model.logits,
-            [int(token) for token in tokens],
-            [int(parent) for parent in parents],
-            cache,
-            start,
-        )
+        if device_row is None:
+            logits, record = lane_tree.tree_forward(
+                model.model, model.logits, host_tokens,
+                [int(parent) for parent in parents], cache, start,
+            )
+        else:
+            with _device_token_row(model.model, device_row) as embedding:
+                logits, record = lane_tree.tree_forward(
+                    model.model, model.logits, host_tokens,
+                    [int(parent) for parent in parents], cache, start,
+                )
+            if not embedding.used:
+                # Restore the cache (the transaction's abort) before refusing.
+                TensorfoldTransaction(lane_tree, cache, record, len(host_tokens), start).abort()
+                raise RuntimeError("TensorFold tree forward did not embed the device token row")
     if sink.enabled:
         features = sink.features()
     else:

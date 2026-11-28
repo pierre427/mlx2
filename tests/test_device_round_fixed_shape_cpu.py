@@ -258,7 +258,7 @@ def test_every_switch_is_either_compatible_or_refused():
                   "lagged_composition",
                   # Tree switches (speculative_device_tree) act on tree15 rounds only,
                   # which never reach the chain's fixed path.
-                  "tree_lazy", "tree_decide"}
+                  "tree_lazy", "tree_decide", "tree_fused"}
     refused = set()
     unknown = set(_SWITCHES) - compatible - refused
     assert not unknown, f"classify new device_round switches for fixed_shape: {sorted(unknown)}"

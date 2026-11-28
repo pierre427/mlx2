@@ -7,6 +7,7 @@ import mlx.core as mx
 import mlx.nn as nn
 from mlx.nn.layers.distributed import sum_gradients
 from .base import BaseModelArgs
+from .cache import ArraysCache
 from . import invariant_prefill as _invariant
 from .gated_delta import gated_delta_update, normalize_gdn_qk  # noqa: F401
 from ..technologies import linear_recurrence as _lr
@@ -344,8 +345,29 @@ class GatedDeltaNet(nn.Module):
                 )
                 return [mx.contiguous(ci[:, m : m + nk, :]), s_m]
 
+            device_kw = {}
+            if type(cache) is ArraysCache and B == 1:
+                # Spec-round DC-4 (``ArraysCache.device_rollback``, only called
+                # by a device-commit transaction): the state after a
+                # device-held count of accepted rows, with no host read. It
+                # is ``_masked_rollback`` (bitwise ``_rollback``'s sliced
+                # replay; tests/test_gpu_accept_count.py), clamped to 0..S
+                # because ``take_along_axis`` is not bounds-checked on the
+                # GPU. Staging builds a closure only; nothing runs unless a
+                # device commit calls it.
+                def _device_rollback(
+                    m, q=q, k=k, v=v, a=a, b=b, S0=state, ci=conv_input
+                ):
+                    counts = self.__dict__.get("fused_gdn_counters")
+                    if counts is not None and "reference_device_rollbacks" in counts:
+                        # Receipt for the fused-route subclass (Qwen3.8).
+                        counts["reference_device_rollbacks"] += 1
+                    m = mx.clip(m.reshape(-1).astype(mx.int32), 0, S)
+                    return self._masked_rollback(m, q, k, v, a, b, S0, ci, use_kernel)
+
+                device_kw["device_fn"] = _device_rollback
             if not _GDN_ARRAY_ACCEPT:
-                cache.record_rollback(S, _rollback, [conv_state, state])
+                cache.record_rollback(S, _rollback, [conv_state, state], **device_kw)
             else:
 
                 def _rollback_rows(
@@ -359,7 +381,8 @@ class GatedDeltaNet(nn.Module):
                     return rows(m) if isinstance(m, mx.array) else sliced(m)
 
                 cache.record_rollback(
-                    S, _rollback_any, [conv_state, state], per_row_fn=_rollback_rows
+                    S, _rollback_any, [conv_state, state], per_row_fn=_rollback_rows,
+                    **device_kw,
                 )
         (out, state) = self._gated_delta_update(
             q,

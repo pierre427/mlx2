@@ -19,6 +19,7 @@ from .base import (
     scaled_dot_product_attention,
 )
 from .cache import ArraysCache, KVCache
+from .device_offset_kv import DeviceOffsetKVCache
 from .pipeline import PipelineMixin
 from .qwen3_5 import TextModelArgs
 from .qwen38_fused_gdn import GatedDeltaNet
@@ -29,6 +30,19 @@ from ..ragged_verify_observation import current_observer, observed_stage
 from ..prefill_checkpoint_rows import select_checkpoint_rows
 from ..prefill_tail_skip import STATS, claim_adapter_tail, tail_skip_mode
 from ..technologies.drafter_blocks import PRE_FC_NORM_FUSION, fuse_mtp_module
+
+
+def _rope_offset(cache):
+    """The rotary offset of ``cache``'s next rows.
+
+    A device-offset KV cache (spec-round DC-1) reports ``rope_offset``: the
+    host offset while its bound is exact, its device fill ``pos`` while a
+    pipelined round (DC-5) verifies over slack. Every other cache keeps its
+    ``offset`` exactly as before.
+    """
+    if type(cache) is DeviceOffsetKVCache:
+        return cache.rope_offset
+    return cache.offset
 
 
 class Qwen3NextAttention(nn.Module):
@@ -117,8 +131,9 @@ class Qwen3NextAttention(nn.Module):
             0, 2, 1, 3
         )
         if cache is not None:
-            queries = self.rope(queries, offset=cache.offset)
-            keys = self.rope(keys, offset=cache.offset)
+            offset = _rope_offset(cache)
+            queries = self.rope(queries, offset=offset)
+            keys = self.rope(keys, offset=offset)
             from .qwen38_shared_draft import SharedDraftKV
             if isinstance(cache, SharedDraftKV):
                 output = cache.append_and_attend(queries, keys, values, self.scale)
@@ -179,8 +194,9 @@ class Qwen3NextAttention(nn.Module):
             0, 2, 1, 3
         )
         if cache is not None:
-            queries = self.rope(queries, offset=cache.offset + (L - 1))
-            keys = self.rope(keys, offset=cache.offset)
+            offset = _rope_offset(cache)
+            queries = self.rope(queries, offset=offset + (L - 1))
+            keys = self.rope(keys, offset=offset)
             (keys, values) = cache.update_and_fetch(keys, values)
         else:
             queries = self.rope(queries, offset=L - 1)
@@ -980,6 +996,58 @@ class Model(nn.Module):
         from .qwen38_state_plane import QWEN38_STATE_PLANE_OPERATIONS
 
         return QWEN38_STATE_PLANE_OPERATIONS
+
+    @property
+    def device_commit_recurrent_rollback(self):
+        """Whether every GDN layer stages a device-count rollback (spec-round DC-4).
+
+        Read only by ``speculative_device_commit.lane_reason`` when a
+        ``device_round.device_commit`` round is requested. A B1 speculative
+        forward over an exact ``ArraysCache`` stages ``device_fn`` on both of
+        this layer's chain verify routes: the fused snapshot verify (a gather
+        of the kernel's snapshots) and the reference recurrence (the masked
+        replay). Compact replay records a reconstruction tape with no device
+        form, so a layer with it enabled keeps the host commit for the lane.
+        """
+        from .qwen38_fused_gdn import GatedDeltaNet as FusedGatedDeltaNet
+
+        layers = [layer.linear_attn for layer in self.language_model.model.layers
+                  if layer.is_linear]
+        return bool(layers) and all(
+            isinstance(gdn, FusedGatedDeltaNet) and not gdn.fused_gdn_compact_replay_enabled
+            for gdn in layers
+        )
+
+    @property
+    def device_commit_kv_device_position(self):
+        """Whether every full-attention layer rotates at the device KV position (DC-5).
+
+        Read only by ``speculative_device_pipeline.skip_reason`` when a
+        ``device_round.pipeline`` round is requested. A pipelined round is
+        verified while the round ahead of it is still in flight, so its
+        device-offset KV caches carry slack and ``offset`` is a bound, not the
+        fill. ``Qwen3NextAttention`` takes its RoPE offset from
+        ``DeviceOffsetKVCache.rope_offset`` (the device fill ``pos`` then), so
+        positions are the serial round's exactly.
+
+        True only while every full-attention layer is that exact class (no
+        class swap such as the row-exact or QSA route, which read ``offset``
+        themselves), its rotary module is a plain ``nn.RoPE`` (``mx.fast.rope``
+        takes an array offset), and no row-exact target executor is installed.
+        """
+        if self.__dict__.get("_mlx2_qwen_hybrid_row_exact") is not None:
+            return False
+        trunk = self.language_model.model
+        if type(trunk) is not Qwen3_5TextModel:
+            return False
+        layers = [layer for layer in trunk.layers if not layer.is_linear]
+        return bool(layers) and all(
+            type(layer) is DecoderLayer
+            and type(layer.self_attn) is Qwen3NextAttention
+            and type(layer.self_attn.rope) is nn.RoPE
+            and not {"_attend", "tail", "__call__"} & set(vars(layer.self_attn))
+            for layer in layers
+        )
 
     @property
     def progressive_external_approximate_protocols(self):
