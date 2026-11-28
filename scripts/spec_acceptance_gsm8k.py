@@ -563,6 +563,8 @@ def main(argv=None):
                         help='JSON merged into every request, e.g. \'{"enable_thinking": false}\'; in --model '
                              'mode an arm\'s own "request" fields override it (the receipt records the merge)')
     parser.add_argument("--max-context", type=int, default=8192)
+    parser.add_argument("--concurrency", type=int, default=1,
+                        help="base-url mode: requests kept in flight (a B>1 cell against a multi-lane server)")
     parser.add_argument("--stop-at", metavar="HH:MM",
                         help="ask no new question after this local time (next occurrence); arms not started are skipped")
     parser.add_argument("--continue-on-arm-failure", action="store_true",
@@ -651,9 +653,10 @@ def main(argv=None):
         status = client.call("/v1/status", timeout=30)
         rows = run_questions(client, served_model_name(status, args.checkpoint), prefix, items, chat=args.chat, chat_shots=chat_shots, instruction=instruction,
                              max_tokens=args.max_tokens, log=progress("server"), sampling=sampling,
-                             request_extra=args.request, deadline=deadline)
+                             request_extra=args.request, deadline=deadline,
+                             concurrency=args.concurrency)
         arm = {"name": "server", "base_url": args.base_url, "startup_status_route": status.get("route_receipt"),
-               "request": args.request or {},
+               "request": args.request or {}, "concurrency": args.concurrency,
                "summary": summarize(rows, args.draft_depth), "rows": [compact(r) for r in rows]}
         receipt["arms"].append(arm)
         write_atomic(path, receipt)
