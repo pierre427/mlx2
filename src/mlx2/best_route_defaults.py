@@ -51,7 +51,8 @@ RULE = {
     "metric": "B1 median decode tok/s; B4 per-rep sum of lane decode tok/s, median over reps",
 }
 STATUSES = frozenset({"selected_unqualified", "kept_current_default", "pending"})
-ROUTE_KINDS = frozenset({"ast", "native_mtp", "prompt_lookup", "ordinary", "adapter_default"})
+ROUTE_KINDS = frozenset({"ast", "native_mtp", "prompt_lookup", "ordinary", "adapter_default",
+                         "external_draft"})
 ROUTE_FLAGS = ("ordinary", "native_mtp", "external_draft", "prompt_lookup", "ast")
 # Options whose meaning depends on the route the operator chose; any of them
 # keeps the operator on today's resolution rather than an auto route.
@@ -237,6 +238,15 @@ def validate_entry(entry: dict) -> None:
             if spec["kind"] == "adapter_default":
                 raise ValueError("the adapter_default fallback cannot be width-keyed")
         drafter = spec.get("drafter")
+        if spec["kind"] == "external_draft":
+            # The external-draft engine on the artifact's own native MTP head
+            # (``draft_model`` = the served artifact): no foreign drafter, so
+            # no pairing or pins. Exact-artifact only, like any default policy.
+            if drafter != "self":
+                raise ValueError("an external_draft best route drafts from the artifact itself (drafter: self)")
+            if "fingerprint" not in entry:
+                raise ValueError("an external_draft best route needs an exact artifact fingerprint")
+            continue
         if isinstance(drafter, dict):
             if spec["kind"] != "ast":
                 raise ValueError("an external drafter is selected through the ast route")
@@ -396,6 +406,12 @@ def _apply_spec(args, spec: dict, adapter_resolution, drafters_cache: dict, root
         return applied
     if kind == "ordinary":
         args.ordinary = True
+        return applied
+    if kind == "external_draft":
+        if Capability.MTP not in capabilities:
+            raise LookupError("artifact has no native MTP head to draft from")
+        args.external_draft = True
+        applied["drafter"] = {"self": True, "path": str(args.model)}
         return applied
     drafter = spec.get("drafter")
     if isinstance(drafter, dict):
@@ -591,6 +607,10 @@ def finish_best_route_default(args, policy):
             defaults = {key: value for key, value in defaults.items() if key not in kept}
             record["route"]["execution_policy"] = dict(defaults)
             record["execution_policy_env_kept"] = kept
+    if record["route"].get("kind") == "external_draft":
+        # The artifact drafts for itself; the adapter's binder checks that
+        # draft_model names the target artifact.
+        defaults = {**(defaults or {}), "draft_model": record["route"]["drafter"]["path"]}
     if defaults:
         # Explicit values (including False and None) always win. The normal
         # adapter validation and cache-identity construction see this policy.

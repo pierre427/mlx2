@@ -419,14 +419,16 @@ class NativeMTPDraftModel:
         if isinstance(anchor, mx.array):
             # The pipelined round's unread anchor cannot close a host pairing.
             raise ValueError("native MTP lazy drafts need a committed host anchor")  # noqa: TRY004
-        if callable(getattr(self.target, "mtp_start_cycle", None)) or callable(
-                getattr(self.target, "mtp_end_cycle", None)):
-            # Cycle hooks (shared index state) are validated only around the
-            # host chain's per-step reads; keep that path (no state touched).
-            raise LazyDecline("native_mtp_cycle_hooks")
         if hidden.shape[1] == 0:
             # No target seed yet (a one-token prompt): the host round serves it.
             raise LazyDecline("native_mtp_no_seed")
+        # Cycle hooks (Flash-Next's QSA shared index state): the host chain
+        # arms them on its private head-cache copy with sharing off before
+        # the chain and releases them after (``draft_distributions``); they
+        # need no host read, so the lazy chain makes the same two calls on
+        # its own private copy and its ops stay the host chain's.
+        cycle_start = getattr(self.target, "mtp_start_cycle", None)
+        cycle_end = getattr(self.target, "mtp_end_cycle", None)
         anchor = int(anchor)
         if context_tokens is None:
             if hidden.shape[1] != 1:
@@ -457,6 +459,23 @@ class NativeMTPDraftModel:
         prefix = (mx.array(list(processor_history or ()) + [anchor], dtype=mx.int32)
                   if processors else None)
         drafted, dead = [], mx.array(False)
+        if callable(cycle_start):
+            cycle_start(private, share_index_state=False)
+        try:
+            out, dead = self._lazy_chain(
+                count, top, seed, private, full_vocab, processors, prefix, sampler, drafted, dead)
+        finally:
+            if callable(cycle_end):
+                cycle_end(private)
+        return mx.where(dead, mx.full((count,), DRAFT_LAZY_HOST_REDO, dtype=mx.int32), out)
+
+    def _lazy_chain(self, count, top, seed, private, full_vocab, processors, prefix, sampler,
+                    drafted, dead):
+        """The lazy chain body of ``draft_lazy`` (``(drafts, dead)``)."""
+        import mlx.core as mx
+
+        from ..processor_probe import probe_logits_processors
+
         for position in range(count):
             if position:
                 top, seed = self._step(
@@ -488,8 +507,7 @@ class NativeMTPDraftModel:
             # A dead position's ``vocab`` sentinel never reaches the processor
             # history or the next head step; the whole draft is redone below.
             drafted.append(mx.where(dead, mx.array(0, dtype=mx.int32), token))
-        out = mx.stack(drafted).astype(mx.int32)
-        return mx.where(dead, mx.full((count,), DRAFT_LAZY_HOST_REDO, dtype=mx.int32), out)
+        return mx.stack(drafted).astype(mx.int32), dead
 
     def draft_packed_paths(
         self, anchors, hidden, cache, pattern, *, context_tokens=None,

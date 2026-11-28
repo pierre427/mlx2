@@ -997,3 +997,86 @@ def test_native_mtp_pool_source_reuses_live_head_stash_and_is_never_auto_admitte
     beam = original(source, missed, 4)
     assert beam and all(len(path.tokens) == 2 for path in beam)
     assert source.stats["history_prefills"] == 1
+
+
+def _bound_device_round(tmp_path, model, *, row_exact=False, **extra):
+    from mlx2.adapters.flash_next import FlashNextAdapter
+    from mlx2.adapters.flash_next_policy import FlashNextPolicy
+
+    adapter = object.__new__(FlashNextAdapter)
+    adapter.model = model
+    adapter.policy = FlashNextPolicy(row_exact_verify=row_exact)
+    adapter.identity = {"fingerprint": "f" * 64}
+    adapter.layout = "qwen4-exp-layer-segments-v1"
+    adapter.external_policy = {}
+    adapter.draft_model = None
+    value = {"draft_model": str(tmp_path), "num_draft": 3,
+             "device_round": {"lazy_draft": True, "decide": True}, **extra}
+    adapter._bind_native_mtp_external(tmp_path, value)
+    return adapter
+
+
+def test_flash_next_native_mtp_device_round_chain_binds_under_the_fast_route_contract(tmp_path):
+    model, _ = tiny_qwen4_mtp()
+    handle = install(model)
+    handle.enable(True)
+    adapter = _bound_device_round(tmp_path, model)
+    assert adapter.identity["fast_route_contract"] == "native_mtp_device_round_chain_v1"
+    assert adapter.identity["ordinary_parity"] is False
+    assert adapter.external_policy["device_round"] == {"lazy_draft": True, "decide": True}
+    assert "progressive_verification_tile" not in adapter.external_policy
+
+
+def test_flash_next_native_mtp_device_round_chain_refuses_rev_and_other_shapes(tmp_path):
+    model, _ = tiny_qwen4_mtp()
+    handle = install(model)
+    handle.enable(True)
+    with pytest.raises(ValueError, match="row_exact_verify: false"):
+        _bound_device_round(tmp_path, model, row_exact=True)
+    # Without a device round the exact progressive route is still required.
+    from mlx2.adapters.flash_next import FlashNextAdapter
+    from mlx2.adapters.flash_next_policy import FlashNextPolicy
+
+    adapter = object.__new__(FlashNextAdapter)
+    adapter.model, adapter.policy = model, FlashNextPolicy(row_exact_verify=False)
+    adapter.identity, adapter.layout = {"fingerprint": "f" * 64}, "qwen4-exp-layer-segments-v1"
+    adapter.external_policy, adapter.draft_model = {}, None
+    with pytest.raises(ValueError, match="progressive_verification_tile"):
+        adapter._bind_native_mtp_external(tmp_path, {"draft_model": str(tmp_path), "num_draft": 3})
+
+
+def test_flash_next_policy_split_routes_device_round_to_the_external_engine():
+    from mlx2.adapters.flash_next import split_native_mtp_external_policy
+
+    native, external = split_native_mtp_external_policy(
+        {"draft_model": "/m", "num_draft": 3, "device_round": {"lazy_draft": True, "decide": True}})
+    assert external["device_round"] == {"lazy_draft": True, "decide": True}
+    assert "device_round" not in (native or {})
+
+
+def test_flash_next_device_round_lazy_draft_runs_with_cycle_hooks_and_matches_host(tmp_path):
+    """Flash-Next's target has MTP cycle hooks; the lazy draft now runs them
+    on its private head cache (as the host chain does) instead of declining,
+    and greedy output is the host-drafted chain's."""
+    def run(device_round):
+        model, _ = tiny_qwen4_mtp()
+        handle = install(model)
+        handle.enable(True)
+        extra = {} if device_round else {"device_round": False}
+        adapter = _bound_device_round(tmp_path, model, **extra) if device_round else None
+        if adapter is None:
+            adapter = _bound_device_round(tmp_path, model, device_round={"lazy_draft": False, "decide": True})
+        batch = adapter.create_external_batch(completion_batch_size=1, prefill_step_size=64,
+                                              ready_drain="all")
+        prompt = [1, 7, 3, 9, 2, 8, 4, 6, 5, 11, 13, 2]
+        batch.insert([prompt], max_tokens=[14], sampling_configs=[{"sampling_temp": 0}])
+        output, _final = drain(batch)
+        stats = batch.scheduler_stats
+        return output[0], stats
+
+    lazy_out, lazy_stats = run(True)
+    host_out, host_stats = run(False)
+    assert lazy_stats["external_device_round_lazy_draft_lanes"] > 0
+    assert "native_mtp_cycle_hooks" not in lazy_stats.get("external_device_round_decline_reasons", {})
+    assert host_stats["external_device_round_lazy_draft_lanes"] == 0
+    assert lazy_out == host_out

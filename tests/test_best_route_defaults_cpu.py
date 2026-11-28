@@ -918,3 +918,54 @@ def test_builder_parses_max_lanes_and_emits_the_adapter_fallback(tmp_path, monke
     assert not skipped and entries[0]["default"]["max_lanes"] == 1
     assert entries[0]["fallback"] == [{"name": "adapter_default", "kind": "adapter_default"}]
     assert "only at `--max-lanes` <= 1" in builder.route_text(entries[0]["default"])
+
+
+# ---------------- Flash-Next GPU-resident device round (Pierre, 2026-11-27) --
+
+FLASH_FP = "25c2da42836b90dd13fc63e1b0d49aa765512de8ff07a22384595bf5b3fd5248"
+
+
+def _flash_resolution(fingerprint=FLASH_FP):
+    from mlx2.adapters.flash_next import FlashNextAdapter
+    return AdapterResolution(FlashNextAdapter, FlashNextAdapter.descriptor,
+                             {"fingerprint": fingerprint, "has_mtp": True})
+
+
+@pytest.mark.parametrize("lanes", [1, 4])
+def test_flash_next_single_lane_default_is_the_device_round(lanes):
+    # "Change the default to on gpu": the external-draft engine on the
+    # artifact's own MTP head with the lazy-draft + decide + processors
+    # device round, single lane; wider servers keep segmented self-MTP.
+    args = _args(model="/m/flash-next", max_lanes=lanes)
+    record = apply_best_route_default(args, _flash_resolution(), table=brd.load_table())
+    policy = brd.finish_best_route_default(args, None)
+    assert record["qualification"] == "unqualified"
+    if lanes == 1:
+        assert record["applied"] and record["default"] == "external_mtp_device_round"
+        assert args.external_draft and not args.native_mtp
+        assert policy == {"num_draft": 3, "draft_model": "/m/flash-next",
+                          "device_round": {"lazy_draft": True, "decide": True, "processors": True}}
+        assert resolve_route_selection(args, policy, _flash_resolution()).route == "external_draft"
+    else:
+        assert record["status"] == "width_keyed_adapter_default" and not record["applied"]
+        assert not args.external_draft and policy is None
+        assert resolve_route_selection(args, policy, _flash_resolution()).route == "native_mtp"
+
+
+def test_flash_next_self_mtp_stays_selectable():
+    args = _args(model="/m/flash-next", max_lanes=1, native_mtp=True)
+    record = apply_best_route_default(args, _flash_resolution(), table=brd.load_table())
+    assert record["status"] == "explicit_route" and not record.get("applied")
+    assert resolve_route_selection(args, None, _flash_resolution()).route == "native_mtp"
+
+
+def test_external_draft_spec_validation():
+    with pytest.raises(ValueError, match="drafter: self"):
+        brd.validate_entry(_entry({"kind": "external_draft"}))
+    entry = _entry({"kind": "external_draft", "drafter": "self"})
+    brd.validate_entry(entry)
+    family = {"family": "Qwen3827BAdapter", "status": "selected_unqualified",
+              "default": {"kind": "external_draft", "drafter": "self"},
+              "reason": "fixture", "evidence": EVIDENCE}
+    with pytest.raises(ValueError, match="exact artifact fingerprint"):
+        brd.validate_entry(family)

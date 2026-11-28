@@ -583,7 +583,8 @@ def route_text(spec: dict) -> str:
     if isinstance(drafter, dict):
         return f"`--ast`, drafter {drafter['name']}@sha256:{drafter['identities'][0][:12]}"
     text = {"ast": "`--ast`", "native_mtp": "`--native-mtp`", "prompt_lookup": "`--prompt-lookup`",
-            "ordinary": "`--ordinary`"}[kind] + (f" drafter={drafter}" if drafter else "")
+            "ordinary": "`--ordinary`",
+            "external_draft": "`--external-draft`"}[kind] + (f" drafter={drafter}" if drafter else "")
     if spec.get("execution_policy"):
         text += f"; policy `{json.dumps(spec['execution_policy'], sort_keys=True)}`"
     if "max_lanes" in spec:

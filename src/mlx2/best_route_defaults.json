@@ -20,6 +20,41 @@
  "campaign": "qualification/runs/best-route-defaults-20261021",
  "entries": [
   {
+   "checkpoint": "Qwen3.8-Flash-Next-Uncensored-MLX2-4bit-MTP@sha256:25c2da42836b90dd13fc63e1b0d49aa765512de8ff07a22384595bf5b3fd5248",
+   "fingerprint": "25c2da42836b90dd13fc63e1b0d49aa765512de8ff07a22384595bf5b3fd5248",
+   "adapter": "FlashNextAdapter",
+   "status": "selected_unqualified",
+   "default": {
+    "name": "external_mtp_device_round",
+    "kind": "external_draft",
+    "drafter": "self",
+    "max_lanes": 1,
+    "execution_policy": {
+     "num_draft": 3,
+     "device_round": {
+      "lazy_draft": true,
+      "decide": true,
+      "processors": true
+     }
+    }
+   },
+   "fallback": [
+    {
+     "name": "adapter_default",
+     "kind": "adapter_default"
+    }
+   ],
+   "reason": "Operator decision: Pierre 2026-11-27 (\"Change the default to on gpu\", relayed by the orchestration session): single-lane serving defaults to the GPU-resident device round (native MTP drafting lazily on the device, device decide, stateless processors on the device) on the external-draft engine with the artifact's own MTP head, num_draft 3; --max-lanes > 1 keeps the adapter default (segmented self-MTP); --native-mtp, any route flag or an execution policy still wins. Fast-route contract: not ordinary-exact (stock chain verify, no REV). Evidence: same-run quiet-host A/B at 256K context, 20 GSM8K chat-fewshot, vendor instruct profile, one lane (e3be85c18): device round lazy+decide+processors 92.1 tok/s, lazy draft and device decide on 711/711 rounds, accuracy 0.95, mean acceptance 3.54; self-MTP default 92.3 tok/s, 0.95, 3.52; external host chain 88.7; ordinary 62.9. B1=B4 token identity not yet checked. Unqualified.",
+   "evidence": {
+    "files": [
+     "docs/research/fn-server-memory-20261127/devround-256k-e3be85c18-r2",
+     "docs/research/2026-11-27-flash-next-server-memory-admission.md"
+    ],
+    "source_revision": "e3be85c18203017fdb9476916fab4cca2dc49f72",
+    "decision_row": true
+   }
+  },
+  {
    "checkpoint": "NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4@sha256:33a6f018b74c1f0da1a5bfd22e241927611c24bb62096719e501e5e1469c046d",
    "fingerprint": "33a6f018b74c1f0da1a5bfd22e241927611c24bb62096719e501e5e1469c046d",
    "adapter": "Nemotron35SuperAdapter",

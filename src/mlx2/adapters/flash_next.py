@@ -43,8 +43,9 @@ DEFAULT_MTP_ORDINARY_HANDOFF_MAX_WIDTH = 3
 
 # External-draft policy keys of the Flash-Next AST route. ``draft_model`` may
 # name the target artifact itself (its native MTP head) or a payload-bound
-# DFlash2 artifact. Only exact progressive verification is offered; any other
-# external option fails closed rather than running an untested feature law.
+# DFlash2 artifact. Exact progressive verification, or (native MTP only) a
+# device-round chain under the fast-route contract; any other external option
+# fails closed rather than running an untested feature law.
 NATIVE_MTP_EXTERNAL_KEYS = frozenset(
     {
         "draft_model",
@@ -64,6 +65,10 @@ NATIVE_MTP_EXTERNAL_KEYS = frozenset(
         "progressive_verification_fidelity",
         "cost_per_commit_handoff",
         "ast_target_tree_oracle",
+        # The GPU-resident device round (fast-route contract, opt-in): the
+        # native-MTP binder accepts it only as a chain without progressive
+        # tiles or REV (``_bind_native_mtp_external``).
+        "device_round",
     }
 )
 
@@ -1149,13 +1154,33 @@ class FlashNextAdapter:
             raise ValueError("this Flash-Next artifact has no native MTP head")
         if value.get("progressive_verification_fidelity", "exact") != "exact":
             raise ValueError("the Flash-Next native-MTP AST route is exact only")
-        if value.get("progressive_verification_tile") is None:
+        packed = value.get("continuation_pool", {}).get("packed_pattern")
+        # Fast-route contract (AGENTS.md, Pierre 2026-11-26/27): a device-round
+        # chain (runtime/speculative_device_round.py) drafts lazily on the GPU
+        # and verifies the chain with the stock multi-row target forward. It
+        # is not ordinary-exact (no REV, no progressive tiles); the contract
+        # requires it to be exact with itself across widths (not yet checked
+        # here) and judges it by GSM8K against ordinary. Unqualified, opt-in.
+        fast_chain = (
+            value.get("device_round") not in (None, False)
+            and value.get("progressive_verification_tile") is None
+            and packed is None
+        )
+        if fast_chain:
+            if self.policy.row_exact_verify:
+                raise ValueError(
+                    "the Flash-Next native-MTP device-round chain verifies with the stock "
+                    "chain forward; set row_exact_verify: false"
+                )
+        elif value.get("progressive_verification_tile") is None:
             raise ValueError(
                 "the Flash-Next native-MTP route requires exact progressive "
-                "verification (progressive_verification_tile)"
+                "verification (progressive_verification_tile), or a device_round "
+                "chain under the fast-route contract"
             )
-        packed = value.get("continuation_pool", {}).get("packed_pattern")
-        if packed is not None:
+        if fast_chain:
+            pass
+        elif packed is not None:
             if self.policy.row_exact_verify or not value.get("ast_target_tree_oracle"):
                 raise ValueError("packed Flash AST requires a numerical oracle and row_exact_verify=false (no REV)")
         elif not self.policy.row_exact_verify:
@@ -1172,7 +1197,10 @@ class FlashNextAdapter:
         )
         External._check_num_draft(self, record)
         self.model.select_external_feature_source("mtp_seed")
-        if packed is not None:
+        if fast_chain:
+            self.identity = {**self.identity, "fast_route_contract": "native_mtp_device_round_chain_v1",
+                             "ordinary_parity": False}
+        elif packed is not None:
             from .flash_next_tree import install_projection_law, install_ast_target_contract
 
             install_projection_law(self.model)
